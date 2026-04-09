@@ -367,11 +367,11 @@ fn render_task_list_panel(
         match app.active_task_view() {
             TaskView::Today => {
                 lines.push(Line::from("No tasks in Today yet."));
-                lines.push(Line::from("Scheduling support will populate this view."));
+                lines.push(Line::from("Tasks due today will appear here."));
             }
             TaskView::Soon => {
                 lines.push(Line::from("No tasks in Soon yet."));
-                lines.push(Line::from("Scheduling support will populate this view."));
+                lines.push(Line::from("Upcoming tasks will appear here."));
             }
             TaskView::All | TaskView::Inbox => {
                 lines.push(Line::from("No tasks yet."));
@@ -410,7 +410,7 @@ fn render_task_details_panel(
     palette: ThemePalette,
 ) {
     let lines = if let Some(task) = app.selected_task() {
-        vec![
+        let mut lines = vec![
             Line::from(vec![Span::styled(
                 format!(
                     "{} {}",
@@ -424,14 +424,28 @@ fn render_task_details_panel(
                 "Created: {}",
                 task.created_at.format("%Y-%m-%d %H:%M")
             )),
-        ]
+        ];
+        if let Some(due) = &task.due {
+            let due_text = due
+                .datetime
+                .map(|datetime| datetime.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
+            lines.push(Line::from(format!("Due: {due_text}")));
+        }
+        lines
     } else {
         match app.active_task_view() {
-            TaskView::Today | TaskView::Soon => vec![
-                Line::from("Scheduling views are wired but empty."),
+            TaskView::Today => vec![
+                Line::from("No task selected."),
                 Line::from(""),
-                Line::from("Due-date support will populate"),
-                Line::from("Today and Soon in a later slice."),
+                Line::from("Tasks due today will appear"),
+                Line::from("here when available."),
+            ],
+            TaskView::Soon => vec![
+                Line::from("No task selected."),
+                Line::from(""),
+                Line::from("Upcoming due tasks will"),
+                Line::from("appear here when available."),
             ],
             TaskView::All | TaskView::Inbox => vec![
                 Line::from("No task selected."),
@@ -783,9 +797,29 @@ fn render_task_input_popup(
     _symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let area = centered_rect(frame.area(), 72, 3);
+    let show_due_preview = input.due_preview.is_some();
+    let total_height = if show_due_preview { 9 } else { 3 };
+    let area = centered_rect(frame.area(), 72, total_height);
     frame.render_widget(Clear, area);
 
+    if show_due_preview {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Length(6)])
+            .split(area);
+        render_task_input_box(frame, sections[0], input, palette);
+        render_task_due_preview(frame, sections[1], input, palette);
+    } else {
+        render_task_input_box(frame, area, input, palette);
+    }
+}
+
+fn render_task_input_box(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    input: &TaskInputView,
+    palette: ThemePalette,
+) {
     let visible_width = area.width.saturating_sub(4) as usize;
     let lines = vec![Line::from(input_window_text(
         &input.value,
@@ -805,6 +839,64 @@ fn render_task_input_popup(
     );
 
     frame.render_widget(popup, area);
+}
+
+fn render_task_due_preview(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    input: &TaskInputView,
+    palette: ThemePalette,
+) {
+    let Some(due_preview) = &input.due_preview else {
+        return;
+    };
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Due Date: ", Style::default().fg(palette.subtle_text)),
+        Span::styled(
+            due_preview.date.format("%Y-%m-%d").to_string(),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    if due_preview.string.to_ascii_lowercase() != due_preview.date.format("%Y-%m-%d").to_string() {
+        lines.push(Line::from(vec![
+            Span::styled("From: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                due_preview.string.clone(),
+                Style::default().fg(palette.text),
+            ),
+        ]));
+    }
+    if let Some(datetime) = due_preview.datetime {
+        lines.push(Line::from(vec![
+            Span::styled("Due Time: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                datetime.format("%H:%M").to_string(),
+                Style::default().fg(palette.text),
+            ),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("Recurring: ", Style::default().fg(palette.subtle_text)),
+        Span::styled(
+            if due_preview.is_recurring {
+                "yes"
+            } else {
+                "no"
+            },
+            Style::default().fg(palette.text),
+        ),
+    ]));
+
+    let panel = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.accent)),
+    );
+
+    frame.render_widget(panel, area);
 }
 
 fn render_delete_confirmation(

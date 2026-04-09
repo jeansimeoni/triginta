@@ -5,8 +5,8 @@ use chrono::{DateTime, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
-    DayHistorySummary, HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task, TaskId,
-    TaskStatus,
+    DayHistorySummary, HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task, TaskDue,
+    TaskId, TaskStatus,
 };
 
 // Keeping the schema as a string literal makes bootstrap simple for this early
@@ -19,7 +19,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     status TEXT NOT NULL DEFAULT 'todo',
     created_at TEXT NOT NULL,
     completed_at TEXT,
-    deleted_at TEXT
+    deleted_at TEXT,
+    due_date TEXT,
+    due_datetime TEXT,
+    due_string TEXT,
+    due_is_recurring INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS pomodoros (
@@ -54,7 +58,7 @@ CREATE TABLE IF NOT EXISTS app_metadata (
 // terms (`Task`, `PomodoroSession`) instead of raw SQL concepts.
 pub trait TaskRepository {
     fn list_all(&self) -> Result<Vec<Task>>;
-    fn create(&self, title: &str, now: DateTime<Local>) -> Result<Task>;
+    fn create(&self, title: &str, due: Option<&TaskDue>, now: DateTime<Local>) -> Result<Task>;
     fn update_title(&self, task_id: TaskId, title: &str) -> Result<Task>;
     fn update_status(
         &self,
@@ -134,6 +138,16 @@ impl Database {
             .execute_batch(SCHEMA)
             .context("failed to initialize database schema")?;
         self.ensure_tasks_column("deleted_at", "ALTER TABLE tasks ADD COLUMN deleted_at TEXT")?;
+        self.ensure_tasks_column("due_date", "ALTER TABLE tasks ADD COLUMN due_date TEXT")?;
+        self.ensure_tasks_column(
+            "due_datetime",
+            "ALTER TABLE tasks ADD COLUMN due_datetime TEXT",
+        )?;
+        self.ensure_tasks_column("due_string", "ALTER TABLE tasks ADD COLUMN due_string TEXT")?;
+        self.ensure_tasks_column(
+            "due_is_recurring",
+            "ALTER TABLE tasks ADD COLUMN due_is_recurring INTEGER NOT NULL DEFAULT 0",
+        )?;
         self.connection
             .execute(
                 "INSERT OR IGNORE INTO app_metadata(key, value) VALUES (?1, ?2)",
@@ -189,7 +203,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         // closure. The closure is conceptually similar to a row-to-struct
         // callback in C, but its return type is checked by the compiler.
         let mut statement = self.connection.prepare(
-            "SELECT id, title, status, created_at, completed_at, deleted_at
+            "SELECT id, title, status, created_at, completed_at, deleted_at, due_date, due_datetime, due_string, due_is_recurring
              FROM tasks
              ORDER BY created_at DESC, id DESC",
         )?;
@@ -202,6 +216,20 @@ impl TaskRepository for SqliteTaskRepository<'_> {
                 created_at: row.get(3)?,
                 completed_at: row.get(4)?,
                 deleted_at: row.get(5)?,
+                due: match (
+                    row.get::<_, Option<chrono::NaiveDate>>(6)?,
+                    row.get::<_, Option<chrono::NaiveDateTime>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(9)?,
+                ) {
+                    (Some(date), datetime, Some(string), is_recurring) => Some(TaskDue {
+                        date,
+                        datetime,
+                        string,
+                        is_recurring: is_recurring != 0,
+                    }),
+                    _ => None,
+                },
             })
         })?;
 
@@ -211,12 +239,21 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             .context("failed to load tasks")
     }
 
-    fn create(&self, title: &str, now: DateTime<Local>) -> Result<Task> {
+    fn create(&self, title: &str, due: Option<&TaskDue>, now: DateTime<Local>) -> Result<Task> {
         self.connection
             .execute(
-                "INSERT INTO tasks(title, status, created_at, completed_at)
-                 VALUES (?1, ?2, ?3, NULL)",
-                params![title, TaskStatus::Todo.as_str(), now],
+                "INSERT INTO tasks(title, status, created_at, completed_at, due_date, due_datetime, due_string, due_is_recurring)
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7)",
+                params![
+                    title,
+                    TaskStatus::Todo.as_str(),
+                    now,
+                    due.map(|due| due.date),
+                    due.and_then(|due| due.datetime),
+                    due.map(|due| due.string.clone()),
+                    due.map(|due| if due.is_recurring { 1_i64 } else { 0_i64 })
+                        .unwrap_or(0_i64),
+                ],
             )
             .context("failed to create task")?;
 
@@ -272,7 +309,7 @@ impl SqliteTaskRepository<'_> {
         self.connection
             .query_row(
                 "SELECT id, title, status, created_at, completed_at
-                 , deleted_at
+                 , deleted_at, due_date, due_datetime, due_string, due_is_recurring
                  FROM tasks
                  WHERE id = ?1",
                 params![task_id.0],
@@ -284,6 +321,20 @@ impl SqliteTaskRepository<'_> {
                         created_at: row.get(3)?,
                         completed_at: row.get(4)?,
                         deleted_at: row.get(5)?,
+                        due: match (
+                            row.get::<_, Option<chrono::NaiveDate>>(6)?,
+                            row.get::<_, Option<chrono::NaiveDateTime>>(7)?,
+                            row.get::<_, Option<String>>(8)?,
+                            row.get::<_, i64>(9)?,
+                        ) {
+                            (Some(date), datetime, Some(string), is_recurring) => Some(TaskDue {
+                                date,
+                                datetime,
+                                string,
+                                is_recurring: is_recurring != 0,
+                            }),
+                            _ => None,
+                        },
                     })
                 },
             )
@@ -496,9 +547,9 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use chrono::Local;
+    use chrono::{Local, NaiveDate};
 
-    use crate::domain::TaskStatus;
+    use crate::domain::{TaskDue, TaskStatus};
 
     use super::{Database, PomodoroRepository, TaskRepository};
 
@@ -534,12 +585,13 @@ mod tests {
     fn task_repository_supports_basic_crud() -> Result<()> {
         let database = Database::open_in_memory()?;
         let repository = database.task_repository();
-        let created = repository.create("Write release notes", Local::now())?;
+        let created = repository.create("Write release notes", None, Local::now())?;
 
         assert_eq!(created.title, "Write release notes");
         assert_eq!(created.status, TaskStatus::Todo);
         assert_eq!(created.completed_at, None);
         assert_eq!(created.deleted_at, None);
+        assert_eq!(created.due, None);
 
         let renamed = repository.update_title(created.id, "Ship release notes")?;
         assert_eq!(renamed.title, "Ship release notes");
@@ -561,6 +613,68 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, created.id);
         assert!(tasks[0].deleted_at.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn task_repository_persists_due_fields() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let repository = database.task_repository();
+        let created = repository.create(
+            "Ship release notes",
+            Some(&TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
+                datetime: None,
+                string: "tomorrow".to_string(),
+                is_recurring: false,
+            }),
+            Local::now(),
+        )?;
+
+        assert_eq!(
+            created.due,
+            Some(TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
+                datetime: None,
+                string: "tomorrow".to_string(),
+                is_recurring: false,
+            })
+        );
+
+        let tasks = repository.list_all()?;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].due, created.due);
+
+        Ok(())
+    }
+
+    #[test]
+    fn task_repository_persists_due_datetime() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let repository = database.task_repository();
+        let due_date = NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date");
+        let due_datetime = due_date.and_hms_opt(15, 0, 0).expect("valid time");
+        let created = repository.create(
+            "Ship release notes",
+            Some(&TaskDue {
+                date: due_date,
+                datetime: Some(due_datetime),
+                string: "tomorrow at 3pm".to_string(),
+                is_recurring: false,
+            }),
+            Local::now(),
+        )?;
+
+        assert_eq!(
+            created.due,
+            Some(TaskDue {
+                date: due_date,
+                datetime: Some(due_datetime),
+                string: "tomorrow at 3pm".to_string(),
+                is_recurring: false,
+            })
+        );
 
         Ok(())
     }

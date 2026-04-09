@@ -7,5 +7,6 @@ pub mod config;
 pub mod domain;
 pub mod integrations;
 pub mod storage;
+pub mod task_nlp;
 pub mod theme;
 pub mod ui;

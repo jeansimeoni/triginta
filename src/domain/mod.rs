@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 
 // Tuple structs are lightweight "newtypes": this is roughly like wrapping an
 // `int64_t` in a dedicated typedef, except Rust keeps it type-safe so a
@@ -44,6 +44,14 @@ impl TaskStatus {
 // is explicit per field. For example `title: String` means the `Task` owns the
 // heap-allocated text and will free it automatically when dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDue {
+    pub date: NaiveDate,
+    pub datetime: Option<NaiveDateTime>,
+    pub string: String,
+    pub is_recurring: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub id: TaskId,
     pub title: String,
@@ -51,6 +59,7 @@ pub struct Task {
     pub created_at: DateTime<Local>,
     pub completed_at: Option<DateTime<Local>>,
     pub deleted_at: Option<DateTime<Local>>,
+    pub due: Option<TaskDue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

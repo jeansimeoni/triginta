@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Local};
+use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -18,6 +18,7 @@ use crate::{
     },
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
     storage::{Database, PomodoroRepository, TaskRepository},
+    task_nlp::parse_task_input,
     theme::ThemePalette,
     ui,
 };
@@ -420,6 +421,15 @@ pub struct TaskInputView {
     pub title: &'static str,
     pub value: String,
     pub cursor: usize,
+    pub due_preview: Option<TaskDuePreviewView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDuePreviewView {
+    pub date: NaiveDate,
+    pub datetime: Option<NaiveDateTime>,
+    pub string: String,
+    pub is_recurring: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -742,13 +752,28 @@ impl App {
     }
 
     pub fn task_input_view(&self) -> Option<TaskInputView> {
-        self.task_input.as_ref().map(|input| TaskInputView {
-            title: match input.mode {
-                TaskInputMode::Create => "New Task",
-                TaskInputMode::Rename(_) => "Rename Task",
-            },
-            value: input.value.clone(),
-            cursor: input.cursor,
+        self.task_input.as_ref().map(|input| {
+            let due_preview = match input.mode {
+                TaskInputMode::Create => parse_task_input(input.value.as_str(), self.today())
+                    .due
+                    .map(|due| TaskDuePreviewView {
+                        date: due.date,
+                        datetime: due.datetime,
+                        string: due.string,
+                        is_recurring: due.is_recurring,
+                    }),
+                TaskInputMode::Rename(_) => None,
+            };
+
+            TaskInputView {
+                title: match input.mode {
+                    TaskInputMode::Create => "New Task",
+                    TaskInputMode::Rename(_) => "Rename Task",
+                },
+                value: input.value.clone(),
+                cursor: input.cursor,
+                due_preview,
+            }
         })
     }
 
@@ -932,10 +957,20 @@ impl App {
         }
     }
 
-    fn task_matches_active_view(&self, _task: &Task) -> bool {
+    fn today(&self) -> NaiveDate {
+        Local::now().date_naive()
+    }
+
+    fn task_matches_active_view(&self, task: &Task) -> bool {
         match self.active_task_view {
-            TaskView::All | TaskView::Inbox => true,
-            TaskView::Today | TaskView::Soon => false,
+            TaskView::All => true,
+            TaskView::Inbox => task.due.is_none(),
+            TaskView::Today => task.due.as_ref().map(|due| due.date) == Some(self.today()),
+            TaskView::Soon => task
+                .due
+                .as_ref()
+                .map(|due| due.date > self.today())
+                .unwrap_or(false),
         }
     }
 
@@ -1252,28 +1287,36 @@ impl App {
 
         match code {
             KeyCode::Esc => {}
-            KeyCode::Enter => {
-                let title = input.value.trim();
-                if title.is_empty() {
-                    self.task_input = Some(input);
-                    return Ok(true);
-                }
+            KeyCode::Enter => match input.mode {
+                TaskInputMode::Create => {
+                    let parsed = parse_task_input(input.value.as_str(), now.date_naive());
+                    if parsed.cleaned_title.is_empty() {
+                        self.task_input = Some(input);
+                        return Ok(true);
+                    }
 
-                match input.mode {
-                    TaskInputMode::Create => {
-                        let task = self.database.task_repository().create(title, now)?;
-                        self.refresh_tasks()?;
-                        self.selected_task_id = Some(task.id);
-                    }
-                    TaskInputMode::Rename(task_id) => {
-                        self.database
-                            .task_repository()
-                            .update_title(task_id, title)?;
-                        self.refresh_tasks()?;
-                        self.selected_task_id = Some(task_id);
-                    }
+                    let task = self.database.task_repository().create(
+                        parsed.cleaned_title.as_str(),
+                        parsed.due.as_ref(),
+                        now,
+                    )?;
+                    self.refresh_tasks()?;
+                    self.selected_task_id = Some(task.id);
                 }
-            }
+                TaskInputMode::Rename(task_id) => {
+                    let title = input.value.trim();
+                    if title.is_empty() {
+                        self.task_input = Some(input);
+                        return Ok(true);
+                    }
+
+                    self.database
+                        .task_repository()
+                        .update_title(task_id, title)?;
+                    self.refresh_tasks()?;
+                    self.selected_task_id = Some(task_id);
+                }
+            },
             KeyCode::Backspace => {
                 Self::delete_input_char_before_cursor(&mut input);
                 self.task_input = Some(input);
@@ -1884,8 +1927,8 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Local};
 
     use crate::config::{AppConfig, GlyphMode, TimerSettings};
-    use crate::domain::TaskStatus;
-    use crate::storage::Database;
+    use crate::domain::{TaskDue, TaskStatus};
+    use crate::storage::{Database, TaskRepository};
     use crate::theme::ThemePalette;
 
     use super::{
@@ -2046,6 +2089,141 @@ mod tests {
             .expect("submit should succeed");
 
         assert_eq!(app.screen_data.tasks[0].title, "Hello World!");
+    }
+
+    #[test]
+    fn create_popup_extracts_due_date_preview_and_stores_due() {
+        let mut app = test_app();
+        let today = app.today();
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Ship report tomorrow".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let input = app.task_input_view().expect("input popup should be open");
+        let due_preview = input.due_preview.expect("due preview should be visible");
+        assert_eq!(due_preview.string, "tomorrow");
+        assert_eq!(due_preview.date, today + chrono::Days::new(1));
+        assert_eq!(due_preview.datetime, None);
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "Ship report");
+        assert_eq!(
+            task.due,
+            Some(TaskDue {
+                date: today + chrono::Days::new(1),
+                datetime: None,
+                string: "tomorrow".to_string(),
+                is_recurring: false,
+            })
+        );
+    }
+
+    #[test]
+    fn create_popup_extracts_due_time_preview_and_stores_datetime() {
+        let mut app = test_app();
+        let tomorrow = app.today() + chrono::Days::new(1);
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Ship report tomorrow at 3pm".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let input = app.task_input_view().expect("input popup should be open");
+        let due_preview = input.due_preview.expect("due preview should be visible");
+        assert_eq!(due_preview.string, "tomorrow at 3pm");
+        assert_eq!(due_preview.date, tomorrow);
+        assert_eq!(
+            due_preview.datetime,
+            Some(tomorrow.and_hms_opt(15, 0, 0).expect("valid time"))
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "Ship report");
+        assert_eq!(
+            task.due,
+            Some(TaskDue {
+                date: tomorrow,
+                datetime: Some(tomorrow.and_hms_opt(15, 0, 0).expect("valid time")),
+                string: "tomorrow at 3pm".to_string(),
+                is_recurring: false,
+            })
+        );
+    }
+
+    #[test]
+    fn task_views_filter_by_due_date() {
+        let mut app = test_app();
+        let today = app.today();
+        let repository = app.database.task_repository();
+
+        repository
+            .create("Inbox task", None, Local::now())
+            .expect("inbox task should create");
+        repository
+            .create(
+                "Today task",
+                Some(&TaskDue {
+                    date: today,
+                    datetime: None,
+                    string: "today".to_string(),
+                    is_recurring: false,
+                }),
+                Local::now(),
+            )
+            .expect("today task should create");
+        repository
+            .create(
+                "Soon task",
+                Some(&TaskDue {
+                    date: today + chrono::Days::new(2),
+                    datetime: None,
+                    string: "next week".to_string(),
+                    is_recurring: false,
+                }),
+                Local::now(),
+            )
+            .expect("soon task should create");
+
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.set_active_task_view(TaskView::All);
+        assert_eq!(app.visible_tasks().len(), 3);
+
+        app.set_active_task_view(TaskView::Inbox);
+        let inbox_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(inbox_titles, vec!["Inbox task"]);
+
+        app.set_active_task_view(TaskView::Today);
+        let today_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(today_titles, vec!["Today task"]);
+
+        app.set_active_task_view(TaskView::Soon);
+        let soon_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(soon_titles, vec!["Soon task"]);
     }
 
     #[test]
