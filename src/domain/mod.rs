@@ -12,10 +12,9 @@ pub struct PomodoroId(pub i64);
 // Enums in Rust are tagged unions built into the language.
 // This is much closer to "an enum plus guaranteed exhaustive handling" than a
 // plain C enum, because `match` must cover every variant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
     Todo,
-    InProgress,
     Done,
 }
 
@@ -26,7 +25,6 @@ impl TaskStatus {
         // in C. No allocation happens here.
         match self {
             Self::Todo => "todo",
-            Self::InProgress => "in_progress",
             Self::Done => "done",
         }
     }
@@ -36,7 +34,6 @@ impl TaskStatus {
         // `String`. This function reads the input and returns an owned enum
         // value, so there are no lifetime issues for the caller to manage.
         match value {
-            "in_progress" => Self::InProgress,
             "done" => Self::Done,
             _ => Self::Todo,
         }

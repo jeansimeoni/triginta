@@ -53,6 +53,15 @@ CREATE TABLE IF NOT EXISTS app_metadata (
 // terms (`Task`, `PomodoroSession`) instead of raw SQL concepts.
 pub trait TaskRepository {
     fn list_all(&self) -> Result<Vec<Task>>;
+    fn create(&self, title: &str, now: DateTime<Local>) -> Result<Task>;
+    fn update_title(&self, task_id: TaskId, title: &str) -> Result<Task>;
+    fn update_status(
+        &self,
+        task_id: TaskId,
+        status: TaskStatus,
+        completed_at: Option<DateTime<Local>>,
+    ) -> Result<Task>;
+    fn delete(&self, task_id: TaskId) -> Result<()>;
 }
 
 pub trait PomodoroRepository {
@@ -176,6 +185,81 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         // `Result<Vec<Task>>`, stopping early if any row conversion fails.
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .context("failed to load tasks")
+    }
+
+    fn create(&self, title: &str, now: DateTime<Local>) -> Result<Task> {
+        self.connection
+            .execute(
+                "INSERT INTO tasks(title, status, created_at, completed_at)
+                 VALUES (?1, ?2, ?3, NULL)",
+                params![title, TaskStatus::Todo.as_str(), now],
+            )
+            .context("failed to create task")?;
+
+        let task_id = TaskId(self.connection.last_insert_rowid());
+        self.load_task(task_id)?
+            .context("created task could not be reloaded")
+    }
+
+    fn update_title(&self, task_id: TaskId, title: &str) -> Result<Task> {
+        self.connection
+            .execute(
+                "UPDATE tasks SET title = ?1 WHERE id = ?2",
+                params![title, task_id.0],
+            )
+            .with_context(|| format!("failed to rename task {}", task_id.0))?;
+
+        self.load_task(task_id)?
+            .context("renamed task could not be reloaded")
+    }
+
+    fn update_status(
+        &self,
+        task_id: TaskId,
+        status: TaskStatus,
+        completed_at: Option<DateTime<Local>>,
+    ) -> Result<Task> {
+        self.connection
+            .execute(
+                "UPDATE tasks
+                 SET status = ?1, completed_at = ?2
+                 WHERE id = ?3",
+                params![status.as_str(), completed_at, task_id.0],
+            )
+            .with_context(|| format!("failed to update task status for {}", task_id.0))?;
+
+        self.load_task(task_id)?
+            .context("updated task could not be reloaded")
+    }
+
+    fn delete(&self, task_id: TaskId) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM tasks WHERE id = ?1", params![task_id.0])
+            .with_context(|| format!("failed to delete task {}", task_id.0))?;
+        Ok(())
+    }
+}
+
+impl SqliteTaskRepository<'_> {
+    fn load_task(&self, task_id: TaskId) -> Result<Option<Task>> {
+        self.connection
+            .query_row(
+                "SELECT id, title, status, created_at, completed_at
+                 FROM tasks
+                 WHERE id = ?1",
+                params![task_id.0],
+                |row| {
+                    Ok(Task {
+                        id: TaskId(row.get(0)?),
+                        title: row.get(1)?,
+                        status: TaskStatus::from_db(row.get::<_, String>(2)?.as_str()),
+                        created_at: row.get(3)?,
+                        completed_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load task")
     }
 }
 
@@ -375,6 +459,8 @@ mod tests {
     use anyhow::Result;
     use chrono::Local;
 
+    use crate::domain::TaskStatus;
+
     use super::{Database, PomodoroRepository, TaskRepository};
 
     #[test]
@@ -401,6 +487,37 @@ mod tests {
         assert_eq!(stats.total_work_seconds, 0);
         assert_eq!(stats.total_break_seconds, 0);
         assert_eq!(stats.completed_tasks, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn task_repository_supports_basic_crud() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let repository = database.task_repository();
+        let created = repository.create("Write release notes", Local::now())?;
+
+        assert_eq!(created.title, "Write release notes");
+        assert_eq!(created.status, TaskStatus::Todo);
+        assert_eq!(created.completed_at, None);
+
+        let renamed = repository.update_title(created.id, "Ship release notes")?;
+        assert_eq!(renamed.title, "Ship release notes");
+        assert_eq!(renamed.status, TaskStatus::Todo);
+
+        let completed_at = Local::now();
+        let completed =
+            repository.update_status(created.id, TaskStatus::Done, Some(completed_at))?;
+        assert_eq!(completed.status, TaskStatus::Done);
+        assert_eq!(completed.completed_at, Some(completed_at));
+
+        let tasks = repository.list_all()?;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, created.id);
+        assert_eq!(tasks[0].title, "Ship release notes");
+
+        repository.delete(created.id)?;
+        assert!(repository.list_all()?.is_empty());
 
         Ok(())
     }

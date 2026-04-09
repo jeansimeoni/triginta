@@ -12,7 +12,10 @@ use tracing::info;
 
 use crate::{
     config::{AppConfig, AppPaths, GlyphMode, TimerSettings, init_tracing, load_app_config},
-    domain::{DayHistorySummary, HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task},
+    domain::{
+        DayHistorySummary, HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task, TaskId,
+        TaskStatus,
+    },
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
     storage::{Database, PomodoroRepository, TaskRepository},
     theme::ThemePalette,
@@ -31,6 +34,52 @@ pub struct RunOptions {
 pub enum RightPanelTab {
     Tasks,
     Statistics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskView {
+    All,
+    Inbox,
+    Today,
+    Soon,
+}
+
+impl TaskView {
+    const ALL: [Self; 4] = [Self::All, Self::Inbox, Self::Today, Self::Soon];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Inbox => "Inbox",
+            Self::Today => "Today",
+            Self::Soon => "Soon",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::All => 0,
+            Self::Inbox => 1,
+            Self::Today => 2,
+            Self::Soon => 3,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self::ALL[index.min(Self::ALL.len().saturating_sub(1))]
+    }
+
+    fn next(self) -> Self {
+        Self::from_index((self.index() + 1).min(Self::ALL.len().saturating_sub(1)))
+    }
+
+    fn previous(self) -> Self {
+        Self::from_index(self.index().saturating_sub(1))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +388,30 @@ pub struct ScreenData {
     pub weekly_stats: HistoryStats,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskInputMode {
+    Create,
+    Rename(TaskId),
+}
+
+#[derive(Debug, Clone)]
+struct TaskInputState {
+    mode: TaskInputMode,
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskInputView {
+    pub title: &'static str,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteConfirmationView {
+    pub task_id: TaskId,
+    pub task_title: String,
+}
+
 // `App` owns the mutable runtime state for the TUI loop.
 // Compared with a C program, this is the central state struct you would pass
 // around to input/render functions, but here methods are attached directly to
@@ -349,11 +422,15 @@ pub struct App {
     timer_settings: TimerSettings,
     active_right_panel_tab: RightPanelTab,
     active_history_panel_tab: HistoryPanelTab,
+    active_task_view: TaskView,
     focused_panel: PanelFocus,
     glyph_mode: GlyphMode,
     theme: ThemePalette,
     timer: TimerState,
     history_scroll: usize,
+    selected_task_id: Option<TaskId>,
+    task_input: Option<TaskInputState>,
+    delete_confirmation: Option<TaskId>,
     should_quit: bool,
     status_message: String,
     screen_data: ScreenData,
@@ -368,20 +445,26 @@ impl App {
         database: Database,
     ) -> Self {
         let long_break_interval = timer_settings.long_break_interval;
-        Self {
+        let mut app = Self {
             database,
             timer_settings,
             active_right_panel_tab: RightPanelTab::Tasks,
             active_history_panel_tab: HistoryPanelTab::Today,
+            active_task_view: TaskView::All,
             focused_panel: PanelFocus::Timer,
             glyph_mode,
             theme,
             timer: TimerState::new(long_break_interval),
             history_scroll: 0,
+            selected_task_id: None,
+            task_input: None,
+            delete_confirmation: None,
             should_quit: false,
             status_message: "SQLite initialized. Local-first mode active.".to_string(),
             screen_data,
-        }
+        };
+        app.sync_task_selection();
+        app
     }
 
     pub fn active_right_panel_tab(&self) -> RightPanelTab {
@@ -394,6 +477,10 @@ impl App {
 
     pub fn focused_panel(&self) -> PanelFocus {
         self.focused_panel
+    }
+
+    pub fn active_task_view(&self) -> TaskView {
+        self.active_task_view
     }
 
     pub fn should_quit(&self) -> bool {
@@ -410,6 +497,46 @@ impl App {
 
     pub fn status_message(&self) -> &str {
         &self.status_message
+    }
+
+    pub fn visible_tasks(&self) -> Vec<&Task> {
+        self.screen_data
+            .tasks
+            .iter()
+            .filter(|task| self.task_matches_active_view(task))
+            .collect()
+    }
+
+    pub fn selected_task(&self) -> Option<&Task> {
+        self.selected_task_id.and_then(|task_id| {
+            self.screen_data
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id && self.task_matches_active_view(task))
+        })
+    }
+
+    pub fn task_input_view(&self) -> Option<TaskInputView> {
+        self.task_input.as_ref().map(|input| TaskInputView {
+            title: match input.mode {
+                TaskInputMode::Create => "New Task",
+                TaskInputMode::Rename(_) => "Rename Task",
+            },
+            value: input.value.clone(),
+        })
+    }
+
+    pub fn delete_confirmation_view(&self) -> Option<DeleteConfirmationView> {
+        let task_id = self.delete_confirmation?;
+        let task = self
+            .screen_data
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)?;
+        Some(DeleteConfirmationView {
+            task_id,
+            task_title: task.title.clone(),
+        })
     }
 
     pub fn screen_data(&self) -> &ScreenData {
@@ -442,6 +569,196 @@ impl App {
         }
     }
 
+    fn task_matches_active_view(&self, _task: &Task) -> bool {
+        match self.active_task_view {
+            TaskView::All | TaskView::Inbox => true,
+            TaskView::Today | TaskView::Soon => false,
+        }
+    }
+
+    fn visible_task_ids(&self) -> Vec<TaskId> {
+        self.screen_data
+            .tasks
+            .iter()
+            .filter(|task| self.task_matches_active_view(task))
+            .map(|task| task.id)
+            .collect()
+    }
+
+    fn sync_task_selection(&mut self) {
+        let visible_ids = self.visible_task_ids();
+        self.selected_task_id = match self.selected_task_id {
+            Some(selected_task_id) if visible_ids.contains(&selected_task_id) => {
+                Some(selected_task_id)
+            }
+            _ => visible_ids.first().copied(),
+        };
+    }
+
+    fn refresh_tasks(&mut self) -> Result<()> {
+        self.screen_data.tasks = self.database.task_repository().list_all()?;
+        self.sync_task_selection();
+        Ok(())
+    }
+
+    fn set_active_task_view(&mut self, view: TaskView) {
+        self.active_task_view = view;
+        self.sync_task_selection();
+        self.status_message = format!("Task view: {}.", view.label());
+    }
+
+    fn select_next_task_view(&mut self) {
+        self.set_active_task_view(self.active_task_view.next());
+    }
+
+    fn select_previous_task_view(&mut self) {
+        self.set_active_task_view(self.active_task_view.previous());
+    }
+
+    fn move_task_selection(&mut self, offset: isize) {
+        let visible_ids = self.visible_task_ids();
+        if visible_ids.is_empty() {
+            self.selected_task_id = None;
+            return;
+        }
+
+        let current_index = self
+            .selected_task_id
+            .and_then(|selected_task_id| {
+                visible_ids
+                    .iter()
+                    .position(|task_id| *task_id == selected_task_id)
+            })
+            .unwrap_or(0);
+        let next_index = (current_index as isize + offset)
+            .clamp(0, visible_ids.len().saturating_sub(1) as isize)
+            as usize;
+        self.selected_task_id = visible_ids.get(next_index).copied();
+    }
+
+    fn open_create_task_popup(&mut self) {
+        self.task_input = Some(TaskInputState {
+            mode: TaskInputMode::Create,
+            value: String::new(),
+        });
+        self.status_message = "Enter a new task title.".to_string();
+    }
+
+    fn open_rename_task_popup(&mut self) {
+        let Some(task) = self.selected_task().cloned() else {
+            self.status_message = "Select a task to rename.".to_string();
+            return;
+        };
+
+        self.task_input = Some(TaskInputState {
+            mode: TaskInputMode::Rename(task.id),
+            value: task.title,
+        });
+        self.status_message = "Editing selected task title.".to_string();
+    }
+
+    fn open_delete_confirmation(&mut self) {
+        let Some(task_id) = self.selected_task_id else {
+            self.status_message = "Select a task to delete.".to_string();
+            return;
+        };
+
+        self.delete_confirmation = Some(task_id);
+        self.status_message = "Confirm task deletion.".to_string();
+    }
+
+    fn toggle_selected_task_status(&mut self, now: DateTime<Local>) -> Result<()> {
+        let Some(task) = self.selected_task().cloned() else {
+            self.status_message = "Select a task to update.".to_string();
+            return Ok(());
+        };
+
+        let next_status = match task.status {
+            TaskStatus::Todo => TaskStatus::Done,
+            TaskStatus::Done => TaskStatus::Todo,
+        };
+        let completed_at = if next_status == TaskStatus::Done {
+            Some(now)
+        } else {
+            None
+        };
+
+        self.database
+            .task_repository()
+            .update_status(task.id, next_status, completed_at)?;
+        self.refresh_tasks()?;
+        self.selected_task_id = Some(task.id);
+        self.status_message = format!("Task marked {}.", next_status.as_str());
+        Ok(())
+    }
+
+    fn handle_task_overlay_key(&mut self, code: KeyCode, now: DateTime<Local>) -> Result<bool> {
+        if let Some(task_id) = self.delete_confirmation {
+            match code {
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    self.database.task_repository().delete(task_id)?;
+                    self.delete_confirmation = None;
+                    self.refresh_tasks()?;
+                    self.status_message = "Task deleted.".to_string();
+                }
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    self.delete_confirmation = None;
+                    self.status_message = "Task deletion canceled.".to_string();
+                }
+                _ => {}
+            }
+            return Ok(true);
+        }
+
+        let Some(mut input) = self.task_input.take() else {
+            return Ok(false);
+        };
+
+        match code {
+            KeyCode::Esc => {
+                self.status_message = "Task input canceled.".to_string();
+            }
+            KeyCode::Enter => {
+                let title = input.value.trim();
+                if title.is_empty() {
+                    self.task_input = Some(input);
+                    self.status_message = "Task title cannot be empty.".to_string();
+                    return Ok(true);
+                }
+
+                match input.mode {
+                    TaskInputMode::Create => {
+                        let task = self.database.task_repository().create(title, now)?;
+                        self.refresh_tasks()?;
+                        self.selected_task_id = Some(task.id);
+                        self.status_message = "Task created.".to_string();
+                    }
+                    TaskInputMode::Rename(task_id) => {
+                        self.database
+                            .task_repository()
+                            .update_title(task_id, title)?;
+                        self.refresh_tasks()?;
+                        self.selected_task_id = Some(task_id);
+                        self.status_message = "Task renamed.".to_string();
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                input.value.pop();
+                self.task_input = Some(input);
+            }
+            KeyCode::Char(character) => {
+                input.value.push(character);
+                self.task_input = Some(input);
+            }
+            _ => {
+                self.task_input = Some(input);
+            }
+        }
+
+        Ok(true)
+    }
+
     pub fn handle_key(&mut self, code: KeyCode) -> Result<()> {
         self.handle_key_at(code, Local::now())
     }
@@ -450,7 +767,14 @@ impl App {
         // `&mut self` is exclusive access: while this method runs, no other
         // code can also mutate the app state. This prevents a whole class of
         // aliasing bugs that are easy to create in C.
+        if self.handle_task_overlay_key(code, now)? {
+            return Ok(());
+        }
+
         match code {
+            KeyCode::Char('c') => {
+                self.open_create_task_popup();
+            }
             KeyCode::Char('q') => {
                 if self.timer.run_state == TimerRunState::Running {
                     self.record_voided_entry(now)?;
@@ -533,6 +857,48 @@ impl App {
                 if self.active_history_panel_tab == HistoryPanelTab::Today {
                     self.history_scroll = self.max_history_scroll();
                 }
+            }
+            KeyCode::Char('j') | KeyCode::Down if self.focused_panel == PanelFocus::Navigation => {
+                self.select_next_task_view();
+            }
+            KeyCode::Char('k') | KeyCode::Up if self.focused_panel == PanelFocus::Navigation => {
+                self.select_previous_task_view();
+            }
+            KeyCode::Home if self.focused_panel == PanelFocus::Navigation => {
+                self.set_active_task_view(TaskView::All);
+            }
+            KeyCode::End if self.focused_panel == PanelFocus::Navigation => {
+                self.set_active_task_view(TaskView::Soon);
+            }
+            KeyCode::Char('j') | KeyCode::Down
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.move_task_selection(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.move_task_selection(-1);
+            }
+            KeyCode::Char('e')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.open_rename_task_popup();
+            }
+            KeyCode::Char('d')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.open_delete_confirmation();
+            }
+            KeyCode::Char('x') | KeyCode::Char(' ')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.toggle_selected_task_status(now)?;
             }
             KeyCode::Char('s') | KeyCode::Char(' ') | KeyCode::Enter
                 if self.focused_panel == PanelFocus::Timer =>
@@ -904,12 +1270,13 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Local};
 
     use crate::config::{AppConfig, GlyphMode, TimerSettings};
+    use crate::domain::TaskStatus;
     use crate::storage::Database;
     use crate::theme::ThemePalette;
 
     use super::{
         App, CycleEntryState, HistoryPanelTab, PanelFocus, RightPanelTab, RunOptions, ScreenData,
-        TimerPhase, TimerRunState, apply_debug_overrides, chrono_duration,
+        TaskView, TimerPhase, TimerRunState, apply_debug_overrides, chrono_duration,
         duration_to_stored_minutes,
     };
 
@@ -934,6 +1301,7 @@ mod tests {
         assert!(!app.should_quit());
         assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
         assert_eq!(app.active_history_panel_tab(), HistoryPanelTab::Today);
+        assert_eq!(app.active_task_view(), TaskView::All);
         assert_eq!(app.glyph_mode(), GlyphMode::NerdFonts);
         assert_eq!(
             app.theme(),
@@ -986,6 +1354,109 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Left)
             .expect("history tab should switch back");
         assert_eq!(app.active_history_panel_tab(), HistoryPanelTab::Today);
+    }
+
+    #[test]
+    fn app_switches_task_views_from_navigation_panel() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('3'))
+            .expect("focus should switch");
+
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("task view should switch");
+        assert_eq!(app.active_task_view(), TaskView::Inbox);
+
+        app.handle_key(crossterm::event::KeyCode::End)
+            .expect("task view should jump");
+        assert_eq!(app.active_task_view(), TaskView::Soon);
+    }
+
+    #[test]
+    fn app_creates_and_renames_task_through_popup_flow() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+
+        for character in "Write tests".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        assert_eq!(app.screen_data.tasks.len(), 1);
+        assert_eq!(
+            app.selected_task().expect("task should be selected").title,
+            "Write tests"
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("rename popup should open");
+        for _ in 0.."Write tests".len() {
+            app.handle_key(crossterm::event::KeyCode::Backspace)
+                .expect("backspace should work");
+        }
+        for character in "Ship tests".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("rename should submit");
+
+        assert_eq!(app.screen_data.tasks[0].title, "Ship tests");
+    }
+
+    #[test]
+    fn app_requires_delete_confirmation() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Clean inbox".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        app.handle_key(crossterm::event::KeyCode::Char('d'))
+            .expect("delete dialog should open");
+        app.handle_key(crossterm::event::KeyCode::Char('n'))
+            .expect("delete should cancel");
+        assert_eq!(app.screen_data.tasks.len(), 1);
+
+        app.handle_key(crossterm::event::KeyCode::Char('d'))
+            .expect("delete dialog should open");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("delete should confirm");
+        assert!(app.screen_data.tasks.is_empty());
+    }
+
+    #[test]
+    fn app_toggles_selected_task_status() {
+        let mut app = test_app();
+        let now = Local::now();
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Review task flow".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
+            .expect("status should toggle");
+        assert_eq!(app.screen_data.tasks[0].status, TaskStatus::Done);
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+            .expect("status should toggle");
+        assert_eq!(app.screen_data.tasks[0].status, TaskStatus::Todo);
     }
 
     #[test]

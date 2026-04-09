@@ -3,12 +3,15 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 
 use crate::{
     app::{
-        App, CycleEntryState, HistoryPanelTab, PanelFocus, RightPanelTab, ScreenData, TimerPhase,
+        App, CycleEntryState, DeleteConfirmationView, HistoryPanelTab, PanelFocus, RightPanelTab,
+        ScreenData, TaskInputView, TaskView, TimerPhase,
     },
     config::GlyphMode,
     domain::{DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
@@ -25,6 +28,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
     render_body(frame, app, layout[0], symbols, palette);
     render_status(frame, app, layout[1], palette);
+    render_task_overlay(frame, app, symbols, palette);
 }
 
 fn render_body(
@@ -62,7 +66,14 @@ fn render_left_column(
 
     render_timer_panel(frame, app, sections[0], symbols, palette);
     render_history_panel(frame, app, sections[1], symbols, palette);
-    render_navigation_panel(frame, sections[2], symbols, app.focused_panel(), palette);
+    render_navigation_panel(
+        frame,
+        app,
+        sections[2],
+        symbols,
+        app.focused_panel(),
+        palette,
+    );
     render_favorites_panel(
         frame,
         app.screen_data(),
@@ -81,14 +92,9 @@ fn render_right_panel(
     palette: ThemePalette,
 ) {
     match app.active_right_panel_tab() {
-        RightPanelTab::Tasks => render_tasks_workspace(
-            frame,
-            app.screen_data(),
-            area,
-            symbols,
-            app.focused_panel(),
-            palette,
-        ),
+        RightPanelTab::Tasks => {
+            render_tasks_workspace(frame, app, area, symbols, app.focused_panel(), palette)
+        }
         RightPanelTab::Statistics => render_statistics_panel(
             frame,
             app.screen_data(),
@@ -102,7 +108,7 @@ fn render_right_panel(
 
 fn render_tasks_workspace(
     frame: &mut Frame<'_>,
-    data: &ScreenData,
+    app: &App,
     area: Rect,
     symbols: Symbols,
     focused_panel: PanelFocus,
@@ -113,8 +119,8 @@ fn render_tasks_workspace(
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    render_task_list_panel(frame, data, sections[0], symbols, focused_panel, palette);
-    render_task_details_panel(frame, data, sections[1], symbols, palette);
+    render_task_list_panel(frame, app, sections[0], symbols, focused_panel, palette);
+    render_task_details_panel(frame, app, sections[1], symbols, palette);
 }
 
 fn render_timer_panel(
@@ -263,24 +269,44 @@ fn render_history_panel(
 
 fn render_navigation_panel(
     frame: &mut Frame<'_>,
+    app: &App,
     area: Rect,
     symbols: Symbols,
     focused_panel: PanelFocus,
     palette: ThemePalette,
 ) {
-    let content = Paragraph::new(vec![
-        navigation_line(&format!("{} Inbox", symbols.selected), true, palette),
-        navigation_line(&format!("{} Today", symbols.unselected), false, palette),
-        navigation_line(&format!("{} Soon", symbols.unselected), false, palette),
-        Line::from(""),
-        Line::from("Branch-style tab switching can be wired next."),
-    ])
-    .block(panel_block(
-        navigation_title(symbols, palette),
-        focused_panel == PanelFocus::Navigation,
-        palette,
+    let content_width = area.width.saturating_sub(2);
+    let lines = TaskView::all()
+        .iter()
+        .map(|view| {
+            let selected = app.active_task_view() == *view;
+            selectable_line(
+                &format!("{} {}", task_view_symbol(*view, symbols), view.label()),
+                selected,
+                content_width,
+                palette,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let task_count = app.visible_tasks().len();
+    let summary = Line::from(format!(
+        "{}  |  {} tasks",
+        app.active_task_view().label(),
+        task_count
     ))
-    .wrap(Wrap { trim: true });
+    .right_aligned();
+
+    let content = Paragraph::new(lines)
+        .block(
+            panel_block(
+                navigation_title(symbols, palette),
+                focused_panel == PanelFocus::Navigation,
+                palette,
+            )
+            .title_bottom(summary),
+        )
+        .wrap(Wrap { trim: true });
 
     frame.render_widget(content, area);
 }
@@ -318,30 +344,41 @@ fn render_favorites_panel(
 
 fn render_task_list_panel(
     frame: &mut Frame<'_>,
-    data: &ScreenData,
+    app: &App,
     area: Rect,
     symbols: Symbols,
     focused_panel: PanelFocus,
     palette: ThemePalette,
 ) {
-    let mut lines = vec![
-        Line::from(vec![Span::styled(
-            format!("{} All Tasks", symbols.tasks),
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(""),
-    ];
+    let visible_tasks = app.visible_tasks();
+    let content_width = area.width.saturating_sub(2);
+    let mut lines = vec![];
 
-    if data.tasks.is_empty() {
-        lines.push(Line::from("No tasks yet."));
-        lines.push(Line::from(
-            "All tasks will show here when nothing is selected.",
-        ));
+    if visible_tasks.is_empty() {
+        match app.active_task_view() {
+            TaskView::Today => {
+                lines.push(Line::from("No tasks in Today yet."));
+                lines.push(Line::from("Scheduling support will populate this view."));
+            }
+            TaskView::Soon => {
+                lines.push(Line::from("No tasks in Soon yet."));
+                lines.push(Line::from("Scheduling support will populate this view."));
+            }
+            TaskView::All | TaskView::Inbox => {
+                lines.push(Line::from("No tasks yet."));
+                lines.push(Line::from("Press c to create your first task."));
+            }
+        }
     } else {
-        for task in data.tasks.iter().take(12) {
-            lines.push(Line::from(format_task_summary(task, symbols)));
+        for task in visible_tasks.iter().take(12) {
+            let selected = app.selected_task().map(|selected| selected.id) == Some(task.id);
+            lines.push(task_summary_line(
+                task,
+                symbols,
+                palette,
+                selected,
+                content_width,
+            ));
         }
     }
 
@@ -358,34 +395,42 @@ fn render_task_list_panel(
 
 fn render_task_details_panel(
     frame: &mut Frame<'_>,
-    data: &ScreenData,
+    app: &App,
     area: Rect,
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let lines = if let Some(task) = first_active_task(data.tasks.as_slice()) {
+    let lines = if let Some(task) = app.selected_task() {
         vec![
             Line::from(vec![Span::styled(
-                &task.title,
+                format!(
+                    "{} {}",
+                    task_status_symbol(task.status, symbols),
+                    task.title
+                ),
                 Style::default().add_modifier(Modifier::BOLD),
             )]),
             Line::from(""),
-            Line::from(format!("Status: {}", task.status.as_str())),
             Line::from(format!(
                 "Created: {}",
                 task.created_at.format("%Y-%m-%d %H:%M")
             )),
-            Line::from(""),
-            Line::from("Description, comments, labels,"),
-            Line::from("and scheduling metadata will render here."),
         ]
     } else {
-        vec![
-            Line::from("No task selected."),
-            Line::from(""),
-            Line::from("Task details will fill this pane once"),
-            Line::from("task selection is wired."),
-        ]
+        match app.active_task_view() {
+            TaskView::Today | TaskView::Soon => vec![
+                Line::from("Scheduling views are wired but empty."),
+                Line::from(""),
+                Line::from("Due-date support will populate"),
+                Line::from("Today and Soon in a later slice."),
+            ],
+            TaskView::All | TaskView::Inbox => vec![
+                Line::from("No task selected."),
+                Line::from(""),
+                Line::from("Create a task with c to start"),
+                Line::from("filling this workspace."),
+            ],
+        }
     };
 
     let details = Paragraph::new(lines)
@@ -401,6 +446,13 @@ fn render_task_details_panel(
         .wrap(Wrap { trim: true });
 
     frame.render_widget(details, area);
+}
+
+fn task_status_symbol(status: TaskStatus, symbols: Symbols) -> &'static str {
+    match status {
+        TaskStatus::Todo => symbols.todo,
+        TaskStatus::Done => symbols.done,
+    }
 }
 
 fn render_statistics_panel(
@@ -461,7 +513,7 @@ fn render_statistics_panel(
 
 fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, palette: ThemePalette) {
     let message = format!(
-        "{}  |  1-5: focus panel  tab: cycle focus  h/l or ←/→: switch tabs  j/k or ↑/↓: scroll today  s/space: start  p: pause  x: void  q: quit",
+        "{}  |  1-5: focus panel  tab: cycle focus  j/k or ↑/↓: navigate panels  c/e/d: task CRUD  space/x: toggle task or void timer  q: quit",
         app.status_message()
     );
 
@@ -476,10 +528,6 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, palette: ThemePal
     frame.render_widget(status, area);
 }
 
-fn first_active_task(tasks: &[Task]) -> Option<&Task> {
-    tasks.iter().find(|task| task.status != TaskStatus::Done)
-}
-
 fn favorite_tasks(tasks: &[Task]) -> Vec<&Task> {
     tasks
         .iter()
@@ -488,14 +536,100 @@ fn favorite_tasks(tasks: &[Task]) -> Vec<&Task> {
         .collect()
 }
 
-fn format_task_summary(task: &Task, symbols: Symbols) -> String {
+fn task_summary_line(
+    task: &Task,
+    symbols: Symbols,
+    palette: ThemePalette,
+    selected: bool,
+    width: u16,
+) -> Line<'static> {
     let marker = match task.status {
         TaskStatus::Todo => symbols.todo,
-        TaskStatus::InProgress => symbols.in_progress,
         TaskStatus::Done => symbols.done,
     };
+    selectable_line(
+        &format!("{marker} {}", task.title),
+        selected,
+        width,
+        palette,
+    )
+}
 
-    format!("{marker} {}", task.title)
+fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palette: ThemePalette) {
+    if let Some(input) = app.task_input_view() {
+        render_task_input_popup(frame, &input, symbols, palette);
+        return;
+    }
+
+    if let Some(confirmation) = app.delete_confirmation_view() {
+        render_delete_confirmation(frame, &confirmation, palette);
+    }
+}
+
+fn render_task_input_popup(
+    frame: &mut Frame<'_>,
+    input: &TaskInputView,
+    _symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let area = centered_rect(frame.area(), 72, 3);
+    frame.render_widget(Clear, area);
+
+    let lines = vec![Line::from(input.value.as_str())];
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                input.title,
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.accent)),
+    );
+
+    frame.render_widget(popup, area);
+}
+
+fn render_delete_confirmation(
+    frame: &mut Frame<'_>,
+    confirmation: &DeleteConfirmationView,
+    palette: ThemePalette,
+) {
+    let area = centered_rect(frame.area(), 64, 6);
+    frame.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from("Delete this task permanently?"),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("\"{}\"", confirmation.task_title),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Enter/Y confirm  Esc/N cancel"),
+    ];
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                "Delete Task",
+                Style::default()
+                    .fg(palette.error)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.error)),
+    );
+
+    frame.render_widget(popup, area);
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let popup_width = width.min(area.width.saturating_sub(2)).max(1);
+    let popup_height = height.min(area.height.saturating_sub(2)).max(1);
+    let x = area.x + area.width.saturating_sub(popup_width) / 2;
+    let y = area.y + area.height.saturating_sub(popup_height) / 2;
+    Rect::new(x, y, popup_width, popup_height)
 }
 
 #[derive(Debug, Clone)]
@@ -668,19 +802,40 @@ fn history_title(active_tab: HistoryPanelTab, palette: ThemePalette) -> Line<'st
     ])
 }
 
-fn navigation_line(label: &str, selected: bool, palette: ThemePalette) -> Line<'static> {
-    if selected {
-        Line::from(vec![Span::styled(
-            label.to_string(),
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )])
+fn selectable_line(
+    label: &str,
+    selected: bool,
+    width: u16,
+    palette: ThemePalette,
+) -> Line<'static> {
+    let style = if selected {
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.border)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Line::from(vec![Span::styled(
-            label.to_string(),
-            Style::default().fg(palette.text),
-        )])
+        Style::default().fg(palette.text)
+    };
+
+    let text = format!("  {label}");
+    let mut spans = vec![Span::styled(text, style)];
+    if selected {
+        let current_width = Line::from(spans.clone()).width();
+        let padding = (width as usize).saturating_sub(current_width);
+        if padding > 0 {
+            spans.push(Span::styled(" ".repeat(padding), style));
+        }
+    }
+
+    Line::from(spans)
+}
+
+fn task_view_symbol(view: TaskView, symbols: Symbols) -> &'static str {
+    match view {
+        TaskView::All => symbols.tasks,
+        TaskView::Inbox => symbols.inbox,
+        TaskView::Today => symbols.today,
+        TaskView::Soon => symbols.soon,
     }
 }
 
@@ -841,10 +996,11 @@ struct Symbols {
     navigation: &'static str,
     favorite: &'static str,
     tasks: &'static str,
+    inbox: &'static str,
+    today: &'static str,
+    soon: &'static str,
     details: &'static str,
     stats: &'static str,
-    selected: &'static str,
-    unselected: &'static str,
     todo: &'static str,
     in_progress: &'static str,
     breaking: &'static str,
@@ -862,10 +1018,11 @@ impl Symbols {
                 navigation: ">",
                 favorite: "*",
                 tasks: "#",
+                inbox: "I",
+                today: "T",
+                soon: "S",
                 details: ">",
                 stats: "%",
-                selected: ">",
-                unselected: "-",
                 todo: ".",
                 in_progress: ">",
                 breaking: "~",
@@ -879,10 +1036,11 @@ impl Symbols {
                 navigation: "󰆍",
                 favorite: "󰓎",
                 tasks: "󰄱",
+                inbox: "󰏆",
+                today: "󰃰",
+                soon: "󰸘",
                 details: "󰋼",
                 stats: "󰕾",
-                selected: "󰁔",
-                unselected: "󰘍",
                 todo: "󰄱",
                 in_progress: "󰧞",
                 breaking: "󰒲",
