@@ -19,6 +19,7 @@ use crate::{
     domain::{DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
     theme::ThemePalette,
 };
+use chrono::{Local, NaiveDate};
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let symbols = Symbols::new(app.glyph_mode());
@@ -431,6 +432,10 @@ fn render_task_details_panel(
                 .map(|datetime| datetime.format("%Y-%m-%d %H:%M").to_string())
                 .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
             lines.push(Line::from(format!("Due: {due_text}")));
+            lines.push(Line::from(format!(
+                "Recurring: {}",
+                if due.is_recurring { "yes" } else { "no" }
+            )));
         }
         lines
     } else {
@@ -620,12 +625,71 @@ fn task_summary_line(
         TaskStatus::Todo => symbols.todo,
         TaskStatus::Done => symbols.done,
     };
-    selectable_line(
-        &format!("{marker} {}", task.title),
-        selected,
-        width,
-        palette,
-    )
+    let now = Local::now();
+    let due_text = task
+        .due
+        .as_ref()
+        .map(|due| format_due_label(due, now.date_naive()));
+    let recurring_marker = task
+        .due
+        .as_ref()
+        .filter(|due| due.is_recurring)
+        .map(|_| symbols.recurring);
+    let leading_padding = 2usize;
+    let due_gap = if due_text.is_some() { 2usize } else { 0usize };
+
+    let due_meta_width = due_text
+        .as_ref()
+        .map(|text| {
+            text.width()
+                + recurring_marker
+                    .map(|marker| marker.width() + 1)
+                    .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    let left_width = (width as usize)
+        .saturating_sub(leading_padding)
+        .saturating_sub(due_meta_width)
+        .saturating_sub(due_gap);
+    let title_text = ellipsize_end(&format!("{marker} {}", task.title), left_width);
+
+    let row_style = task_row_style(task, palette, selected);
+    let due_style = task_due_style(task, palette, selected, now);
+    let recurring_style = task_recurring_style(task, palette, selected, now);
+    let mut spans = vec![
+        Span::styled(" ".repeat(leading_padding), row_style),
+        Span::styled(title_text, row_style),
+    ];
+
+    if due_meta_width > 0 {
+        let current_width = Line::from(spans.clone()).width();
+        let padding = (width as usize)
+            .saturating_sub(due_meta_width)
+            .saturating_sub(current_width);
+        if padding > 0 {
+            spans.push(Span::styled(" ".repeat(padding), row_style));
+        } else if due_gap > 0 {
+            spans.push(Span::styled(" ".repeat(due_gap), row_style));
+        }
+
+        if let Some(recurring) = recurring_marker {
+            spans.push(Span::styled(recurring.to_string(), recurring_style));
+            spans.push(Span::styled(" ".to_string(), row_style));
+        }
+        if let Some(text) = due_text {
+            spans.push(Span::styled(text, due_style));
+        }
+    }
+
+    if selected {
+        let current_width = Line::from(spans.clone()).width();
+        let padding = (width as usize).saturating_sub(current_width);
+        if padding > 0 {
+            spans.push(Span::styled(" ".repeat(padding), row_style));
+        }
+    }
+
+    Line::from(spans)
 }
 
 fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palette: ThemePalette) {
@@ -860,15 +924,6 @@ fn render_task_due_preview(
                 .add_modifier(Modifier::BOLD),
         ),
     ])];
-    if due_preview.string.to_ascii_lowercase() != due_preview.date.format("%Y-%m-%d").to_string() {
-        lines.push(Line::from(vec![
-            Span::styled("From: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(
-                due_preview.string.clone(),
-                Style::default().fg(palette.text),
-            ),
-        ]));
-    }
     if let Some(datetime) = due_preview.datetime {
         lines.push(Line::from(vec![
             Span::styled("Due Time: ", Style::default().fg(palette.subtle_text)),
@@ -889,6 +944,28 @@ fn render_task_due_preview(
             Style::default().fg(palette.text),
         ),
     ]));
+    if due_preview.string.to_ascii_lowercase()
+        != due_preview
+            .datetime
+            .map(|_| {
+                format!(
+                    "{} {}",
+                    due_preview.date.format("%Y-%m-%d"),
+                    due_preview.datetime.expect("checked above").format("%H:%M")
+                )
+            })
+            .unwrap_or_else(|| due_preview.date.format("%Y-%m-%d").to_string())
+    {
+        lines.push(Line::from(vec![
+            Span::styled("From: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                due_preview.string.clone(),
+                Style::default()
+                    .fg(palette.subtle_text)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ]));
+    }
 
     let panel = Paragraph::new(lines).block(
         Block::default()
@@ -1497,6 +1574,7 @@ struct Symbols {
     soon: &'static str,
     details: &'static str,
     stats: &'static str,
+    recurring: &'static str,
     todo: &'static str,
     in_progress: &'static str,
     breaking: &'static str,
@@ -1519,6 +1597,7 @@ impl Symbols {
                 soon: "S",
                 details: ">",
                 stats: "%",
+                recurring: "~",
                 todo: ".",
                 in_progress: ">",
                 breaking: "~",
@@ -1537,6 +1616,7 @@ impl Symbols {
                 soon: "󰸘",
                 details: "󰋼",
                 stats: "󰕾",
+                recurring: "󰑖",
                 todo: "󰄱",
                 in_progress: "󰧞",
                 breaking: "󰒲",
@@ -1546,5 +1626,100 @@ impl Symbols {
                 bar_empty: "░",
             },
         }
+    }
+}
+
+fn task_row_style(task: &Task, palette: ThemePalette, selected: bool) -> Style {
+    let base = if selected {
+        Style::default()
+            .bg(palette.border)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    match task.status {
+        TaskStatus::Done => base.fg(palette.subtle_text).add_modifier(Modifier::DIM),
+        TaskStatus::Todo => base.fg(palette.text),
+    }
+}
+
+fn task_due_style(
+    task: &Task,
+    palette: ThemePalette,
+    selected: bool,
+    now: chrono::DateTime<Local>,
+) -> Style {
+    let base = if selected {
+        Style::default()
+            .bg(palette.border)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    if task_is_overdue(task, now) {
+        base.fg(palette.error)
+    } else if task.status == TaskStatus::Done {
+        base.fg(palette.subtle_text).add_modifier(Modifier::DIM)
+    } else {
+        base.fg(palette.accent)
+    }
+}
+
+fn task_recurring_style(
+    task: &Task,
+    palette: ThemePalette,
+    selected: bool,
+    now: chrono::DateTime<Local>,
+) -> Style {
+    let base = if selected {
+        Style::default()
+            .bg(palette.border)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    if task_is_overdue(task, now) {
+        base.fg(palette.error)
+    } else if task.status == TaskStatus::Done {
+        base.fg(palette.subtle_text).add_modifier(Modifier::DIM)
+    } else {
+        base.fg(palette.timer_short_break)
+    }
+}
+
+fn task_is_overdue(task: &Task, now: chrono::DateTime<Local>) -> bool {
+    let Some(due) = &task.due else {
+        return false;
+    };
+    if task.status == TaskStatus::Done {
+        return false;
+    }
+
+    if let Some(datetime) = due.datetime {
+        datetime < now.naive_local()
+    } else {
+        due.date < now.date_naive()
+    }
+}
+
+fn format_due_label(due: &crate::domain::TaskDue, today: NaiveDate) -> String {
+    let day_label = match (due.date - today).num_days() {
+        0 => "today".to_string(),
+        1 => "tomorrow".to_string(),
+        -1 => "yesterday".to_string(),
+        2..=6 => format!("in {} days", (due.date - today).num_days()),
+        -6..=-2 => format!("{} days ago", (today - due.date).num_days()),
+        7..=13 => "next week".to_string(),
+        -13..=-7 => "last week".to_string(),
+        _ => due.date.format("%Y-%m-%d").to_string(),
+    };
+
+    if let Some(datetime) = due.datetime {
+        format!("{day_label} {}", datetime.format("%H:%M"))
+    } else {
+        day_label
     }
 }

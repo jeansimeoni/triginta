@@ -329,6 +329,12 @@ fn parse_time_token(token: &str) -> Option<NaiveTime> {
         return None;
     }
 
+    match token {
+        "noon" => return NaiveTime::from_hms_opt(12, 0, 0),
+        "midnight" => return NaiveTime::from_hms_opt(0, 0, 0),
+        _ => {}
+    }
+
     if let Some(value) = token.strip_suffix("am") {
         return parse_meridiem_time(value, false);
     }
@@ -833,6 +839,50 @@ mod tests {
                 datetime: Some(reference_date.and_hms_opt(9, 0, 0).expect("valid time"),),
                 string: "every day at 9am".to_string(),
                 is_recurring: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_due_time_at_noon() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 9).expect("valid date");
+        let parsed = parse_task_input("Submit report tomorrow at noon", reference_date);
+
+        assert_eq!(parsed.cleaned_title, "Submit report");
+        assert_eq!(
+            parsed.due,
+            Some(TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
+                datetime: Some(
+                    NaiveDate::from_ymd_opt(2026, 4, 10)
+                        .expect("valid date")
+                        .and_hms_opt(12, 0, 0)
+                        .expect("valid time"),
+                ),
+                string: "tomorrow at noon".to_string(),
+                is_recurring: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_due_time_at_midnight() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 9).expect("valid date");
+        let parsed = parse_task_input("Reset counters tomorrow at midnight", reference_date);
+
+        assert_eq!(parsed.cleaned_title, "Reset counters");
+        assert_eq!(
+            parsed.due,
+            Some(TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
+                datetime: Some(
+                    NaiveDate::from_ymd_opt(2026, 4, 10)
+                        .expect("valid date")
+                        .and_hms_opt(0, 0, 0)
+                        .expect("valid time"),
+                ),
+                string: "tomorrow at midnight".to_string(),
+                is_recurring: false,
             })
         );
     }
