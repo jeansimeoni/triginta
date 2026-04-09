@@ -539,7 +539,7 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, palette: ThemePal
 fn favorite_tasks(tasks: &[Task]) -> Vec<&Task> {
     tasks
         .iter()
-        .filter(|task| task.status != TaskStatus::Done)
+        .filter(|task| task.deleted_at.is_none() && task.status != TaskStatus::Done)
         .take(3)
         .collect()
 }
@@ -618,19 +618,20 @@ fn render_delete_confirmation(
     frame.render_widget(Clear, area);
 
     let lines = vec![
-        Line::from("Delete this task permanently?"),
+        Line::from("Remove this task from active lists?"),
         Line::from(""),
         Line::from(Span::styled(
             format!("\"{}\"", confirmation.task_title),
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
+        Line::from("History links will be preserved."),
         Line::from("Enter/Y confirm  Esc/N cancel"),
     ];
     let popup = Paragraph::new(lines).block(
         Block::default()
             .title(Span::styled(
-                "Delete Task",
+                "Remove Task",
                 Style::default()
                     .fg(palette.error)
                     .add_modifier(Modifier::BOLD),

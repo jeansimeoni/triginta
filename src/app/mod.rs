@@ -540,16 +540,17 @@ impl App {
         self.screen_data
             .tasks
             .iter()
-            .filter(|task| self.task_matches_active_view(task))
+            .filter(|task| self.task_is_active(task) && self.task_matches_active_view(task))
             .collect()
     }
 
     pub fn selected_task(&self) -> Option<&Task> {
         self.selected_task_id.and_then(|task_id| {
-            self.screen_data
-                .tasks
-                .iter()
-                .find(|task| task.id == task_id && self.task_matches_active_view(task))
+            self.screen_data.tasks.iter().find(|task| {
+                task.id == task_id
+                    && self.task_is_active(task)
+                    && self.task_matches_active_view(task)
+            })
         })
     }
 
@@ -644,11 +645,15 @@ impl App {
         }
     }
 
+    fn task_is_active(&self, task: &Task) -> bool {
+        task.deleted_at.is_none()
+    }
+
     fn visible_task_ids(&self) -> Vec<TaskId> {
         self.screen_data
             .tasks
             .iter()
-            .filter(|task| self.task_matches_active_view(task))
+            .filter(|task| self.task_is_active(task) && self.task_matches_active_view(task))
             .map(|task| task.id)
             .collect()
     }
@@ -666,7 +671,12 @@ impl App {
     fn refresh_tasks(&mut self) -> Result<()> {
         self.screen_data.tasks = self.database.task_repository().list_all()?;
         if let Some(task_id) = self.assigned_task_id {
-            if !self.screen_data.tasks.iter().any(|task| task.id == task_id) {
+            if !self
+                .screen_data
+                .tasks
+                .iter()
+                .any(|task| task.id == task_id && self.task_is_active(task))
+            {
                 self.assigned_task_id = None;
             }
         }
@@ -718,7 +728,7 @@ impl App {
         self.screen_data
             .tasks
             .iter()
-            .filter(|task| fuzzy_matches(query, task.title.as_str()))
+            .filter(|task| self.task_is_active(task) && fuzzy_matches(query, task.title.as_str()))
             .collect()
     }
 
@@ -962,7 +972,7 @@ impl App {
                     self.database.task_repository().delete(task_id)?;
                     self.delete_confirmation = None;
                     self.refresh_tasks()?;
-                    self.status_message = "Task deleted.".to_string();
+                    self.status_message = "Task removed from active lists.".to_string();
                 }
                 KeyCode::Esc | KeyCode::Char('n') => {
                     self.delete_confirmation = None;
@@ -1801,7 +1811,50 @@ mod tests {
             .expect("delete dialog should open");
         app.handle_key(crossterm::event::KeyCode::Enter)
             .expect("delete should confirm");
-        assert!(app.screen_data.tasks.is_empty());
+        assert_eq!(app.screen_data.tasks.len(), 1);
+        assert!(app.screen_data.tasks[0].deleted_at.is_some());
+        assert!(app.visible_tasks().is_empty());
+    }
+
+    #[test]
+    fn deleted_task_stays_available_for_history_resolution() {
+        let mut app = test_app();
+        let now = Local::now();
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Historical task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+        let task_id = app.selected_task().expect("task should be selected").id;
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("assignment should toggle on");
+        app.handle_key(crossterm::event::KeyCode::Char('1'))
+            .expect("focus should switch");
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('x'),
+            now + ChronoDuration::seconds(5),
+        )
+        .expect("focus should void");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('d'))
+            .expect("delete dialog should open");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("delete should confirm");
+
+        assert!(app.visible_tasks().is_empty());
+        assert!(app.assigned_task().is_none());
+        assert_eq!(app.screen_data.history_entries[0].task_id, Some(task_id));
+        assert_eq!(app.screen_data.tasks[0].title, "Historical task");
+        assert!(app.screen_data.tasks[0].deleted_at.is_some());
     }
 
     #[test]

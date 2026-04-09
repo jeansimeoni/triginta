@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     title TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'todo',
     created_at TEXT NOT NULL,
-    completed_at TEXT
+    completed_at TEXT,
+    deleted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS pomodoros (
@@ -132,12 +133,33 @@ impl Database {
         self.connection
             .execute_batch(SCHEMA)
             .context("failed to initialize database schema")?;
+        self.ensure_tasks_deleted_at_column()?;
         self.connection
             .execute(
                 "INSERT OR IGNORE INTO app_metadata(key, value) VALUES (?1, ?2)",
                 params!["schema_version", "1"],
             )
             .context("failed to initialize app metadata")?;
+        Ok(())
+    }
+
+    fn ensure_tasks_deleted_at_column(&self) -> Result<()> {
+        let mut statement = self
+            .connection
+            .prepare("PRAGMA table_info(tasks)")
+            .context("failed to inspect task schema")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read task schema")?;
+
+        if columns.iter().any(|column| column == "deleted_at") {
+            return Ok(());
+        }
+
+        self.connection
+            .execute("ALTER TABLE tasks ADD COLUMN deleted_at TEXT", [])
+            .context("failed to add deleted_at column to tasks")?;
         Ok(())
     }
 
@@ -167,7 +189,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         // closure. The closure is conceptually similar to a row-to-struct
         // callback in C, but its return type is checked by the compiler.
         let mut statement = self.connection.prepare(
-            "SELECT id, title, status, created_at, completed_at
+            "SELECT id, title, status, created_at, completed_at, deleted_at
              FROM tasks
              ORDER BY created_at DESC, id DESC",
         )?;
@@ -179,6 +201,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
                 status: TaskStatus::from_db(row.get::<_, String>(2)?.as_str()),
                 created_at: row.get(3)?,
                 completed_at: row.get(4)?,
+                deleted_at: row.get(5)?,
             })
         })?;
 
@@ -235,8 +258,11 @@ impl TaskRepository for SqliteTaskRepository<'_> {
 
     fn delete(&self, task_id: TaskId) -> Result<()> {
         self.connection
-            .execute("DELETE FROM tasks WHERE id = ?1", params![task_id.0])
-            .with_context(|| format!("failed to delete task {}", task_id.0))?;
+            .execute(
+                "UPDATE tasks SET deleted_at = ?1 WHERE id = ?2",
+                params![Local::now(), task_id.0],
+            )
+            .with_context(|| format!("failed to soft-delete task {}", task_id.0))?;
         Ok(())
     }
 }
@@ -246,6 +272,7 @@ impl SqliteTaskRepository<'_> {
         self.connection
             .query_row(
                 "SELECT id, title, status, created_at, completed_at
+                 , deleted_at
                  FROM tasks
                  WHERE id = ?1",
                 params![task_id.0],
@@ -256,6 +283,7 @@ impl SqliteTaskRepository<'_> {
                         status: TaskStatus::from_db(row.get::<_, String>(2)?.as_str()),
                         created_at: row.get(3)?,
                         completed_at: row.get(4)?,
+                        deleted_at: row.get(5)?,
                     })
                 },
             )
@@ -511,6 +539,7 @@ mod tests {
         assert_eq!(created.title, "Write release notes");
         assert_eq!(created.status, TaskStatus::Todo);
         assert_eq!(created.completed_at, None);
+        assert_eq!(created.deleted_at, None);
 
         let renamed = repository.update_title(created.id, "Ship release notes")?;
         assert_eq!(renamed.title, "Ship release notes");
@@ -528,7 +557,10 @@ mod tests {
         assert_eq!(tasks[0].title, "Ship release notes");
 
         repository.delete(created.id)?;
-        assert!(repository.list_all()?.is_empty());
+        let tasks = repository.list_all()?;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, created.id);
+        assert!(tasks[0].deleted_at.is_some());
 
         Ok(())
     }

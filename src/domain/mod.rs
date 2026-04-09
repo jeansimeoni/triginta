@@ -50,6 +50,7 @@ pub struct Task {
     pub status: TaskStatus,
     pub created_at: DateTime<Local>,
     pub completed_at: Option<DateTime<Local>>,
+    pub deleted_at: Option<DateTime<Local>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
