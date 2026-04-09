@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{HistoryStats, PomodoroId, PomodoroSession, Task, TaskId, TaskStatus};
@@ -42,6 +43,13 @@ pub trait TaskRepository {
 pub trait PomodoroRepository {
     fn list_recent(&self, limit: usize) -> Result<Vec<PomodoroSession>>;
     fn stats(&self) -> Result<HistoryStats>;
+    fn create(
+        &self,
+        task_id: Option<TaskId>,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+        duration_minutes: u32,
+    ) -> Result<PomodoroSession>;
 }
 
 #[derive(Debug)]
@@ -191,6 +199,35 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
             total_sessions: total_sessions as usize,
             total_minutes: total_minutes as u32,
             completed_tasks: completed_tasks as usize,
+        })
+    }
+
+    fn create(
+        &self,
+        task_id: Option<TaskId>,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+        duration_minutes: u32,
+    ) -> Result<PomodoroSession> {
+        self.connection
+            .execute(
+                "INSERT INTO pomodoros(task_id, started_at, ended_at, duration_minutes)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    task_id.map(|task_id| task_id.0),
+                    started_at,
+                    ended_at,
+                    i64::from(duration_minutes)
+                ],
+            )
+            .context("failed to insert pomodoro session")?;
+
+        Ok(PomodoroSession {
+            id: PomodoroId(self.connection.last_insert_rowid()),
+            task_id,
+            started_at,
+            ended_at: Some(ended_at),
+            duration_minutes,
         })
     }
 }

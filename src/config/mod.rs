@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
+use serde::Deserialize;
 use tracing_appender::non_blocking::WorkerGuard;
 
 // This struct centralizes every filesystem location the app cares about.
@@ -14,6 +15,7 @@ pub struct AppPaths {
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
     pub log_path: PathBuf,
+    pub ui_config_path: PathBuf,
 }
 
 impl AppPaths {
@@ -44,6 +46,7 @@ impl AppPaths {
             data_dir: data_dir.to_path_buf(),
             db_path: data_dir.join("triginta.sqlite3"),
             log_path: data_dir.join("logs").join("triginta.log"),
+            ui_config_path: config_dir.join("ui.toml"),
         })
     }
 
@@ -67,6 +70,44 @@ impl AppPaths {
 
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum GlyphMode {
+    Ascii,
+    #[default]
+    NerdFonts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+pub struct UiConfig {
+    #[serde(default)]
+    pub glyph_mode: GlyphMode,
+}
+
+pub fn load_ui_config(paths: &AppPaths) -> Result<UiConfig> {
+    let config_text = match fs::read_to_string(&paths.ui_config_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(UiConfig::default());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to read UI config at {}",
+                    paths.ui_config_path.display()
+                )
+            });
+        }
+    };
+
+    toml::from_str(&config_text).with_context(|| {
+        format!(
+            "failed to parse UI config at {}",
+            paths.ui_config_path.display()
+        )
+    })
 }
 
 pub fn init_tracing(paths: &AppPaths) -> Result<WorkerGuard> {
@@ -99,7 +140,7 @@ pub fn init_tracing(paths: &AppPaths) -> Result<WorkerGuard> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::AppPaths;
+    use super::{AppPaths, GlyphMode, UiConfig, load_ui_config};
 
     #[test]
     fn from_data_dir_builds_expected_paths() {
@@ -116,5 +157,20 @@ mod tests {
             paths.log_path,
             PathBuf::from("/tmp/triginta-test/logs/triginta.log")
         );
+        assert_eq!(
+            paths.ui_config_path,
+            PathBuf::from("/tmp/triginta-test/config/ui.toml")
+        );
+    }
+
+    #[test]
+    fn load_ui_config_defaults_to_nerd_fonts_when_missing() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+
+        let config = load_ui_config(&paths).expect("missing config should use defaults");
+        assert_eq!(config, UiConfig::default());
+        assert_eq!(config.glyph_mode, GlyphMode::NerdFonts);
     }
 }

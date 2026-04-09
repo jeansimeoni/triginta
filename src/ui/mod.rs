@@ -3,52 +3,37 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 use crate::{
-    app::{App, RightPanelTab, ScreenData},
+    app::{App, PanelFocus, RightPanelTab, ScreenData, TimerPhase, TimerRunState},
+    config::GlyphMode,
     domain::{PomodoroSession, Task, TaskStatus},
 };
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
+    let symbols = Symbols::new(app.glyph_mode());
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(0),
-            Constraint::Length(2),
-        ])
+        .constraints([Constraint::Min(0), Constraint::Length(2)])
         .split(frame.area());
 
-    render_header(frame, layout[0]);
-    render_body(frame, app, layout[1]);
-    render_status(frame, app, layout[2]);
+    render_body(frame, app, layout[0], symbols);
+    render_status(frame, app, layout[1]);
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect) {
-    let header = Paragraph::new("Triginta  |  Pomodoro Dashboard")
-        .block(Block::default().borders(Borders::ALL))
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    frame.render_widget(header, area);
-}
-
-fn render_body(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_body(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Symbols) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(area);
 
-    render_left_column(frame, app.screen_data(), columns[0]);
-    render_right_panel(frame, app, columns[1]);
+    render_left_column(frame, app, columns[0], symbols);
+    render_right_panel(frame, app, columns[1], symbols);
 }
 
-fn render_left_column(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) {
+fn render_left_column(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Symbols) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -59,70 +44,108 @@ fn render_left_column(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) {
         ])
         .split(area);
 
-    render_timer_panel(frame, data, sections[0]);
-    render_history_panel(frame, data, sections[1]);
-    render_navigation_panel(frame, sections[2]);
-    render_favorites_panel(frame, data, sections[3]);
+    render_timer_panel(frame, app, sections[0], symbols);
+    render_history_panel(
+        frame,
+        app.screen_data(),
+        sections[1],
+        symbols,
+        app.focused_panel(),
+    );
+    render_navigation_panel(frame, sections[2], symbols, app.focused_panel());
+    render_favorites_panel(
+        frame,
+        app.screen_data(),
+        sections[3],
+        symbols,
+        app.focused_panel(),
+    );
 }
 
-fn render_right_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_right_panel(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Symbols) {
     match app.active_right_panel_tab() {
-        RightPanelTab::Tasks => render_tasks_workspace(frame, app.screen_data(), area),
-        RightPanelTab::Statistics => render_statistics_panel(frame, app.screen_data(), area),
+        RightPanelTab::Tasks => {
+            render_tasks_workspace(frame, app.screen_data(), area, symbols, app.focused_panel())
+        }
+        RightPanelTab::Statistics => {
+            render_statistics_panel(frame, app.screen_data(), area, symbols, app.focused_panel())
+        }
     }
 }
 
-fn render_tasks_workspace(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) {
+fn render_tasks_workspace(
+    frame: &mut Frame<'_>,
+    data: &ScreenData,
+    area: Rect,
+    symbols: Symbols,
+    focused_panel: PanelFocus,
+) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    render_task_list_panel(frame, data, sections[0]);
-    render_task_details_panel(frame, data, sections[1]);
+    render_task_list_panel(frame, data, sections[0], symbols, focused_panel);
+    render_task_details_panel(frame, data, sections[1], symbols);
 }
 
-fn render_timer_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) {
+fn render_timer_panel(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Symbols) {
+    let timer = app.timer_view();
+    let block = panel_block(
+        Line::from(format!("[1] Pomodoro")),
+        app.focused_panel() == PanelFocus::Timer,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(2)])
-        .split(area);
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
 
-    let current_task = first_active_task(data.tasks.as_slice())
-        .map(|task| task.title.as_str())
-        .unwrap_or("No active task");
+    let headline = Paragraph::new(vec![Line::from(vec![Span::styled(
+        format!("{} {}", symbols.timer, timer.run_state.label()),
+        Style::default()
+            .fg(timer_accent_color(&timer))
+            .add_modifier(Modifier::BOLD),
+    )])]);
 
-    let info = Paragraph::new(vec![
-        Line::from(vec![Span::styled(
-            "Current Pomodoro",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("00:00 / 25:00"),
-        Line::from(format!("Task: {current_task}")),
-    ])
-    .block(Block::default().title("[1] Timer").borders(Borders::ALL))
-    .wrap(Wrap { trim: true });
+    let progress = Paragraph::new(Line::from(progress_bar(&timer, symbols, inner.width)))
+        .style(Style::default().fg(timer_accent_color(&timer)))
+        .wrap(Wrap { trim: true });
 
-    let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM))
-        .gauge_style(
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )
-        .percent(0)
-        .label("0%");
+    let progress_meta = Paragraph::new(progress_meta_line(&timer, inner.width));
+    let cycle = Paragraph::new(cycle_line(
+        timer.phase,
+        timer.completed_focus_sessions,
+        symbols,
+    ));
 
-    frame.render_widget(info, sections[0]);
-    frame.render_widget(gauge, sections[1]);
+    frame.render_widget(headline, sections[0]);
+    frame.render_widget(progress, sections[1]);
+    frame.render_widget(progress_meta, sections[2]);
+    frame.render_widget(cycle, sections[3]);
+    frame.render_widget(Paragraph::new(""), sections[4]);
 }
 
-fn render_history_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) {
+fn render_history_panel(
+    frame: &mut Frame<'_>,
+    data: &ScreenData,
+    area: Rect,
+    symbols: Symbols,
+    focused_panel: PanelFocus,
+) {
     let mut lines = vec![
         Line::from(vec![Span::styled(
             format!(
-                "{} sessions  |  {} min",
-                data.stats.total_sessions, data.stats.total_minutes
+                "{} {} sessions  |  {} min",
+                symbols.focus, data.stats.total_sessions, data.stats.total_minutes
             ),
             Style::default().add_modifier(Modifier::BOLD),
         )]),
@@ -133,40 +156,49 @@ fn render_history_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) {
         lines.push(Line::from("No pomodoros recorded today."));
     } else {
         for session in data.recent_sessions.iter().take(5) {
-            lines.push(Line::from(format_session_summary(session)));
+            lines.push(Line::from(format_session_summary(session, symbols)));
         }
     }
 
     let history = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title("[2] Daily History")
-                .borders(Borders::ALL),
-        )
+        .block(panel_block(
+            Line::from("[2] Daily History"),
+            focused_panel == PanelFocus::History,
+        ))
         .wrap(Wrap { trim: true });
 
     frame.render_widget(history, area);
 }
 
-fn render_navigation_panel(frame: &mut Frame<'_>, area: Rect) {
+fn render_navigation_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    symbols: Symbols,
+    focused_panel: PanelFocus,
+) {
     let content = Paragraph::new(vec![
-        navigation_line("> Inbox", true),
-        navigation_line("  Today", false),
-        navigation_line("  Soon", false),
+        navigation_line(&format!("{} Inbox", symbols.selected), true),
+        navigation_line(&format!("{} Today", symbols.unselected), false),
+        navigation_line(&format!("{} Soon", symbols.unselected), false),
         Line::from(""),
         Line::from("Branch-style tab switching can be wired next."),
     ])
-    .block(
-        Block::default()
-            .title(navigation_title())
-            .borders(Borders::ALL),
-    )
+    .block(panel_block(
+        navigation_title(symbols),
+        focused_panel == PanelFocus::Navigation,
+    ))
     .wrap(Wrap { trim: true });
 
     frame.render_widget(content, area);
 }
 
-fn render_favorites_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) {
+fn render_favorites_panel(
+    frame: &mut Frame<'_>,
+    data: &ScreenData,
+    area: Rect,
+    symbols: Symbols,
+    focused_panel: PanelFocus,
+) {
     let favorites = favorite_tasks(data.tasks.as_slice());
     let mut lines = vec![];
 
@@ -175,25 +207,30 @@ fn render_favorites_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) 
         lines.push(Line::from("Pinned tasks or saved searches can live here."));
     } else {
         for task in favorites {
-            lines.push(Line::from(format!("* {}", task.title)));
+            lines.push(Line::from(format!("{} {}", symbols.favorite, task.title)));
         }
     }
 
     let panel = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title("[4] Favorites")
-                .borders(Borders::ALL),
-        )
+        .block(panel_block(
+            Line::from("[4] Favorites"),
+            focused_panel == PanelFocus::Favorites,
+        ))
         .wrap(Wrap { trim: true });
 
     frame.render_widget(panel, area);
 }
 
-fn render_task_list_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) {
+fn render_task_list_panel(
+    frame: &mut Frame<'_>,
+    data: &ScreenData,
+    area: Rect,
+    symbols: Symbols,
+    focused_panel: PanelFocus,
+) {
     let mut lines = vec![
         Line::from(vec![Span::styled(
-            "All Tasks",
+            format!("{} All Tasks", symbols.tasks),
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
@@ -206,22 +243,26 @@ fn render_task_list_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) 
         ));
     } else {
         for task in data.tasks.iter().take(12) {
-            lines.push(Line::from(format_task_summary(task)));
+            lines.push(Line::from(format_task_summary(task, symbols)));
         }
     }
 
     let tasks = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title(right_panel_title(RightPanelTab::Tasks))
-                .borders(Borders::ALL),
-        )
+        .block(panel_block(
+            right_panel_title(RightPanelTab::Tasks, symbols),
+            focused_panel == PanelFocus::RightPane,
+        ))
         .wrap(Wrap { trim: true });
 
     frame.render_widget(tasks, area);
 }
 
-fn render_task_details_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) {
+fn render_task_details_panel(
+    frame: &mut Frame<'_>,
+    data: &ScreenData,
+    area: Rect,
+    symbols: Symbols,
+) {
     let lines = if let Some(task) = first_active_task(data.tasks.as_slice()) {
         vec![
             Line::from(vec![Span::styled(
@@ -250,7 +291,7 @@ fn render_task_details_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rec
     let details = Paragraph::new(lines)
         .block(
             Block::default()
-                .title("Task Details")
+                .title(format!("{} Task Details", symbols.details))
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM),
         )
         .wrap(Wrap { trim: true });
@@ -258,7 +299,13 @@ fn render_task_details_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rec
     frame.render_widget(details, area);
 }
 
-fn render_statistics_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect) {
+fn render_statistics_panel(
+    frame: &mut Frame<'_>,
+    data: &ScreenData,
+    area: Rect,
+    symbols: Symbols,
+    focused_panel: PanelFocus,
+) {
     let completed_width = 24usize;
     let total_minutes = data.stats.total_minutes;
     let goal_minutes = 150u32;
@@ -273,7 +320,7 @@ fn render_statistics_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect)
 
     let lines = vec![
         Line::from(vec![Span::styled(
-            "Pomodoro Statistics",
+            format!("{} Pomodoro Statistics", symbols.stats),
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
@@ -289,11 +336,10 @@ fn render_statistics_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect)
     ];
 
     let stats = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title(right_panel_title(RightPanelTab::Statistics))
-                .borders(Borders::ALL),
-        )
+        .block(panel_block(
+            right_panel_title(RightPanelTab::Statistics, symbols),
+            focused_panel == PanelFocus::RightPane,
+        ))
         .wrap(Wrap { trim: true });
 
     frame.render_widget(stats, area);
@@ -301,7 +347,7 @@ fn render_statistics_panel(frame: &mut Frame<'_>, data: &ScreenData, area: Rect)
 
 fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let message = format!(
-        "{}  |  tab/l: next right tab  h: previous right tab  q: quit",
+        "{}  |  1-5: focus panel  tab: cycle focus  s/space: start  p: pause  x: void  q: quit",
         app.status_message()
     );
 
@@ -324,25 +370,26 @@ fn favorite_tasks(tasks: &[Task]) -> Vec<&Task> {
         .collect()
 }
 
-fn format_session_summary(session: &PomodoroSession) -> String {
+fn format_session_summary(session: &PomodoroSession, symbols: Symbols) -> String {
     let task_suffix = session
         .task_id
-        .map(|task_id| format!("  task #{}", task_id.0))
+        .map(|task_id| format!("  {} task #{}", symbols.tasks, task_id.0))
         .unwrap_or_default();
 
     format!(
-        "{}  {} min{}",
+        "{}  {} {} min{}",
         session.started_at.format("%H:%M"),
+        symbols.timer,
         session.duration_minutes,
         task_suffix
     )
 }
 
-fn format_task_summary(task: &Task) -> String {
+fn format_task_summary(task: &Task, symbols: Symbols) -> String {
     let marker = match task.status {
-        TaskStatus::Todo => "[ ]",
-        TaskStatus::InProgress => "[~]",
-        TaskStatus::Done => "[x]",
+        TaskStatus::Todo => symbols.todo,
+        TaskStatus::InProgress => symbols.in_progress,
+        TaskStatus::Done => symbols.done,
     };
 
     format!("{marker} {}", task.title)
@@ -361,10 +408,13 @@ fn navigation_line(label: &str, selected: bool) -> Line<'static> {
     }
 }
 
-fn navigation_title() -> Line<'static> {
+fn navigation_title(symbols: Symbols) -> Line<'static> {
     Line::from(vec![
         Span::raw("[3] "),
-        Span::styled("Navigation", Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!("{} Navigation", symbols.navigation),
+            Style::default().fg(Color::Yellow),
+        ),
         Span::raw(" - "),
         Span::styled("Filters & Tags", Style::default().fg(Color::DarkGray)),
         Span::raw(" - "),
@@ -372,7 +422,7 @@ fn navigation_title() -> Line<'static> {
     ])
 }
 
-fn right_panel_title(active_tab: RightPanelTab) -> Line<'static> {
+fn right_panel_title(active_tab: RightPanelTab, symbols: Symbols) -> Line<'static> {
     let tasks_style = if active_tab == RightPanelTab::Tasks {
         Style::default().fg(Color::Yellow)
     } else {
@@ -386,8 +436,157 @@ fn right_panel_title(active_tab: RightPanelTab) -> Line<'static> {
 
     Line::from(vec![
         Span::raw("[5] "),
-        Span::styled("Tasks", tasks_style),
+        Span::styled(format!("{} Tasks", symbols.tasks), tasks_style),
         Span::raw(" - "),
-        Span::styled("Stats", stats_style),
+        Span::styled(format!("{} Stats", symbols.stats), stats_style),
     ])
+}
+
+fn panel_block(title: Line<'static>, focused: bool) -> Block<'static> {
+    let border_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(border_style)
+}
+
+fn format_duration(duration: chrono::Duration) -> String {
+    let total_seconds = duration.num_seconds().max(0);
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes:02}:{seconds:02}")
+}
+
+fn timer_color(phase: TimerPhase) -> Color {
+    match phase {
+        TimerPhase::Focus => Color::Green,
+        TimerPhase::ShortBreak => Color::LightBlue,
+        TimerPhase::LongBreak => Color::Cyan,
+    }
+}
+
+fn timer_accent_color(timer: &crate::app::TimerView) -> Color {
+    if timer.run_state == TimerRunState::Running && timer.elapsed.num_milliseconds() / 600 % 2 == 0
+    {
+        match timer.phase {
+            TimerPhase::Focus => Color::LightGreen,
+            TimerPhase::ShortBreak => Color::Cyan,
+            TimerPhase::LongBreak => Color::White,
+        }
+    } else {
+        timer_color(timer.phase)
+    }
+}
+
+fn cycle_line(phase: TimerPhase, completed_focus_sessions: u32, symbols: Symbols) -> Line<'static> {
+    let current_slot = (completed_focus_sessions % 4) as usize;
+    let mut spans = vec![Span::styled(
+        format!("{}  ", phase.label()),
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    spans.push(Span::styled(
+        "Cycle ",
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+
+    for index in 0..4usize {
+        let symbol = if index < current_slot {
+            symbols.done
+        } else if index == current_slot {
+            symbols.in_progress
+        } else {
+            symbols.todo
+        };
+        spans.push(Span::raw(symbol.to_string()));
+        if index < 3 {
+            spans.push(Span::raw(" "));
+        }
+    }
+
+    Line::from(spans)
+}
+
+fn progress_bar(timer: &crate::app::TimerView, symbols: Symbols, width: u16) -> String {
+    let width = width.saturating_sub(2).max(8) as usize;
+    let filled = (timer.progress.clamp(0.0, 1.0) * width as f64).round() as usize;
+    format!(
+        "{}{}",
+        symbols.bar_full.repeat(filled),
+        symbols.bar_empty.repeat(width.saturating_sub(filled))
+    )
+}
+
+fn progress_meta_line(timer: &crate::app::TimerView, width: u16) -> Line<'static> {
+    let percent = format!(
+        "{}%",
+        (timer.progress.clamp(0.0, 1.0) * 100.0).round() as u32
+    );
+    let remaining = format_duration(timer.remaining);
+    let available = width.saturating_sub(2) as usize;
+    let spaces = available.saturating_sub(percent.len() + remaining.len());
+    Line::from(format!("{percent}{}{remaining}", " ".repeat(spaces)))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Symbols {
+    timer: &'static str,
+    focus: &'static str,
+    navigation: &'static str,
+    favorite: &'static str,
+    tasks: &'static str,
+    details: &'static str,
+    stats: &'static str,
+    selected: &'static str,
+    unselected: &'static str,
+    todo: &'static str,
+    in_progress: &'static str,
+    done: &'static str,
+    bar_full: &'static str,
+    bar_empty: &'static str,
+}
+
+impl Symbols {
+    fn new(mode: GlyphMode) -> Self {
+        match mode {
+            GlyphMode::Ascii => Self {
+                timer: "*",
+                focus: "*",
+                navigation: ">",
+                favorite: "*",
+                tasks: "#",
+                details: ">",
+                stats: "%",
+                selected: ">",
+                unselected: "-",
+                todo: "[ ]",
+                in_progress: "[~]",
+                done: "[x]",
+                bar_full: "=",
+                bar_empty: "-",
+            },
+            GlyphMode::NerdFonts => Self {
+                timer: "󰔛",
+                focus: "󱎫",
+                navigation: "󰆍",
+                favorite: "󰓎",
+                tasks: "󰄱",
+                details: "󰋼",
+                stats: "󰕾",
+                selected: "󰁔",
+                unselected: "󰘍",
+                todo: "󰄱",
+                in_progress: "󰪞",
+                done: "󰄵",
+                bar_full: "█",
+                bar_empty: "░",
+            },
+        }
+    }
 }

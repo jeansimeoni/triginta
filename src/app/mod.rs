@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Duration as ChronoDuration, Local};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -10,7 +11,7 @@ use ratatui::{Terminal, prelude::CrosstermBackend};
 use tracing::info;
 
 use crate::{
-    config::{AppPaths, init_tracing},
+    config::{AppPaths, GlyphMode, init_tracing, load_ui_config},
     domain::{HistoryStats, PomodoroSession, Task},
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
     storage::{Database, PomodoroRepository, TaskRepository},
@@ -18,6 +19,15 @@ use crate::{
 };
 
 const TICK_RATE: Duration = Duration::from_millis(250);
+const FOCUS_MINUTES: i64 = 25;
+const SHORT_BREAK_MINUTES: i64 = 5;
+const LONG_BREAK_MINUTES: i64 = 15;
+const LONG_BREAK_INTERVAL: u32 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RunOptions {
+    pub force_ascii: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightPanelTab {
@@ -48,6 +58,204 @@ impl RightPanelTab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelFocus {
+    Timer,
+    History,
+    Navigation,
+    Favorites,
+    RightPane,
+}
+
+impl PanelFocus {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Timer => Self::History,
+            Self::History => Self::Navigation,
+            Self::Navigation => Self::Favorites,
+            Self::Favorites => Self::RightPane,
+            Self::RightPane => Self::Timer,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Timer => Self::RightPane,
+            Self::History => Self::Timer,
+            Self::Navigation => Self::History,
+            Self::Favorites => Self::Navigation,
+            Self::RightPane => Self::Favorites,
+        }
+    }
+
+    pub fn from_shortcut(key: char) -> Option<Self> {
+        match key {
+            '1' => Some(Self::Timer),
+            '2' => Some(Self::History),
+            '3' => Some(Self::Navigation),
+            '4' => Some(Self::Favorites),
+            '5' => Some(Self::RightPane),
+            _ => None,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Timer => "Timer",
+            Self::History => "Daily History",
+            Self::Navigation => "Navigation",
+            Self::Favorites => "Favorites",
+            Self::RightPane => "Right Pane",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerPhase {
+    Focus,
+    ShortBreak,
+    LongBreak,
+}
+
+impl TimerPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Focus => "Pomodoro",
+            Self::ShortBreak => "Short Break",
+            Self::LongBreak => "Long Break",
+        }
+    }
+
+    pub fn duration(self) -> ChronoDuration {
+        match self {
+            Self::Focus => ChronoDuration::minutes(FOCUS_MINUTES),
+            Self::ShortBreak => ChronoDuration::minutes(SHORT_BREAK_MINUTES),
+            Self::LongBreak => ChronoDuration::minutes(LONG_BREAK_MINUTES),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerRunState {
+    Idle,
+    Running,
+    Paused,
+}
+
+impl TimerRunState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Ready",
+            Self::Running => "Running",
+            Self::Paused => "Paused",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TimerState {
+    phase: TimerPhase,
+    run_state: TimerRunState,
+    elapsed: ChronoDuration,
+    current_phase_started_at: Option<DateTime<Local>>,
+    running_since: Option<DateTime<Local>>,
+    completed_focus_sessions: u32,
+}
+
+impl Default for TimerState {
+    fn default() -> Self {
+        Self {
+            phase: TimerPhase::Focus,
+            run_state: TimerRunState::Idle,
+            elapsed: ChronoDuration::zero(),
+            current_phase_started_at: None,
+            running_since: None,
+            completed_focus_sessions: 0,
+        }
+    }
+}
+
+impl TimerState {
+    fn elapsed_at(&self, now: DateTime<Local>) -> ChronoDuration {
+        match (self.run_state, self.running_since) {
+            (TimerRunState::Running, Some(running_since)) => self.elapsed + (now - running_since),
+            _ => self.elapsed,
+        }
+    }
+
+    fn duration(&self) -> ChronoDuration {
+        self.phase.duration()
+    }
+
+    fn remaining_at(&self, now: DateTime<Local>) -> ChronoDuration {
+        let remaining = self.duration() - self.elapsed_at(now);
+        if remaining < ChronoDuration::zero() {
+            ChronoDuration::zero()
+        } else {
+            remaining
+        }
+    }
+
+    fn progress_at(&self, now: DateTime<Local>) -> f64 {
+        let total_ms = self.duration().num_milliseconds();
+        if total_ms <= 0 {
+            return 0.0;
+        }
+
+        let elapsed_ms = self.elapsed_at(now).num_milliseconds().clamp(0, total_ms);
+        elapsed_ms as f64 / total_ms as f64
+    }
+
+    fn start_or_resume(&mut self, now: DateTime<Local>) {
+        if self.run_state == TimerRunState::Running {
+            return;
+        }
+
+        if self.current_phase_started_at.is_none() {
+            self.current_phase_started_at = Some(now);
+        }
+
+        self.running_since = Some(now);
+        self.run_state = TimerRunState::Running;
+    }
+
+    fn pause(&mut self, now: DateTime<Local>) {
+        if self.run_state != TimerRunState::Running {
+            return;
+        }
+
+        self.elapsed = self.elapsed_at(now);
+        self.running_since = None;
+        self.run_state = TimerRunState::Paused;
+    }
+
+    fn reset_to_focus(&mut self) {
+        self.phase = TimerPhase::Focus;
+        self.run_state = TimerRunState::Idle;
+        self.elapsed = ChronoDuration::zero();
+        self.current_phase_started_at = None;
+        self.running_since = None;
+    }
+
+    fn move_to_phase(&mut self, phase: TimerPhase) {
+        self.phase = phase;
+        self.run_state = TimerRunState::Idle;
+        self.elapsed = ChronoDuration::zero();
+        self.current_phase_started_at = None;
+        self.running_since = None;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimerView {
+    pub phase: TimerPhase,
+    pub run_state: TimerRunState,
+    pub elapsed: ChronoDuration,
+    pub remaining: ChronoDuration,
+    pub progress: f64,
+    pub completed_focus_sessions: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ScreenData {
     pub tasks: Vec<Task>,
@@ -59,18 +267,26 @@ pub struct ScreenData {
 // Compared with a C program, this is the central state struct you would pass
 // around to input/render functions, but here methods are attached directly to
 // the type.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct App {
+    database: Database,
     active_right_panel_tab: RightPanelTab,
+    focused_panel: PanelFocus,
+    glyph_mode: GlyphMode,
+    timer: TimerState,
     should_quit: bool,
     status_message: String,
     screen_data: ScreenData,
 }
 
 impl App {
-    pub fn new(screen_data: ScreenData) -> Self {
+    pub fn new(screen_data: ScreenData, glyph_mode: GlyphMode, database: Database) -> Self {
         Self {
+            database,
             active_right_panel_tab: RightPanelTab::Tasks,
+            focused_panel: PanelFocus::Timer,
+            glyph_mode,
+            timer: TimerState::default(),
             should_quit: false,
             status_message: "SQLite initialized. Local-first mode active.".to_string(),
             screen_data,
@@ -81,8 +297,16 @@ impl App {
         self.active_right_panel_tab
     }
 
+    pub fn focused_panel(&self) -> PanelFocus {
+        self.focused_panel
+    }
+
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    pub fn glyph_mode(&self) -> GlyphMode {
+        self.glyph_mode
     }
 
     pub fn status_message(&self) -> &str {
@@ -96,7 +320,26 @@ impl App {
         &self.screen_data
     }
 
-    pub fn handle_key(&mut self, code: KeyCode) {
+    pub fn timer_view(&self) -> TimerView {
+        self.timer_view_at(Local::now())
+    }
+
+    fn timer_view_at(&self, now: DateTime<Local>) -> TimerView {
+        TimerView {
+            phase: self.timer.phase,
+            run_state: self.timer.run_state,
+            elapsed: self.timer.elapsed_at(now),
+            remaining: self.timer.remaining_at(now),
+            progress: self.timer.progress_at(now),
+            completed_focus_sessions: self.timer.completed_focus_sessions,
+        }
+    }
+
+    pub fn handle_key(&mut self, code: KeyCode) -> Result<()> {
+        self.handle_key_at(code, Local::now())
+    }
+
+    fn handle_key_at(&mut self, code: KeyCode, now: DateTime<Local>) -> Result<()> {
         // `&mut self` is exclusive access: while this method runs, no other
         // code can also mutate the app state. This prevents a whole class of
         // aliasing bugs that are easy to create in C.
@@ -105,32 +348,122 @@ impl App {
                 self.should_quit = true;
                 self.status_message = "Shutting down Triginta.".to_string();
             }
-            KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => {
+            KeyCode::Char(key) if PanelFocus::from_shortcut(key).is_some() => {
+                self.focused_panel =
+                    PanelFocus::from_shortcut(key).expect("focus shortcut checked");
+                self.status_message = format!("Focused {} panel.", self.focused_panel.title());
+            }
+            KeyCode::Tab => {
+                self.focused_panel = self.focused_panel.next();
+                self.status_message = format!("Focused {} panel.", self.focused_panel.title());
+            }
+            KeyCode::BackTab => {
+                self.focused_panel = self.focused_panel.previous();
+                self.status_message = format!("Focused {} panel.", self.focused_panel.title());
+            }
+            KeyCode::Char('l') | KeyCode::Right if self.focused_panel == PanelFocus::RightPane => {
                 self.active_right_panel_tab = self.active_right_panel_tab.next();
                 self.status_message = match self.active_right_panel_tab {
                     RightPanelTab::Tasks => "Switched right panel to tasks.".to_string(),
                     RightPanelTab::Statistics => "Switched right panel to statistics.".to_string(),
                 };
             }
-            KeyCode::BackTab | KeyCode::Char('h') | KeyCode::Left => {
+            KeyCode::Char('h') | KeyCode::Left if self.focused_panel == PanelFocus::RightPane => {
                 self.active_right_panel_tab = self.active_right_panel_tab.previous();
                 self.status_message = match self.active_right_panel_tab {
                     RightPanelTab::Tasks => "Switched right panel to tasks.".to_string(),
                     RightPanelTab::Statistics => "Switched right panel to statistics.".to_string(),
                 };
             }
+            KeyCode::Char('s') | KeyCode::Char(' ') | KeyCode::Enter
+                if self.focused_panel == PanelFocus::Timer =>
+            {
+                self.timer.start_or_resume(now);
+                self.status_message = format!("{} started.", self.timer.phase.label());
+            }
+            KeyCode::Char('p') if self.focused_panel == PanelFocus::Timer => {
+                self.timer.pause(now);
+                self.status_message = format!("{} paused.", self.timer.phase.label());
+            }
+            KeyCode::Char('x') | KeyCode::Esc if self.focused_panel == PanelFocus::Timer => {
+                self.timer.reset_to_focus();
+                self.status_message = "Timer cleared. Pomodoro ready.".to_string();
+            }
             _ => {}
         }
+
+        Ok(())
+    }
+
+    pub fn on_tick(&mut self) -> Result<()> {
+        self.on_tick_at(Local::now())
+    }
+
+    fn on_tick_at(&mut self, now: DateTime<Local>) -> Result<()> {
+        if self.timer.run_state != TimerRunState::Running {
+            return Ok(());
+        }
+
+        if self.timer.elapsed_at(now) < self.timer.duration() {
+            return Ok(());
+        }
+
+        match self.timer.phase {
+            TimerPhase::Focus => {
+                let started_at = self
+                    .timer
+                    .current_phase_started_at
+                    .unwrap_or(now - ChronoDuration::minutes(FOCUS_MINUTES));
+                self.database.pomodoro_repository().create(
+                    None,
+                    started_at,
+                    now,
+                    FOCUS_MINUTES as u32,
+                )?;
+                self.timer.completed_focus_sessions += 1;
+
+                let next_phase = if self.timer.completed_focus_sessions % LONG_BREAK_INTERVAL == 0 {
+                    TimerPhase::LongBreak
+                } else {
+                    TimerPhase::ShortBreak
+                };
+
+                self.timer.move_to_phase(next_phase);
+                self.timer.start_or_resume(now);
+                self.refresh_history()?;
+                self.status_message = format!(
+                    "Pomodoro complete. {} started automatically.",
+                    next_phase.label()
+                );
+            }
+            TimerPhase::ShortBreak | TimerPhase::LongBreak => {
+                self.timer.move_to_phase(TimerPhase::Focus);
+                self.status_message = "Break complete. Pomodoro ready.".to_string();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn refresh_history(&mut self) -> Result<()> {
+        self.screen_data.recent_sessions = self.database.pomodoro_repository().list_recent(10)?;
+        self.screen_data.stats = self.database.pomodoro_repository().stats()?;
+        Ok(())
     }
 }
 
-pub fn run() -> Result<()> {
+pub fn run(options: RunOptions) -> Result<()> {
     // Startup is written as a straight-line sequence of fallible operations.
     // The `?` operator keeps this readable: each step either succeeds and
     // continues, or returns early with an error.
     let paths = AppPaths::resolve()?;
     paths.ensure_dirs()?;
     let _tracing_guard = init_tracing(&paths)?;
+    let glyph_mode = if options.force_ascii {
+        GlyphMode::Ascii
+    } else {
+        load_ui_config(&paths)?.glyph_mode
+    };
 
     info!("starting triginta");
 
@@ -148,7 +481,7 @@ pub fn run() -> Result<()> {
         "integration boundary initialized"
     );
 
-    let mut app = App::new(screen_data);
+    let mut app = App::new(screen_data, glyph_mode, database);
     let mut terminal = setup_terminal()?;
 
     let result = run_event_loop(&mut terminal, &mut app);
@@ -164,6 +497,7 @@ fn run_event_loop(
     app: &mut App,
 ) -> Result<()> {
     while !app.should_quit() {
+        app.on_tick()?;
         terminal
             .draw(|frame| ui::render(frame, app))
             .context("failed to draw terminal frame")?;
@@ -177,7 +511,7 @@ fn run_event_loop(
             };
 
             if key.kind == KeyEventKind::Press {
-                app.handle_key(key.code);
+                app.handle_key(key.code)?;
             }
         }
     }
@@ -205,30 +539,96 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{App, RightPanelTab, ScreenData};
+    use chrono::{Duration as ChronoDuration, Local};
+
+    use crate::config::GlyphMode;
+    use crate::storage::Database;
+
+    use super::{
+        App, FOCUS_MINUTES, PanelFocus, RightPanelTab, ScreenData, TimerPhase, TimerRunState,
+    };
+
+    fn test_app() -> App {
+        App::new(
+            ScreenData::default(),
+            GlyphMode::NerdFonts,
+            Database::open_in_memory().expect("in-memory database should open"),
+        )
+    }
 
     #[test]
     fn app_starts_running() {
-        let app = App::new(ScreenData::default());
+        let app = test_app();
         assert!(!app.should_quit());
         assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
+        assert_eq!(app.glyph_mode(), GlyphMode::NerdFonts);
+        assert_eq!(app.focused_panel(), PanelFocus::Timer);
+        assert_eq!(app.timer_view().phase, TimerPhase::Focus);
+        assert_eq!(app.timer_view().run_state, TimerRunState::Idle);
     }
 
     #[test]
     fn app_switches_right_panel_tabs() {
-        let mut app = App::new(ScreenData::default());
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
 
-        app.handle_key(crossterm::event::KeyCode::Tab);
+        app.handle_key(crossterm::event::KeyCode::Right)
+            .expect("right panel tab should switch");
         assert_eq!(app.active_right_panel_tab(), RightPanelTab::Statistics);
 
-        app.handle_key(crossterm::event::KeyCode::Left);
+        app.handle_key(crossterm::event::KeyCode::Left)
+            .expect("right panel tab should switch back");
         assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
     }
 
     #[test]
     fn app_marks_quit_on_q() {
-        let mut app = App::new(ScreenData::default());
-        app.handle_key(crossterm::event::KeyCode::Char('q'));
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('q'))
+            .expect("quit should succeed");
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn timer_start_pause_and_reset_work_from_timer_panel() {
+        let mut app = test_app();
+        let now = Local::now();
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        assert_eq!(app.timer.run_state, TimerRunState::Running);
+
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('p'),
+            now + ChronoDuration::minutes(3),
+        )
+        .expect("timer should pause");
+        assert_eq!(app.timer.run_state, TimerRunState::Paused);
+        assert!(app.timer.elapsed >= ChronoDuration::minutes(3));
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+            .expect("timer should reset");
+        assert_eq!(app.timer.phase, TimerPhase::Focus);
+        assert_eq!(app.timer.run_state, TimerRunState::Idle);
+        assert_eq!(app.timer.elapsed, ChronoDuration::zero());
+    }
+
+    #[test]
+    fn completed_pomodoro_transitions_to_break_and_updates_history() {
+        let mut app = test_app();
+        let started_at = Local::now() - ChronoDuration::minutes(FOCUS_MINUTES);
+        app.timer.phase = TimerPhase::Focus;
+        app.timer.run_state = TimerRunState::Running;
+        app.timer.current_phase_started_at = Some(started_at);
+        app.timer.running_since = Some(started_at);
+
+        app.on_tick_at(Local::now())
+            .expect("tick should complete phase");
+
+        assert_eq!(app.timer.phase, TimerPhase::ShortBreak);
+        assert_eq!(app.timer.run_state, TimerRunState::Running);
+        assert_eq!(app.screen_data.stats.total_sessions, 1);
+        assert_eq!(app.screen_data.stats.total_minutes, FOCUS_MINUTES as u32);
     }
 }

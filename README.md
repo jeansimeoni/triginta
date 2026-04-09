@@ -59,6 +59,12 @@ Run the TUI:
 mise exec -- cargo run
 ```
 
+Force ASCII-only symbols in debug builds:
+
+```bash
+mise exec -- cargo run -- --ascii
+```
+
 Run the test suite:
 
 ```bash
@@ -81,15 +87,14 @@ mise exec -- cargo run
 
 Current key bindings:
 
-- `Tab`, `l`, or `Right Arrow`: next screen
-- `Shift+Tab`, `h`, or `Left Arrow`: previous screen
+- `Tab`, `l`, or `Right Arrow`: next right-side tab
+- `Shift+Tab`, `h`, or `Left Arrow`: previous right-side tab
 - `q`: quit
 
-Current screens:
+Current layout:
 
-- `Timer`: placeholder screen for the future Pomodoro engine
-- `Tasks`: lists locally stored tasks or an empty-state message
-- `History`: shows aggregate stats and recent pomodoros
+- Left column: timer, daily history, navigation, favorites
+- Right column: tasks/details tab or statistics tab
 
 ## Data And Logging
 
@@ -107,6 +112,7 @@ When `TRIGINTA_DATA_DIR` is set, Triginta uses this layout:
 
 - Data directory: `$TRIGINTA_DATA_DIR`
 - Config directory: `$TRIGINTA_DATA_DIR/config`
+- UI config file: `$TRIGINTA_DATA_DIR/config/ui.toml`
 - SQLite database: `$TRIGINTA_DATA_DIR/triginta.sqlite3`
 - Log file: `$TRIGINTA_DATA_DIR/logs/triginta.log`
 
@@ -117,6 +123,27 @@ TRIGINTA_DATA_DIR=/tmp/triginta-dev mise exec -- cargo run
 ```
 
 This is useful for local development and for keeping test data isolated from your normal app state.
+
+## UI Configuration
+
+Triginta now prefers Nerd Font glyphs by default for richer icons and indicators.
+
+Create `config/ui.toml` with:
+
+```toml
+glyph_mode = "nerd-fonts"
+```
+
+Available values:
+
+- `nerd-fonts`
+- `ascii`
+
+In debug builds, `--ascii` overrides the config file for quick testing:
+
+```bash
+mise exec -- cargo run -- --ascii
+```
 
 ## Project Layout
 
