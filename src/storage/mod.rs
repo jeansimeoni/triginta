@@ -5,7 +5,8 @@ use chrono::{DateTime, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
-    HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task, TaskId, TaskStatus,
+    DayHistorySummary, HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task, TaskId,
+    TaskStatus,
 };
 
 // Keeping the schema as a string literal makes bootstrap simple for this early
@@ -65,6 +66,11 @@ pub trait PomodoroRepository {
         started_at: DateTime<Local>,
         ended_at: DateTime<Local>,
     ) -> Result<HistoryStats>;
+    fn summarize_days(
+        &self,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+    ) -> Result<Vec<DayHistorySummary>>;
     fn create(
         &self,
         task_id: Option<TaskId>,
@@ -259,6 +265,38 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
             total_break_seconds: total_break_seconds as u32,
             completed_tasks: completed_tasks as usize,
         })
+    }
+
+    fn summarize_days(
+        &self,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+    ) -> Result<Vec<DayHistorySummary>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                DATE(started_at) AS day,
+                COALESCE(SUM(CASE WHEN kind IN ('focus', 'work') AND outcome = 'completed' THEN 1 ELSE 0 END), 0) AS completed_sessions,
+                COALESCE(SUM(CASE WHEN kind IN ('focus', 'work') AND outcome = 'voided' THEN 1 ELSE 0 END), 0) AS voided_sessions,
+                COALESCE(SUM(CASE WHEN kind IN ('focus', 'work') THEN duration_seconds ELSE 0 END), 0) AS focus_seconds,
+                COALESCE(SUM(CASE WHEN kind IN ('short_break', 'long_break') THEN duration_seconds ELSE 0 END), 0) AS break_seconds
+             FROM session_history
+             WHERE started_at >= ?1 AND started_at < ?2
+             GROUP BY DATE(started_at)
+             ORDER BY DATE(started_at) DESC",
+        )?;
+
+        let rows = statement.query_map(params![started_at, ended_at], |row| {
+            Ok(DayHistorySummary {
+                day: row.get(0)?,
+                completed_sessions: row.get::<_, i64>(1)? as usize,
+                voided_sessions: row.get::<_, i64>(2)? as usize,
+                focus_seconds: row.get::<_, i64>(3)? as u32,
+                break_seconds: row.get::<_, i64>(4)? as u32,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to summarize history by day")
     }
 
     fn create(

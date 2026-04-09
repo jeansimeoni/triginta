@@ -7,9 +7,11 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, CycleEntryState, PanelFocus, RightPanelTab, ScreenData, TimerPhase},
+    app::{
+        App, CycleEntryState, HistoryPanelTab, PanelFocus, RightPanelTab, ScreenData, TimerPhase,
+    },
     config::GlyphMode,
-    domain::{SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
+    domain::{DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
     theme::ThemePalette,
 };
 
@@ -176,17 +178,60 @@ fn render_history_panel(
     palette: ThemePalette,
 ) {
     let data = app.screen_data();
-    let rows = history_rows(data.history_entries.as_slice());
-    let selected = app.history_scroll().min(rows.len().saturating_sub(1));
-    let summary = Line::from(format!(
-        "{} focus  |  {} break  |  {} sessions",
-        format_duration_seconds(data.stats.total_work_seconds),
-        format_duration_seconds(data.stats.total_break_seconds),
-        data.stats.total_sessions,
-    ))
-    .right_aligned();
+    let today_selected = app.history_scroll();
+    let (summary, lines, right_indicator) = match app.active_history_panel_tab() {
+        HistoryPanelTab::Today => {
+            let rows = history_rows(data.history_entries.as_slice());
+            let selected = today_selected.min(rows.len().saturating_sub(1));
+            let summary = Line::from(format!(
+                "{} focus  |  {} break  |  {} sessions",
+                format_duration_seconds(data.today_stats.total_work_seconds),
+                format_duration_seconds(data.today_stats.total_break_seconds),
+                data.today_stats.total_sessions,
+            ))
+            .right_aligned();
+            let lines = if rows.is_empty() {
+                vec![Line::from("No pomodoros recorded today.")]
+            } else {
+                let show_selection = app.focused_panel() == PanelFocus::History;
+                let visible_height = area.height.saturating_sub(2) as usize;
+                let start = selected.saturating_sub(visible_height.saturating_sub(1));
+                let end = (start + visible_height).min(rows.len());
+                rows[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| {
+                        format_history_row(
+                            row,
+                            symbols,
+                            palette,
+                            area.width.saturating_sub(2),
+                            show_selection && start + index == selected,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let indicator = if rows.len() > area.height.saturating_sub(2) as usize {
+                Some((rows.len(), selected))
+            } else {
+                None
+            };
+            (summary, lines, indicator)
+        }
+        HistoryPanelTab::Last7Days => (
+            Line::from(format!(
+                "{} focus  |  {} break  |  {} sessions",
+                format_duration_seconds(data.weekly_stats.total_work_seconds),
+                format_duration_seconds(data.weekly_stats.total_break_seconds),
+                data.weekly_stats.total_sessions,
+            ))
+            .right_aligned(),
+            render_weekly_history_lines(data.weekly_summaries.as_slice(), palette),
+            None,
+        ),
+    };
     let block = panel_block(
-        Line::from("[2] Daily History"),
+        history_title(app.active_history_panel_tab(), palette),
         app.focused_panel() == PanelFocus::History,
         palette,
     )
@@ -198,36 +243,13 @@ fn render_history_panel(
     });
     frame.render_widget(block, area);
 
-    let lines = if rows.is_empty() {
-        vec![Line::from("No pomodoros recorded today.")]
-    } else {
-        let show_selection = app.focused_panel() == PanelFocus::History;
-        let visible_height = content.height as usize;
-        let start = selected.saturating_sub(visible_height.saturating_sub(1));
-        let end = (start + visible_height).min(rows.len());
-
-        rows[start..end]
-            .iter()
-            .enumerate()
-            .map(|(index, row)| {
-                format_history_row(
-                    row,
-                    symbols,
-                    palette,
-                    content.width,
-                    show_selection && start + index == selected,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-
-    let history = Paragraph::new(lines).wrap(Wrap { trim: true });
+    let history = Paragraph::new(lines);
     frame.render_widget(history, content);
 
-    if rows.len() > content.height as usize {
+    if let Some((content_length, position)) = right_indicator {
         let mut scrollbar_state = ScrollbarState::default()
-            .content_length(rows.len())
-            .position(selected);
+            .content_length(content_length)
+            .position(position);
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
@@ -390,7 +412,7 @@ fn render_statistics_panel(
     palette: ThemePalette,
 ) {
     let completed_width = 24usize;
-    let total_minutes = data.stats.total_minutes;
+    let total_minutes = data.today_stats.total_minutes;
     let goal_minutes = 150u32;
     let filled = ((total_minutes.min(goal_minutes) as f32 / goal_minutes as f32)
         * completed_width as f32)
@@ -409,9 +431,15 @@ fn render_statistics_panel(
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
-        Line::from(format!("Sessions today: {}", data.stats.total_sessions)),
+        Line::from(format!(
+            "Sessions today: {}",
+            data.today_stats.total_sessions
+        )),
         Line::from(format!("Focused minutes: {}", total_minutes)),
-        Line::from(format!("Completed tasks: {}", data.stats.completed_tasks)),
+        Line::from(format!(
+            "Completed tasks: {}",
+            data.today_stats.completed_tasks
+        )),
         Line::from(""),
         Line::from(format!("Daily goal      {}", graph)),
         Line::from(format!("{total_minutes} / {goal_minutes} minutes")),
@@ -433,7 +461,7 @@ fn render_statistics_panel(
 
 fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, palette: ThemePalette) {
     let message = format!(
-        "{}  |  1-5: focus panel  tab: cycle focus  j/k or ↑/↓: scroll history  s/space: start  p: pause  x: void  q: quit",
+        "{}  |  1-5: focus panel  tab: cycle focus  h/l or ←/→: switch tabs  j/k or ↑/↓: scroll today  s/space: start  p: pause  x: void  q: quit",
         app.status_message()
     );
 
@@ -537,7 +565,6 @@ fn format_history_row(
         timing,
         task_suffix
     );
-    let full_line = format!("{prefix:<width$}", width = width as usize);
 
     let style = if selected {
         Style::default()
@@ -548,7 +575,97 @@ fn format_history_row(
         Style::default().fg(accent)
     };
 
-    Line::from(vec![Span::styled(full_line, style)])
+    let mut spans = vec![Span::styled(prefix, style)];
+    if selected {
+        let current_width = Line::from(spans.clone()).width();
+        let padding = (width as usize).saturating_sub(current_width);
+        if padding > 0 {
+            spans.push(Span::styled(" ".repeat(padding), style));
+        }
+    }
+
+    Line::from(spans)
+}
+
+fn render_weekly_history_lines(
+    summaries: &[DayHistorySummary],
+    palette: ThemePalette,
+) -> Vec<Line<'static>> {
+    if summaries.is_empty() {
+        return vec![Line::from("No history recorded in the last 7 days.")];
+    }
+
+    let max_total = summaries
+        .iter()
+        .map(|summary| summary.completed_sessions + summary.voided_sessions)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    summaries
+        .iter()
+        .map(|summary| {
+            let total = summary.completed_sessions + summary.voided_sessions;
+            let completed_width = (summary.completed_sessions * 10).div_ceil(max_total);
+            let voided_width = (summary.voided_sessions * 10).div_ceil(max_total);
+            let bar = format!(
+                "{}{}",
+                "█".repeat(completed_width),
+                "░".repeat(voided_width)
+            );
+            Line::from(vec![
+                Span::styled(
+                    summary.day.format("%a %d").to_string(),
+                    Style::default().fg(palette.subtle_text),
+                ),
+                Span::raw("  "),
+                Span::styled("C", Style::default().fg(palette.success)),
+                Span::styled(
+                    format!("{:>2}", summary.completed_sessions),
+                    Style::default().fg(palette.text),
+                ),
+                Span::raw(" "),
+                Span::styled("V", Style::default().fg(palette.error)),
+                Span::styled(
+                    format!("{:>2}", summary.voided_sessions),
+                    Style::default().fg(palette.text),
+                ),
+                Span::raw("  "),
+                Span::styled(bar, Style::default().fg(palette.accent)),
+                Span::raw("  "),
+                Span::styled(
+                    format_duration_seconds(summary.focus_seconds),
+                    Style::default().fg(palette.text),
+                ),
+                Span::raw(" / "),
+                Span::styled(
+                    format_duration_seconds(summary.break_seconds),
+                    Style::default().fg(palette.subtle_text),
+                ),
+                Span::raw(if total == 0 { "  -" } else { "" }),
+            ])
+        })
+        .collect()
+}
+
+fn history_title(active_tab: HistoryPanelTab, palette: ThemePalette) -> Line<'static> {
+    let today_style = if active_tab == HistoryPanelTab::Today {
+        Style::default().fg(palette.accent)
+    } else {
+        Style::default().fg(palette.subtle_text)
+    };
+    let weekly_style = if active_tab == HistoryPanelTab::Last7Days {
+        Style::default().fg(palette.accent)
+    } else {
+        Style::default().fg(palette.subtle_text)
+    };
+
+    Line::from(vec![
+        Span::raw("[2] "),
+        Span::styled("Today", today_style),
+        Span::raw(" - "),
+        Span::styled("Last 7 Days", weekly_style),
+    ])
 }
 
 fn navigation_line(label: &str, selected: bool, palette: ThemePalette) -> Line<'static> {

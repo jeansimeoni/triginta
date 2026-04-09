@@ -12,7 +12,7 @@ use tracing::info;
 
 use crate::{
     config::{AppConfig, AppPaths, GlyphMode, TimerSettings, init_tracing, load_app_config},
-    domain::{HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task},
+    domain::{DayHistorySummary, HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task},
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
     storage::{Database, PomodoroRepository, TaskRepository},
     theme::ThemePalette,
@@ -31,6 +31,25 @@ pub struct RunOptions {
 pub enum RightPanelTab {
     Tasks,
     Statistics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryPanelTab {
+    Today,
+    Last7Days,
+}
+
+impl HistoryPanelTab {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Today => Self::Last7Days,
+            Self::Last7Days => Self::Today,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        self.next()
+    }
 }
 
 impl RightPanelTab {
@@ -315,7 +334,9 @@ pub struct TimerView {
 pub struct ScreenData {
     pub tasks: Vec<Task>,
     pub history_entries: Vec<SessionEntry>,
-    pub stats: HistoryStats,
+    pub today_stats: HistoryStats,
+    pub weekly_summaries: Vec<DayHistorySummary>,
+    pub weekly_stats: HistoryStats,
 }
 
 // `App` owns the mutable runtime state for the TUI loop.
@@ -327,6 +348,7 @@ pub struct App {
     database: Database,
     timer_settings: TimerSettings,
     active_right_panel_tab: RightPanelTab,
+    active_history_panel_tab: HistoryPanelTab,
     focused_panel: PanelFocus,
     glyph_mode: GlyphMode,
     theme: ThemePalette,
@@ -350,6 +372,7 @@ impl App {
             database,
             timer_settings,
             active_right_panel_tab: RightPanelTab::Tasks,
+            active_history_panel_tab: HistoryPanelTab::Today,
             focused_panel: PanelFocus::Timer,
             glyph_mode,
             theme,
@@ -363,6 +386,10 @@ impl App {
 
     pub fn active_right_panel_tab(&self) -> RightPanelTab {
         self.active_right_panel_tab
+    }
+
+    pub fn active_history_panel_tab(&self) -> HistoryPanelTab {
+        self.active_history_panel_tab
     }
 
     pub fn focused_panel(&self) -> PanelFocus {
@@ -459,23 +486,53 @@ impl App {
                     RightPanelTab::Statistics => "Switched right panel to statistics.".to_string(),
                 };
             }
+            KeyCode::Char('l') | KeyCode::Right if self.focused_panel == PanelFocus::History => {
+                self.active_history_panel_tab = self.active_history_panel_tab.next();
+                self.status_message = match self.active_history_panel_tab {
+                    HistoryPanelTab::Today => "Switched history panel to today.".to_string(),
+                    HistoryPanelTab::Last7Days => {
+                        "Switched history panel to last 7 days.".to_string()
+                    }
+                };
+            }
+            KeyCode::Char('h') | KeyCode::Left if self.focused_panel == PanelFocus::History => {
+                self.active_history_panel_tab = self.active_history_panel_tab.previous();
+                self.status_message = match self.active_history_panel_tab {
+                    HistoryPanelTab::Today => "Switched history panel to today.".to_string(),
+                    HistoryPanelTab::Last7Days => {
+                        "Switched history panel to last 7 days.".to_string()
+                    }
+                };
+            }
             KeyCode::Char('j') | KeyCode::Down if self.focused_panel == PanelFocus::History => {
-                self.scroll_history_down();
+                if self.active_history_panel_tab == HistoryPanelTab::Today {
+                    self.scroll_history_down();
+                }
             }
             KeyCode::Char('k') | KeyCode::Up if self.focused_panel == PanelFocus::History => {
-                self.scroll_history_up();
+                if self.active_history_panel_tab == HistoryPanelTab::Today {
+                    self.scroll_history_up();
+                }
             }
             KeyCode::PageDown if self.focused_panel == PanelFocus::History => {
-                self.scroll_history_page_down();
+                if self.active_history_panel_tab == HistoryPanelTab::Today {
+                    self.scroll_history_page_down();
+                }
             }
             KeyCode::PageUp if self.focused_panel == PanelFocus::History => {
-                self.scroll_history_page_up();
+                if self.active_history_panel_tab == HistoryPanelTab::Today {
+                    self.scroll_history_page_up();
+                }
             }
             KeyCode::Home if self.focused_panel == PanelFocus::History => {
-                self.history_scroll = 0;
+                if self.active_history_panel_tab == HistoryPanelTab::Today {
+                    self.history_scroll = 0;
+                }
             }
             KeyCode::End if self.focused_panel == PanelFocus::History => {
-                self.history_scroll = self.max_history_scroll();
+                if self.active_history_panel_tab == HistoryPanelTab::Today {
+                    self.history_scroll = self.max_history_scroll();
+                }
             }
             KeyCode::Char('s') | KeyCode::Char(' ') | KeyCode::Enter
                 if self.focused_panel == PanelFocus::Timer =>
@@ -596,15 +653,25 @@ impl App {
     }
 
     fn refresh_history(&mut self) -> Result<()> {
-        let (started_at, ended_at) = today_bounds(Local::now());
+        let now = Local::now();
+        let (started_at, ended_at) = today_bounds(now);
+        let (weekly_started_at, weekly_ended_at) = last_7_days_bounds(now);
         self.screen_data.history_entries = self
             .database
             .pomodoro_repository()
             .list_day(started_at, ended_at)?;
-        self.screen_data.stats = self
+        self.screen_data.today_stats = self
             .database
             .pomodoro_repository()
             .stats_for_day(started_at, ended_at)?;
+        self.screen_data.weekly_summaries = self
+            .database
+            .pomodoro_repository()
+            .summarize_days(weekly_started_at, weekly_ended_at)?;
+        self.screen_data.weekly_stats = self
+            .database
+            .pomodoro_repository()
+            .stats_for_day(weekly_started_at, weekly_ended_at)?;
         self.history_scroll = self.history_scroll.min(self.max_history_scroll());
         Ok(())
     }
@@ -690,15 +757,23 @@ pub fn run(options: RunOptions) -> Result<()> {
     info!("starting triginta");
 
     let database = Database::open(&paths.db_path)?;
-    let (started_at, ended_at) = today_bounds(Local::now());
+    let now = Local::now();
+    let (started_at, ended_at) = today_bounds(now);
+    let (weekly_started_at, weekly_ended_at) = last_7_days_bounds(now);
     let screen_data = ScreenData {
         tasks: database.task_repository().list_all()?,
         history_entries: database
             .pomodoro_repository()
             .list_day(started_at, ended_at)?,
-        stats: database
+        today_stats: database
             .pomodoro_repository()
             .stats_for_day(started_at, ended_at)?,
+        weekly_summaries: database
+            .pomodoro_repository()
+            .summarize_days(weekly_started_at, weekly_ended_at)?,
+        weekly_stats: database
+            .pomodoro_repository()
+            .stats_for_day(weekly_started_at, weekly_ended_at)?,
     };
 
     let provider = DisabledTodoistProvider;
@@ -812,6 +887,18 @@ fn today_bounds(now: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>) {
     (start, end)
 }
 
+fn last_7_days_bounds(now: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>) {
+    let (_, today_end) = today_bounds(now);
+    let start_date = now.date_naive() - chrono::Days::new(6);
+    let start = start_date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight should be valid")
+        .and_local_timezone(Local)
+        .single()
+        .expect("local midnight should be representable");
+    (start, today_end)
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, Local};
@@ -821,8 +908,9 @@ mod tests {
     use crate::theme::ThemePalette;
 
     use super::{
-        App, CycleEntryState, PanelFocus, RightPanelTab, RunOptions, ScreenData, TimerPhase,
-        TimerRunState, apply_debug_overrides, chrono_duration, duration_to_stored_minutes,
+        App, CycleEntryState, HistoryPanelTab, PanelFocus, RightPanelTab, RunOptions, ScreenData,
+        TimerPhase, TimerRunState, apply_debug_overrides, chrono_duration,
+        duration_to_stored_minutes,
     };
 
     fn test_app() -> App {
@@ -845,6 +933,7 @@ mod tests {
         let app = test_app();
         assert!(!app.should_quit());
         assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
+        assert_eq!(app.active_history_panel_tab(), HistoryPanelTab::Today);
         assert_eq!(app.glyph_mode(), GlyphMode::NerdFonts);
         assert_eq!(
             app.theme(),
@@ -885,6 +974,21 @@ mod tests {
     }
 
     #[test]
+    fn app_switches_history_panel_tabs() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('2'))
+            .expect("focus should switch");
+
+        app.handle_key(crossterm::event::KeyCode::Right)
+            .expect("history tab should switch");
+        assert_eq!(app.active_history_panel_tab(), HistoryPanelTab::Last7Days);
+
+        app.handle_key(crossterm::event::KeyCode::Left)
+            .expect("history tab should switch back");
+        assert_eq!(app.active_history_panel_tab(), HistoryPanelTab::Today);
+    }
+
+    #[test]
     fn app_marks_quit_on_q() {
         let mut app = test_app();
         app.handle_key(crossterm::event::KeyCode::Char('q'))
@@ -906,7 +1010,7 @@ mod tests {
         .expect("quit should succeed");
 
         assert!(app.should_quit());
-        assert_eq!(app.screen_data.stats.total_sessions, 1);
+        assert_eq!(app.screen_data.today_stats.total_sessions, 1);
         assert_eq!(app.screen_data.history_entries.len(), 1);
         assert_eq!(
             app.screen_data.history_entries[0].outcome,
@@ -963,9 +1067,9 @@ mod tests {
 
         assert_eq!(app.timer.phase, TimerPhase::ShortBreak);
         assert_eq!(app.timer.run_state, TimerRunState::Running);
-        assert_eq!(app.screen_data.stats.total_sessions, 1);
+        assert_eq!(app.screen_data.today_stats.total_sessions, 1);
         assert_eq!(
-            app.screen_data.stats.total_minutes,
+            app.screen_data.today_stats.total_minutes,
             duration_to_stored_minutes(app.timer_settings.pomodoro_length)
         );
         assert_eq!(
@@ -1042,8 +1146,8 @@ mod tests {
                 CycleEntryState::NotStarted
             ]
         );
-        assert_eq!(app.screen_data.stats.total_sessions, 1);
-        assert_eq!(app.screen_data.stats.total_break_seconds, 10);
+        assert_eq!(app.screen_data.today_stats.total_sessions, 1);
+        assert_eq!(app.screen_data.today_stats.total_break_seconds, 10);
         assert_eq!(app.screen_data.history_entries.len(), 2);
     }
 

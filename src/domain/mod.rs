@@ -115,6 +115,15 @@ pub struct SessionEntry {
     pub duration_seconds: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DayHistorySummary {
+    pub day: chrono::NaiveDate,
+    pub completed_sessions: usize,
+    pub voided_sessions: usize,
+    pub focus_seconds: u32,
+    pub break_seconds: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HistoryStats {
     pub total_sessions: usize,
