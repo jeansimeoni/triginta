@@ -149,6 +149,15 @@ impl TimerRunState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CycleEntryState {
+    NotStarted,
+    Running,
+    Break,
+    Completed,
+    Voided,
+}
+
 #[derive(Debug, Clone)]
 pub struct TimerState {
     phase: TimerPhase,
@@ -156,23 +165,25 @@ pub struct TimerState {
     elapsed: ChronoDuration,
     current_phase_started_at: Option<DateTime<Local>>,
     running_since: Option<DateTime<Local>>,
-    completed_focus_sessions: u32,
+    completed_cycles_in_round: u32,
+    current_cycle_index: usize,
+    cycle_entries: Vec<CycleEntryState>,
 }
 
-impl Default for TimerState {
-    fn default() -> Self {
+impl TimerState {
+    fn new(long_break_interval: u32) -> Self {
         Self {
             phase: TimerPhase::Focus,
             run_state: TimerRunState::Idle,
             elapsed: ChronoDuration::zero(),
             current_phase_started_at: None,
             running_since: None,
-            completed_focus_sessions: 0,
+            completed_cycles_in_round: 0,
+            current_cycle_index: 0,
+            cycle_entries: vec![CycleEntryState::NotStarted; long_break_interval as usize],
         }
     }
-}
 
-impl TimerState {
     fn elapsed_at(&self, now: DateTime<Local>) -> ChronoDuration {
         match (self.run_state, self.running_since) {
             (TimerRunState::Running, Some(running_since)) => self.elapsed + (now - running_since),
@@ -208,12 +219,19 @@ impl TimerState {
             return;
         }
 
+        self.ensure_current_entry();
         if self.current_phase_started_at.is_none() {
             self.current_phase_started_at = Some(now);
         }
 
         self.running_since = Some(now);
         self.run_state = TimerRunState::Running;
+        if let Some(current) = self.cycle_entries.get_mut(self.current_cycle_index) {
+            *current = match self.phase {
+                TimerPhase::Focus => CycleEntryState::Running,
+                TimerPhase::ShortBreak | TimerPhase::LongBreak => CycleEntryState::Break,
+            };
+        }
     }
 
     fn pause(&mut self, now: DateTime<Local>) {
@@ -241,16 +259,52 @@ impl TimerState {
         self.current_phase_started_at = None;
         self.running_since = None;
     }
+
+    fn ensure_current_entry(&mut self) {
+        if self.current_cycle_index >= self.cycle_entries.len() {
+            self.cycle_entries.push(CycleEntryState::NotStarted);
+        }
+    }
+
+    fn void_current_and_prepare_next(&mut self) {
+        self.ensure_current_entry();
+        if let Some(current) = self.cycle_entries.get_mut(self.current_cycle_index) {
+            *current = CycleEntryState::Voided;
+        }
+        self.reset_to_focus();
+        self.cycle_entries.push(CycleEntryState::NotStarted);
+        self.current_cycle_index += 1;
+    }
+
+    fn complete_break(&mut self) {
+        self.ensure_current_entry();
+        if let Some(current) = self.cycle_entries.get_mut(self.current_cycle_index) {
+            *current = CycleEntryState::Completed;
+        }
+        self.completed_cycles_in_round += 1;
+    }
+
+    fn prepare_next_focus_slot(&mut self) {
+        self.current_cycle_index += 1;
+        self.ensure_current_entry();
+    }
+
+    fn reset_round(&mut self, long_break_interval: u32) {
+        self.completed_cycles_in_round = 0;
+        self.current_cycle_index = 0;
+        self.cycle_entries = vec![CycleEntryState::NotStarted; long_break_interval as usize];
+        self.reset_to_focus();
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TimerView {
     pub phase: TimerPhase,
     pub run_state: TimerRunState,
     pub elapsed: ChronoDuration,
     pub remaining: ChronoDuration,
     pub progress: f64,
-    pub completed_focus_sessions: u32,
+    pub cycle_entries: Vec<CycleEntryState>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -284,13 +338,14 @@ impl App {
         timer_settings: TimerSettings,
         database: Database,
     ) -> Self {
+        let long_break_interval = timer_settings.long_break_interval;
         Self {
             database,
             timer_settings,
             active_right_panel_tab: RightPanelTab::Tasks,
             focused_panel: PanelFocus::Timer,
             glyph_mode,
-            timer: TimerState::default(),
+            timer: TimerState::new(long_break_interval),
             should_quit: false,
             status_message: "SQLite initialized. Local-first mode active.".to_string(),
             screen_data,
@@ -339,7 +394,7 @@ impl App {
             elapsed: self.timer.elapsed_at(now),
             remaining: self.timer.remaining_at(now, &self.timer_settings),
             progress: self.timer.progress_at(now, &self.timer_settings),
-            completed_focus_sessions: self.timer.completed_focus_sessions,
+            cycle_entries: self.timer.cycle_entries.clone(),
         }
     }
 
@@ -394,8 +449,22 @@ impl App {
                 self.status_message = format!("{} paused.", self.timer.phase.label());
             }
             KeyCode::Char('x') | KeyCode::Esc if self.focused_panel == PanelFocus::Timer => {
-                self.timer.reset_to_focus();
-                self.status_message = "Timer cleared. Pomodoro ready.".to_string();
+                let current_cycle_state = self
+                    .timer
+                    .cycle_entries
+                    .get(self.timer.current_cycle_index)
+                    .copied()
+                    .unwrap_or(CycleEntryState::NotStarted);
+                if self.timer.run_state == TimerRunState::Idle
+                    && self.timer.phase == TimerPhase::Focus
+                    && current_cycle_state == CycleEntryState::NotStarted
+                {
+                    self.status_message = "Timer already ready.".to_string();
+                } else {
+                    self.timer.void_current_and_prepare_next();
+                    self.status_message =
+                        "Current pomodoro voided. Next pomodoro ready.".to_string();
+                }
             }
             _ => {}
         }
@@ -428,11 +497,9 @@ impl App {
                     now,
                     duration_to_stored_minutes(self.timer_settings.pomodoro_length),
                 )?;
-                self.timer.completed_focus_sessions += 1;
 
-                let next_phase = if self.timer.completed_focus_sessions
-                    % self.timer_settings.long_break_interval
-                    == 0
+                let next_phase = if self.timer.completed_cycles_in_round + 1
+                    == self.timer_settings.long_break_interval
                 {
                     TimerPhase::LongBreak
                 } else {
@@ -448,7 +515,15 @@ impl App {
                 );
             }
             TimerPhase::ShortBreak | TimerPhase::LongBreak => {
-                self.timer.move_to_phase(TimerPhase::Focus);
+                let completed_long_break = self.timer.phase == TimerPhase::LongBreak;
+                self.timer.complete_break();
+                if completed_long_break {
+                    self.timer
+                        .reset_round(self.timer_settings.long_break_interval);
+                } else {
+                    self.timer.move_to_phase(TimerPhase::Focus);
+                    self.timer.prepare_next_focus_slot();
+                }
                 self.status_message = "Break complete. Pomodoro ready.".to_string();
             }
         }
@@ -570,8 +645,8 @@ mod tests {
     use crate::storage::Database;
 
     use super::{
-        App, PanelFocus, RightPanelTab, RunOptions, ScreenData, TimerPhase, TimerRunState,
-        apply_debug_overrides, chrono_duration, duration_to_stored_minutes,
+        App, CycleEntryState, PanelFocus, RightPanelTab, RunOptions, ScreenData, TimerPhase,
+        TimerRunState, apply_debug_overrides, chrono_duration, duration_to_stored_minutes,
     };
 
     fn test_app() -> App {
@@ -592,6 +667,15 @@ mod tests {
         assert_eq!(app.focused_panel(), PanelFocus::Timer);
         assert_eq!(app.timer_view().phase, TimerPhase::Focus);
         assert_eq!(app.timer_view().run_state, TimerRunState::Idle);
+        assert_eq!(
+            app.timer_view().cycle_entries,
+            vec![
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted
+            ]
+        );
     }
 
     #[test]
@@ -639,10 +723,20 @@ mod tests {
         assert_eq!(app.timer.phase, TimerPhase::Focus);
         assert_eq!(app.timer.run_state, TimerRunState::Idle);
         assert_eq!(app.timer.elapsed, ChronoDuration::zero());
+        assert_eq!(
+            app.timer.cycle_entries,
+            vec![
+                CycleEntryState::Voided,
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted
+            ]
+        );
     }
 
     #[test]
-    fn completed_pomodoro_transitions_to_break_and_updates_history() {
+    fn completed_pomodoro_transitions_to_break_without_completing_cycle() {
         let mut app = test_app();
         let started_at = Local::now() - chrono_duration(app.timer_settings.pomodoro_length);
         app.timer.phase = TimerPhase::Focus;
@@ -659,6 +753,46 @@ mod tests {
         assert_eq!(
             app.screen_data.stats.total_minutes,
             duration_to_stored_minutes(app.timer_settings.pomodoro_length)
+        );
+        assert_eq!(
+            app.timer.cycle_entries,
+            vec![
+                CycleEntryState::Break,
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted
+            ]
+        );
+    }
+
+    #[test]
+    fn completed_break_marks_cycle_complete_and_prepares_next_slot() {
+        let mut app = test_app();
+        let started_at = Local::now() - chrono_duration(app.timer_settings.short_break_length);
+        app.timer.phase = TimerPhase::ShortBreak;
+        app.timer.run_state = TimerRunState::Running;
+        app.timer.current_phase_started_at = Some(started_at);
+        app.timer.running_since = Some(started_at);
+        app.timer.cycle_entries = vec![
+            CycleEntryState::Break,
+            CycleEntryState::NotStarted,
+            CycleEntryState::NotStarted,
+            CycleEntryState::NotStarted,
+        ];
+
+        app.on_tick_at(Local::now())
+            .expect("tick should complete break");
+
+        assert_eq!(app.timer.phase, TimerPhase::Focus);
+        assert_eq!(app.timer.run_state, TimerRunState::Idle);
+        assert_eq!(
+            app.timer.cycle_entries,
+            vec![
+                CycleEntryState::Completed,
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted
+            ]
         );
     }
 

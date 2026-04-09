@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, PanelFocus, RightPanelTab, ScreenData, TimerPhase, TimerRunState},
+    app::{App, CycleEntryState, PanelFocus, RightPanelTab, ScreenData, TimerPhase},
     config::GlyphMode,
     domain::{PomodoroSession, Task, TaskStatus},
 };
@@ -117,16 +117,16 @@ fn render_timer_panel(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Sym
     let headline = Paragraph::new(vec![Line::from(vec![Span::styled(
         format!("{} {}", symbols.timer, timer.run_state.label()),
         Style::default()
-            .fg(timer_accent_color(&timer))
+            .fg(timer_color(timer.phase))
             .add_modifier(Modifier::BOLD),
     )])]);
 
     let progress = Paragraph::new(Line::from(progress_bar(&timer, symbols, content.width)))
-        .style(Style::default().fg(timer_accent_color(&timer)))
+        .style(Style::default().fg(timer_color(timer.phase)))
         .wrap(Wrap { trim: true });
 
     let progress_meta = Paragraph::new(progress_meta_line(&timer, content.width));
-    let cycle = Paragraph::new(cycle_line(timer.completed_focus_sessions, symbols));
+    let cycle = Paragraph::new(cycle_line(timer.cycle_entries.as_slice(), symbols));
 
     frame.render_widget(headline, sections[0]);
     frame.render_widget(progress, sections[1]);
@@ -473,36 +473,22 @@ fn timer_color(phase: TimerPhase) -> Color {
     }
 }
 
-fn timer_accent_color(timer: &crate::app::TimerView) -> Color {
-    if timer.run_state == TimerRunState::Running && timer.elapsed.num_milliseconds() / 600 % 2 == 0
-    {
-        match timer.phase {
-            TimerPhase::Focus => Color::LightGreen,
-            TimerPhase::ShortBreak => Color::Cyan,
-            TimerPhase::LongBreak => Color::White,
-        }
-    } else {
-        timer_color(timer.phase)
-    }
-}
-
-fn cycle_line(completed_focus_sessions: u32, symbols: Symbols) -> Line<'static> {
-    let current_slot = (completed_focus_sessions % 4) as usize;
+fn cycle_line(entries: &[CycleEntryState], symbols: Symbols) -> Line<'static> {
     let mut spans = vec![Span::styled(
         "Cycle ",
         Style::default().add_modifier(Modifier::BOLD),
     )];
 
-    for index in 0..4usize {
-        let symbol = if index < current_slot {
-            symbols.done
-        } else if index == current_slot {
-            symbols.in_progress
-        } else {
-            symbols.todo
+    for (index, entry) in entries.iter().enumerate() {
+        let symbol = match entry {
+            CycleEntryState::NotStarted => symbols.todo,
+            CycleEntryState::Running => symbols.in_progress,
+            CycleEntryState::Break => symbols.breaking,
+            CycleEntryState::Completed => symbols.done,
+            CycleEntryState::Voided => symbols.voided,
         };
         spans.push(Span::raw(symbol.to_string()));
-        if index < 3 {
+        if index + 1 < entries.len() {
             spans.push(Span::raw(" "));
         }
     }
@@ -544,7 +530,9 @@ struct Symbols {
     unselected: &'static str,
     todo: &'static str,
     in_progress: &'static str,
+    breaking: &'static str,
     done: &'static str,
+    voided: &'static str,
     bar_full: &'static str,
     bar_empty: &'static str,
 }
@@ -562,9 +550,11 @@ impl Symbols {
                 stats: "%",
                 selected: ">",
                 unselected: "-",
-                todo: "[ ]",
-                in_progress: "[~]",
-                done: "[x]",
+                todo: ".",
+                in_progress: ">",
+                breaking: "~",
+                done: "x",
+                voided: "!",
                 bar_full: "=",
                 bar_empty: "-",
             },
@@ -579,8 +569,10 @@ impl Symbols {
                 selected: "󰁔",
                 unselected: "󰘍",
                 todo: "󰄱",
-                in_progress: "󰪞",
+                in_progress: "󰧞",
+                breaking: "󰒲",
                 done: "󰄵",
+                voided: "󰅖",
                 bar_full: "█",
                 bar_empty: "░",
             },
