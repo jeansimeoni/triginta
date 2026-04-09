@@ -443,6 +443,184 @@ pub struct TaskSearchView {
     pub results: Vec<TaskSearchResultView>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortcutTip {
+    pub keys: &'static str,
+    pub description: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortcutSection {
+    pub title: &'static str,
+    pub tips: &'static [ShortcutTip],
+}
+
+const GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "1-5",
+        description: "focus panel",
+    },
+    ShortcutTip {
+        keys: "Tab/S-Tab",
+        description: "next/prev panel",
+    },
+    ShortcutTip {
+        keys: "?",
+        description: "help",
+    },
+    ShortcutTip {
+        keys: "q",
+        description: "quit",
+    },
+];
+
+const TIMER_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "s/Space/Enter",
+        description: "start/resume",
+    },
+    ShortcutTip {
+        keys: "p",
+        description: "pause",
+    },
+    ShortcutTip {
+        keys: "x/Esc",
+        description: "void/reset",
+    },
+    ShortcutTip {
+        keys: "a",
+        description: "assign task",
+    },
+    ShortcutTip {
+        keys: "u",
+        description: "clear task",
+    },
+];
+
+const HISTORY_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "h/l or ←/→",
+        description: "switch range",
+    },
+    ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "move session",
+    },
+    ShortcutTip {
+        keys: "PgUp/PgDn",
+        description: "page",
+    },
+    ShortcutTip {
+        keys: "a",
+        description: "assign task",
+    },
+    ShortcutTip {
+        keys: "u",
+        description: "clear task",
+    },
+];
+
+const NAVIGATION_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "change view",
+    },
+    ShortcutTip {
+        keys: "Home/End",
+        description: "jump first/last",
+    },
+];
+
+const FAVORITES_SHORTCUTS: &[ShortcutTip] = &[ShortcutTip {
+    keys: "1-5 / Tab",
+    description: "change focus",
+}];
+
+const TASKS_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "h/l or ←/→",
+        description: "switch tab",
+    },
+    ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "move task",
+    },
+    ShortcutTip {
+        keys: "c",
+        description: "new task",
+    },
+    ShortcutTip {
+        keys: "e/d",
+        description: "rename/delete",
+    },
+    ShortcutTip {
+        keys: "a",
+        description: "assign to timer",
+    },
+    ShortcutTip {
+        keys: "Space/x",
+        description: "toggle done",
+    },
+];
+
+const STATISTICS_SHORTCUTS: &[ShortcutTip] = &[ShortcutTip {
+    keys: "h/l or ←/→",
+    description: "switch tab",
+}];
+
+const INPUT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter",
+        description: "submit",
+    },
+    ShortcutTip {
+        keys: "Esc",
+        description: "cancel",
+    },
+    ShortcutTip {
+        keys: "Home/End",
+        description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "Backspace",
+        description: "delete char",
+    },
+];
+
+const SEARCH_POPUP_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter",
+        description: "assign selected",
+    },
+    ShortcutTip {
+        keys: "Esc",
+        description: "cancel",
+    },
+    ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "move result",
+    },
+    ShortcutTip {
+        keys: "Home/End",
+        description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "Backspace",
+        description: "delete char",
+    },
+];
+
+const DELETE_CONFIRMATION_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter/y",
+        description: "confirm",
+    },
+    ShortcutTip {
+        keys: "Esc/n",
+        description: "cancel",
+    },
+];
+
 // `App` owns the mutable runtime state for the TUI loop.
 // Compared with a C program, this is the central state struct you would pass
 // around to input/render functions, but here methods are attached directly to
@@ -465,8 +643,10 @@ pub struct App {
     task_input: Option<TaskInputState>,
     task_search: Option<TaskSearchState>,
     delete_confirmation: Option<TaskId>,
+    help_open: bool,
+    help_scroll: usize,
+    help_viewport_lines: usize,
     should_quit: bool,
-    status_message: String,
     screen_data: ScreenData,
 }
 
@@ -496,8 +676,10 @@ impl App {
             task_input: None,
             task_search: None,
             delete_confirmation: None,
+            help_open: false,
+            help_scroll: 0,
+            help_viewport_lines: 0,
             should_quit: false,
-            status_message: "SQLite initialized. Local-first mode active.".to_string(),
             screen_data,
         };
         app.sync_task_selection();
@@ -530,10 +712,6 @@ impl App {
 
     pub fn theme(&self) -> ThemePalette {
         self.theme
-    }
-
-    pub fn status_message(&self) -> &str {
-        &self.status_message
     }
 
     pub fn visible_tasks(&self) -> Vec<&Task> {
@@ -627,6 +805,122 @@ impl App {
         self.history_scroll
     }
 
+    pub fn is_help_open(&self) -> bool {
+        self.help_open
+    }
+
+    pub fn help_scroll(&self) -> usize {
+        self.help_scroll
+    }
+
+    pub fn app_name(&self) -> &'static str {
+        "Triginta"
+    }
+
+    pub fn app_version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    pub fn donate_label(&self) -> &'static str {
+        "Donate"
+    }
+
+    pub fn focused_panel_shortcuts(&self) -> &'static [ShortcutTip] {
+        match self.focused_panel {
+            PanelFocus::Timer => TIMER_SHORTCUTS,
+            PanelFocus::History => HISTORY_SHORTCUTS,
+            PanelFocus::Navigation => NAVIGATION_SHORTCUTS,
+            PanelFocus::Favorites => FAVORITES_SHORTCUTS,
+            PanelFocus::RightPane => match self.active_right_panel_tab {
+                RightPanelTab::Tasks => TASKS_SHORTCUTS,
+                RightPanelTab::Statistics => STATISTICS_SHORTCUTS,
+            },
+        }
+    }
+
+    pub fn help_sections(&self) -> Vec<ShortcutSection> {
+        let mut sections = vec![
+            ShortcutSection {
+                title: "Global",
+                tips: GLOBAL_SHORTCUTS,
+            },
+            ShortcutSection {
+                title: "Timer",
+                tips: TIMER_SHORTCUTS,
+            },
+            ShortcutSection {
+                title: "History",
+                tips: HISTORY_SHORTCUTS,
+            },
+            ShortcutSection {
+                title: "Navigation",
+                tips: NAVIGATION_SHORTCUTS,
+            },
+            ShortcutSection {
+                title: "Favorites",
+                tips: FAVORITES_SHORTCUTS,
+            },
+            ShortcutSection {
+                title: "Tasks",
+                tips: TASKS_SHORTCUTS,
+            },
+            ShortcutSection {
+                title: "Statistics",
+                tips: STATISTICS_SHORTCUTS,
+            },
+        ];
+
+        if self.task_input.is_some() {
+            sections.push(ShortcutSection {
+                title: "Task Input Popup",
+                tips: INPUT_POPUP_SHORTCUTS,
+            });
+        }
+        if self.task_search.is_some() {
+            sections.push(ShortcutSection {
+                title: "Task Search Popup",
+                tips: SEARCH_POPUP_SHORTCUTS,
+            });
+        }
+        if self.delete_confirmation.is_some() {
+            sections.push(ShortcutSection {
+                title: "Delete Confirmation",
+                tips: DELETE_CONFIRMATION_SHORTCUTS,
+            });
+        }
+
+        sections
+    }
+
+    pub fn help_line_count(&self) -> usize {
+        let section_count = self.help_sections().len();
+        self.help_sections()
+            .into_iter()
+            .map(|section| section.tips.len() + 1)
+            .sum::<usize>()
+            .saturating_add(section_count.saturating_sub(1))
+    }
+
+    pub fn sync_help_viewport(&mut self, terminal_height: u16) {
+        let total_lines = self.help_line_count();
+        let popup_height = if terminal_height >= 8 {
+            (total_lines.saturating_add(2) as u16).min(terminal_height.saturating_sub(4))
+        } else {
+            (total_lines.saturating_add(2) as u16).min(terminal_height.saturating_sub(2).max(1))
+        };
+        self.help_viewport_lines = popup_height.saturating_sub(2).max(1) as usize;
+        self.clamp_help_scroll();
+    }
+
+    fn max_help_scroll(&self) -> usize {
+        self.help_line_count()
+            .saturating_sub(self.help_viewport_lines.max(1))
+    }
+
+    fn clamp_help_scroll(&mut self) {
+        self.help_scroll = self.help_scroll.min(self.max_help_scroll());
+    }
+
     fn timer_view_at(&self, now: DateTime<Local>) -> TimerView {
         TimerView {
             phase: self.timer.phase,
@@ -692,7 +986,6 @@ impl App {
     fn set_active_task_view(&mut self, view: TaskView) {
         self.active_task_view = view;
         self.sync_task_selection();
-        self.status_message = format!("Task view: {}.", view.label());
     }
 
     fn select_next_task_view(&mut self) {
@@ -738,12 +1031,10 @@ impl App {
             value: String::new(),
             cursor: 0,
         });
-        self.status_message = "Enter a new task title.".to_string();
     }
 
     fn open_rename_task_popup(&mut self) {
         let Some(task) = self.selected_task().cloned() else {
-            self.status_message = "Select a task to rename.".to_string();
             return;
         };
 
@@ -752,7 +1043,6 @@ impl App {
             cursor: task.title.len(),
             value: task.title,
         });
-        self.status_message = "Editing selected task title.".to_string();
     }
 
     fn move_input_cursor_home(input: &mut TaskInputState) {
@@ -784,12 +1074,10 @@ impl App {
 
     fn open_delete_confirmation(&mut self) {
         let Some(task_id) = self.selected_task_id else {
-            self.status_message = "Select a task to delete.".to_string();
             return;
         };
 
         self.delete_confirmation = Some(task_id);
-        self.status_message = "Confirm task deletion.".to_string();
     }
 
     fn open_timer_task_search(&mut self) {
@@ -799,12 +1087,10 @@ impl App {
             cursor: 0,
             selected_index: 0,
         });
-        self.status_message = "Search for a task to assign.".to_string();
     }
 
     fn open_history_task_search(&mut self) {
         let Some(entry) = self.selected_history_focus_entry().cloned() else {
-            self.status_message = "Select a focus session to assign.".to_string();
             return;
         };
 
@@ -814,12 +1100,10 @@ impl App {
             cursor: 0,
             selected_index: 0,
         });
-        self.status_message = "Search for a task to assign to the session.".to_string();
     }
 
     fn toggle_selected_task_status(&mut self, now: DateTime<Local>) -> Result<()> {
         let Some(task) = self.selected_task().cloned() else {
-            self.status_message = "Select a task to update.".to_string();
             return Ok(());
         };
 
@@ -838,37 +1122,27 @@ impl App {
             .update_status(task.id, next_status, completed_at)?;
         self.refresh_tasks()?;
         self.selected_task_id = Some(task.id);
-        self.status_message = format!("Task marked {}.", next_status.as_str());
         Ok(())
     }
 
     fn toggle_selected_task_assignment(&mut self) {
         let Some(task) = self.selected_task().cloned() else {
-            self.status_message = "Select a task to assign.".to_string();
             return;
         };
 
         if self.assigned_task_id == Some(task.id) {
             self.assigned_task_id = None;
-            self.status_message = "Pomodoro task cleared.".to_string();
         } else {
             self.assigned_task_id = Some(task.id);
-            self.status_message = format!("Pomodoro task set to {}.", task.title);
         }
     }
 
     fn clear_assigned_task(&mut self) {
-        if self.assigned_task_id.is_some() {
-            self.assigned_task_id = None;
-            self.status_message = "Pomodoro task cleared.".to_string();
-        } else {
-            self.status_message = "No pomodoro task assigned.".to_string();
-        }
+        self.assigned_task_id = None;
     }
 
     fn clear_selected_history_task(&mut self) -> Result<()> {
         let Some(entry) = self.selected_history_focus_entry().cloned() else {
-            self.status_message = "Select a focus session to clear.".to_string();
             return Ok(());
         };
 
@@ -876,7 +1150,6 @@ impl App {
             .pomodoro_repository()
             .update_session_task(entry.id, None)?;
         self.refresh_history()?;
-        self.status_message = "Session task cleared.".to_string();
         Ok(())
     }
 
@@ -901,32 +1174,24 @@ impl App {
     fn handle_task_overlay_key(&mut self, code: KeyCode, now: DateTime<Local>) -> Result<bool> {
         if let Some(mut search) = self.task_search.take() {
             match code {
-                KeyCode::Esc => {
-                    self.status_message = "Task search canceled.".to_string();
-                }
+                KeyCode::Esc => {}
                 KeyCode::Enter => {
                     let matches = self.searchable_tasks(search.query.as_str());
                     if let Some(task) = matches.get(search.selected_index) {
                         let task_id = task.id;
-                        let task_title = task.title.clone();
                         match search.mode {
                             TaskSearchMode::TimerAssignment => {
                                 self.assigned_task_id = Some(task_id);
-                                self.status_message =
-                                    format!("Pomodoro task set to {}.", task_title);
                             }
                             TaskSearchMode::HistoryAssignment(session_id) => {
                                 self.database
                                     .pomodoro_repository()
                                     .update_session_task(session_id, Some(task_id))?;
                                 self.refresh_history()?;
-                                self.status_message =
-                                    format!("Session task set to {}.", task_title);
                             }
                         }
                     } else {
                         self.task_search = Some(search);
-                        self.status_message = "No matching task to assign.".to_string();
                     }
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
@@ -972,11 +1237,9 @@ impl App {
                     self.database.task_repository().delete(task_id)?;
                     self.delete_confirmation = None;
                     self.refresh_tasks()?;
-                    self.status_message = "Task removed from active lists.".to_string();
                 }
                 KeyCode::Esc | KeyCode::Char('n') => {
                     self.delete_confirmation = None;
-                    self.status_message = "Task deletion canceled.".to_string();
                 }
                 _ => {}
             }
@@ -988,14 +1251,11 @@ impl App {
         };
 
         match code {
-            KeyCode::Esc => {
-                self.status_message = "Task input canceled.".to_string();
-            }
+            KeyCode::Esc => {}
             KeyCode::Enter => {
                 let title = input.value.trim();
                 if title.is_empty() {
                     self.task_input = Some(input);
-                    self.status_message = "Task title cannot be empty.".to_string();
                     return Ok(true);
                 }
 
@@ -1004,7 +1264,6 @@ impl App {
                         let task = self.database.task_repository().create(title, now)?;
                         self.refresh_tasks()?;
                         self.selected_task_id = Some(task.id);
-                        self.status_message = "Task created.".to_string();
                     }
                     TaskInputMode::Rename(task_id) => {
                         self.database
@@ -1012,7 +1271,6 @@ impl App {
                             .update_title(task_id, title)?;
                         self.refresh_tasks()?;
                         self.selected_task_id = Some(task_id);
-                        self.status_message = "Task renamed.".to_string();
                     }
                 }
             }
@@ -1079,7 +1337,43 @@ impl App {
             return Ok(());
         }
 
+        if self.help_open {
+            match code {
+                KeyCode::Esc | KeyCode::Char('?') => {
+                    self.help_open = false;
+                    self.help_scroll = 0;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.help_scroll = (self.help_scroll + 1).min(self.max_help_scroll());
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                }
+                KeyCode::PageDown => {
+                    self.help_scroll = (self.help_scroll + self.help_viewport_lines.max(1))
+                        .min(self.max_help_scroll());
+                }
+                KeyCode::PageUp => {
+                    self.help_scroll = self
+                        .help_scroll
+                        .saturating_sub(self.help_viewport_lines.max(1));
+                }
+                KeyCode::Home => {
+                    self.help_scroll = 0;
+                }
+                KeyCode::End => {
+                    self.help_scroll = self.max_help_scroll();
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         match code {
+            KeyCode::Char('?') => {
+                self.help_open = true;
+                self.help_scroll = 0;
+            }
             KeyCode::Char('c') => {
                 self.open_create_task_popup();
             }
@@ -1089,52 +1383,28 @@ impl App {
                     self.refresh_history()?;
                 }
                 self.should_quit = true;
-                self.status_message = "Shutting down Triginta.".to_string();
             }
             KeyCode::Char(key) if PanelFocus::from_shortcut(key).is_some() => {
                 self.focused_panel =
                     PanelFocus::from_shortcut(key).expect("focus shortcut checked");
-                self.status_message = format!("Focused {} panel.", self.focused_panel.title());
             }
             KeyCode::Tab => {
                 self.focused_panel = self.focused_panel.next();
-                self.status_message = format!("Focused {} panel.", self.focused_panel.title());
             }
             KeyCode::BackTab => {
                 self.focused_panel = self.focused_panel.previous();
-                self.status_message = format!("Focused {} panel.", self.focused_panel.title());
             }
             KeyCode::Char('l') | KeyCode::Right if self.focused_panel == PanelFocus::RightPane => {
                 self.active_right_panel_tab = self.active_right_panel_tab.next();
-                self.status_message = match self.active_right_panel_tab {
-                    RightPanelTab::Tasks => "Switched right panel to tasks.".to_string(),
-                    RightPanelTab::Statistics => "Switched right panel to statistics.".to_string(),
-                };
             }
             KeyCode::Char('h') | KeyCode::Left if self.focused_panel == PanelFocus::RightPane => {
                 self.active_right_panel_tab = self.active_right_panel_tab.previous();
-                self.status_message = match self.active_right_panel_tab {
-                    RightPanelTab::Tasks => "Switched right panel to tasks.".to_string(),
-                    RightPanelTab::Statistics => "Switched right panel to statistics.".to_string(),
-                };
             }
             KeyCode::Char('l') | KeyCode::Right if self.focused_panel == PanelFocus::History => {
                 self.active_history_panel_tab = self.active_history_panel_tab.next();
-                self.status_message = match self.active_history_panel_tab {
-                    HistoryPanelTab::Today => "Switched history panel to today.".to_string(),
-                    HistoryPanelTab::Last7Days => {
-                        "Switched history panel to last 7 days.".to_string()
-                    }
-                };
             }
             KeyCode::Char('h') | KeyCode::Left if self.focused_panel == PanelFocus::History => {
                 self.active_history_panel_tab = self.active_history_panel_tab.previous();
-                self.status_message = match self.active_history_panel_tab {
-                    HistoryPanelTab::Today => "Switched history panel to today.".to_string(),
-                    HistoryPanelTab::Last7Days => {
-                        "Switched history panel to last 7 days.".to_string()
-                    }
-                };
             }
             KeyCode::Char('j') | KeyCode::Down if self.focused_panel == PanelFocus::History => {
                 if self.active_history_panel_tab == HistoryPanelTab::Today {
@@ -1231,11 +1501,9 @@ impl App {
             {
                 self.begin_focus_task_if_needed();
                 self.timer.start_or_resume(now);
-                self.status_message = format!("{} started.", self.timer.phase.label());
             }
             KeyCode::Char('p') if self.focused_panel == PanelFocus::Timer => {
                 self.timer.pause(now);
-                self.status_message = format!("{} paused.", self.timer.phase.label());
             }
             KeyCode::Char('x') | KeyCode::Esc if self.focused_panel == PanelFocus::Timer => {
                 let current_cycle_state = self
@@ -1248,19 +1516,15 @@ impl App {
                     && self.timer.phase == TimerPhase::Focus
                     && current_cycle_state == CycleEntryState::NotStarted
                 {
-                    self.status_message = "Timer already ready.".to_string();
                 } else if matches!(
                     self.timer.phase,
                     TimerPhase::ShortBreak | TimerPhase::LongBreak
                 ) {
                     self.finish_break_early(now)?;
-                    self.status_message = "Break ended early. Focus ready.".to_string();
                 } else {
                     self.record_voided_entry(now)?;
                     self.timer.void_current_and_prepare_next();
                     self.refresh_history()?;
-                    self.status_message =
-                        "Current pomodoro voided. Next pomodoro ready.".to_string();
                 }
             }
             _ => {}
@@ -1308,10 +1572,6 @@ impl App {
                 self.timer.move_to_phase(next_phase);
                 self.timer.start_or_resume(now);
                 self.refresh_history()?;
-                self.status_message = format!(
-                    "Pomodoro complete. {} started automatically.",
-                    next_phase.label()
-                );
             }
             TimerPhase::ShortBreak | TimerPhase::LongBreak => {
                 let break_phase = self.timer.phase;
@@ -1339,7 +1599,6 @@ impl App {
                     self.timer.prepare_next_focus_slot();
                 }
                 self.refresh_history()?;
-                self.status_message = "Break complete. Pomodoro ready.".to_string();
             }
         }
 
@@ -1503,6 +1762,7 @@ fn run_event_loop(
 ) -> Result<()> {
     while !app.should_quit() {
         app.on_tick()?;
+        app.sync_help_viewport(terminal.size()?.height);
         terminal
             .draw(|frame| ui::render(frame, app))
             .context("failed to draw terminal frame")?;
@@ -1653,6 +1913,7 @@ mod tests {
     fn app_starts_running() {
         let app = test_app();
         assert!(!app.should_quit());
+        assert!(!app.is_help_open());
         assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
         assert_eq!(app.active_history_panel_tab(), HistoryPanelTab::Today);
         assert_eq!(app.active_task_view(), TaskView::All);
@@ -2029,6 +2290,58 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Char('q'))
             .expect("quit should succeed");
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn app_toggles_help_dialog_with_question_mark_and_escape() {
+        let mut app = test_app();
+
+        app.handle_key(crossterm::event::KeyCode::Char('?'))
+            .expect("help should open");
+        assert!(app.is_help_open());
+
+        app.handle_key(crossterm::event::KeyCode::Esc)
+            .expect("help should close");
+        assert!(!app.is_help_open());
+
+        app.handle_key(crossterm::event::KeyCode::Char('?'))
+            .expect("help should open again");
+        app.handle_key(crossterm::event::KeyCode::Char('?'))
+            .expect("help should close with question mark");
+        assert!(!app.is_help_open());
+    }
+
+    #[test]
+    fn help_dialog_supports_scrolling_and_resets_on_close() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('?'))
+            .expect("help should open");
+        app.sync_help_viewport(12);
+
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("help should scroll down");
+        assert_eq!(app.help_scroll(), 1);
+
+        app.handle_key(crossterm::event::KeyCode::PageDown)
+            .expect("help should page down");
+        assert_eq!(app.help_scroll(), 7);
+
+        app.handle_key(crossterm::event::KeyCode::End)
+            .expect("help should jump to end");
+        assert_eq!(app.help_scroll(), app.max_help_scroll());
+
+        app.handle_key(crossterm::event::KeyCode::Up)
+            .expect("help should scroll up");
+        assert_eq!(app.help_scroll(), app.max_help_scroll().saturating_sub(1));
+
+        app.handle_key(crossterm::event::KeyCode::Home)
+            .expect("help should jump to top");
+        assert_eq!(app.help_scroll(), 0);
+
+        app.handle_key(crossterm::event::KeyCode::Esc)
+            .expect("help should close");
+        assert!(!app.is_help_open());
+        assert_eq!(app.help_scroll(), 0);
     }
 
     #[test]

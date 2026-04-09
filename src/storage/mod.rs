@@ -133,7 +133,7 @@ impl Database {
         self.connection
             .execute_batch(SCHEMA)
             .context("failed to initialize database schema")?;
-        self.ensure_tasks_deleted_at_column()?;
+        self.ensure_tasks_column("deleted_at", "ALTER TABLE tasks ADD COLUMN deleted_at TEXT")?;
         self.connection
             .execute(
                 "INSERT OR IGNORE INTO app_metadata(key, value) VALUES (?1, ?2)",
@@ -143,7 +143,7 @@ impl Database {
         Ok(())
     }
 
-    fn ensure_tasks_deleted_at_column(&self) -> Result<()> {
+    fn ensure_tasks_column(&self, column_name: &str, alter_sql: &str) -> Result<()> {
         let mut statement = self
             .connection
             .prepare("PRAGMA table_info(tasks)")
@@ -153,13 +153,13 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("failed to read task schema")?;
 
-        if columns.iter().any(|column| column == "deleted_at") {
+        if columns.iter().any(|column| column == column_name) {
             return Ok(());
         }
 
         self.connection
-            .execute("ALTER TABLE tasks ADD COLUMN deleted_at TEXT", [])
-            .context("failed to add deleted_at column to tasks")?;
+            .execute(alter_sql, [])
+            .with_context(|| format!("failed to add {} column to tasks", column_name))?;
         Ok(())
     }
 

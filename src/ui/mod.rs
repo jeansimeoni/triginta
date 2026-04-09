@@ -12,7 +12,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     app::{
         App, CycleEntryState, DeleteConfirmationView, HistoryPanelTab, PanelFocus, RightPanelTab,
-        ScreenData, TaskInputView, TaskSearchView, TaskView, TimerPhase,
+        ScreenData, ShortcutSection, ShortcutTip, TaskInputView, TaskSearchView, TaskView,
+        TimerPhase,
     },
     config::GlyphMode,
     domain::{DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
@@ -28,7 +29,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .split(frame.area());
 
     render_body(frame, app, layout[0], symbols, palette);
-    render_status(frame, app, layout[1], palette);
+    render_status_bar(frame, app, layout[1], palette);
     render_task_overlay(frame, app, symbols, palette);
 }
 
@@ -519,21 +520,71 @@ fn render_statistics_panel(
     frame.render_widget(stats, area);
 }
 
-fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, palette: ThemePalette) {
-    let message = format!(
-        "{}  |  1-5: focus panel  tab: cycle focus  j/k or ↑/↓: navigate panels  c/e/d/a: task actions  a/u on timer: assign or clear  space/x: toggle task or void timer  q: quit",
-        app.status_message()
+fn render_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect, palette: ThemePalette) {
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(palette.border));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 {
+        return;
+    }
+
+    let left = Line::from(vec![Span::styled(
+        app.app_name(),
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD),
+    )]);
+    frame.render_widget(Paragraph::new(left), inner);
+
+    let right_width = app
+        .donate_label()
+        .width()
+        .saturating_add(app.app_version().width())
+        .saturating_add(5) as u16;
+    let left_width = app.app_name().width() as u16;
+    let gutter = 2u16;
+
+    let right_x = inner
+        .x
+        .saturating_add(inner.width.saturating_sub(right_width.min(inner.width)));
+    let right_area = Rect::new(
+        right_x,
+        inner.y,
+        inner.width.saturating_sub(right_x - inner.x),
+        1,
+    );
+    let right = Line::from(vec![
+        Span::styled(app.donate_label(), Style::default().fg(palette.accent)),
+        Span::raw("  "),
+        Span::styled(app.app_version(), Style::default().fg(palette.subtle_text)),
+    ])
+    .right_aligned();
+    frame.render_widget(Paragraph::new(right), right_area);
+
+    let center_x = inner.x.saturating_add(left_width.saturating_add(gutter));
+    let reserved_right = right_width.saturating_add(gutter);
+    let center_width = inner.width.saturating_sub(
+        left_width
+            .saturating_add(reserved_right)
+            .saturating_add(gutter),
     );
 
-    let status = Paragraph::new(message)
-        .style(Style::default().fg(palette.subtle_text))
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(palette.border)),
-        );
+    if center_width == 0 || center_x >= right_x {
+        return;
+    }
 
-    frame.render_widget(status, area);
+    let center_area = Rect::new(center_x, inner.y, center_width, 1);
+    let center_text = footer_shortcuts_line(app, center_width as usize);
+    if !center_text.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(center_text).centered())
+                .style(Style::default().fg(palette.subtle_text)),
+            center_area,
+        );
+    }
 }
 
 fn favorite_tasks(tasks: &[Task]) -> Vec<&Task> {
@@ -564,6 +615,11 @@ fn task_summary_line(
 }
 
 fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palette: ThemePalette) {
+    if app.is_help_open() {
+        render_help_dialog(frame, app, palette);
+        return;
+    }
+
     if let Some(search) = app.task_search_view() {
         render_task_search_popup(frame, &search, palette);
         return;
@@ -577,6 +633,148 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
     if let Some(confirmation) = app.delete_confirmation_view() {
         render_delete_confirmation(frame, &confirmation, palette);
     }
+}
+
+fn render_help_dialog(frame: &mut Frame<'_>, app: &App, palette: ThemePalette) {
+    let sections = app.help_sections();
+    let lines = help_lines(
+        sections.as_slice(),
+        frame.area().width.saturating_sub(4) as usize,
+        palette,
+    );
+    let max_height = frame.area().height.saturating_sub(4).max(6);
+    let desired_height = (lines.len().saturating_add(2) as u16).min(max_height);
+    let area = centered_rect(frame.area(), 84, desired_height);
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            "Keyboard Shortcuts",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from("j/k or PgUp/PgDn scroll  Esc or ? closes").right_aligned())
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent));
+    let inner = block.inner(area);
+    let visible_height = inner.height as usize;
+    let start = app
+        .help_scroll()
+        .min(lines.len().saturating_sub(visible_height.max(1)));
+    let end = (start + visible_height).min(lines.len());
+    let visible_lines = if start < end {
+        lines[start..end].to_vec()
+    } else {
+        Vec::new()
+    };
+    let popup = Paragraph::new(visible_lines).block(block);
+
+    frame.render_widget(popup, area);
+
+    if lines.len() > visible_height {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(lines.len())
+            .position(start);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("▐")
+            .thumb_style(Style::default().fg(palette.subtle_text));
+        frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+    }
+}
+
+fn help_lines(
+    sections: &[ShortcutSection],
+    width: usize,
+    palette: ThemePalette,
+) -> Vec<Line<'static>> {
+    let key_width = sections
+        .iter()
+        .flat_map(|section| section.tips.iter())
+        .map(|tip| tip.keys.width())
+        .max()
+        .unwrap_or(0)
+        .min(width.saturating_sub(4));
+    let mut lines = Vec::new();
+
+    for (index, section) in sections.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::from(""));
+        }
+
+        lines.push(Line::from(vec![Span::styled(
+            section.title,
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )]));
+
+        for tip in section.tips {
+            let padding = " ".repeat(key_width.saturating_sub(tip.keys.width()));
+            let text = format!("  {}{}  {}", tip.keys, padding, tip.description);
+            lines.push(Line::from(ellipsize_end(
+                text.as_str(),
+                width.saturating_sub(1),
+            )));
+        }
+    }
+
+    lines
+}
+
+fn footer_shortcuts_line(app: &App, width: usize) -> String {
+    let mut tips = Vec::new();
+    tips.extend_from_slice(&[
+        ShortcutTip {
+            keys: "1-5",
+            description: "focus",
+        },
+        ShortcutTip {
+            keys: "Tab",
+            description: "next panel",
+        },
+        ShortcutTip {
+            keys: "?",
+            description: "help",
+        },
+        ShortcutTip {
+            keys: "q",
+            description: "quit",
+        },
+    ]);
+    tips.extend_from_slice(app.focused_panel_shortcuts());
+
+    let mut parts = Vec::new();
+    for tip in tips {
+        parts.push(format!("{} {}", tip.keys, tip.description));
+    }
+
+    fit_footer_parts(parts.as_slice(), width)
+}
+
+fn fit_footer_parts(parts: &[String], width: usize) -> String {
+    let separator = "  ·  ";
+    let mut rendered = String::new();
+
+    for part in parts {
+        let candidate = if rendered.is_empty() {
+            part.clone()
+        } else {
+            format!("{rendered}{separator}{part}")
+        };
+
+        if candidate.width() > width {
+            break;
+        }
+
+        rendered = candidate;
+    }
+
+    rendered
 }
 
 fn render_task_input_popup(
