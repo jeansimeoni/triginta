@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::domain::{HistoryStats, PomodoroId, PomodoroSession, Task, TaskId, TaskStatus};
+use crate::domain::{
+    HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task, TaskId, TaskStatus,
+};
 
 // Keeping the schema as a string literal makes bootstrap simple for this early
 // vertical slice. `execute_batch` sends the whole script to SQLite at once,
@@ -27,6 +29,18 @@ CREATE TABLE IF NOT EXISTS pomodoros (
     FOREIGN KEY(task_id) REFERENCES tasks(id)
 );
 
+CREATE TABLE IF NOT EXISTS session_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER,
+    kind TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    next_break_kind TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    duration_seconds INTEGER NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(id)
+);
+
 CREATE TABLE IF NOT EXISTS app_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -41,15 +55,34 @@ pub trait TaskRepository {
 }
 
 pub trait PomodoroRepository {
-    fn list_recent(&self, limit: usize) -> Result<Vec<PomodoroSession>>;
-    fn stats(&self) -> Result<HistoryStats>;
+    fn list_day(
+        &self,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+    ) -> Result<Vec<SessionEntry>>;
+    fn stats_for_day(
+        &self,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+    ) -> Result<HistoryStats>;
     fn create(
         &self,
         task_id: Option<TaskId>,
+        next_break_kind: Option<SessionKind>,
         started_at: DateTime<Local>,
         ended_at: DateTime<Local>,
         duration_minutes: u32,
-    ) -> Result<PomodoroSession>;
+    ) -> Result<SessionEntry>;
+    fn record_session_entry(
+        &self,
+        task_id: Option<TaskId>,
+        kind: SessionKind,
+        outcome: SessionOutcome,
+        next_break_kind: Option<SessionKind>,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+        duration_seconds: u32,
+    ) -> Result<SessionEntry>;
 }
 
 #[derive(Debug)]
@@ -145,42 +178,56 @@ pub struct SqlitePomodoroRepository<'a> {
 }
 
 impl PomodoroRepository for SqlitePomodoroRepository<'_> {
-    fn list_recent(&self, limit: usize) -> Result<Vec<PomodoroSession>> {
+    fn list_day(
+        &self,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+    ) -> Result<Vec<SessionEntry>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, task_id, started_at, ended_at, duration_minutes
-             FROM pomodoros
+            "SELECT id, task_id, kind, outcome, next_break_kind, started_at, ended_at, duration_seconds
+             FROM session_history
+             WHERE started_at >= ?1 AND started_at < ?2
              ORDER BY started_at DESC, id DESC
-             LIMIT ?1",
+            ",
         )?;
 
-        let rows = statement.query_map([limit as i64], |row| {
-            Ok(PomodoroSession {
-                id: PomodoroId(row.get(0)?),
-                // `Option<T>` replaces the common C pattern of sentinel values
-                // or NULL checks. `map(TaskId)` converts `Some(i64)` into
-                // `Some(TaskId)` and leaves `None` unchanged.
+        let rows = statement.query_map(params![started_at, ended_at], |row| {
+            Ok(SessionEntry {
+                id: row.get(0)?,
                 task_id: row.get::<_, Option<i64>>(1)?.map(TaskId),
-                started_at: row.get(2)?,
-                ended_at: row.get(3)?,
-                duration_minutes: row.get::<_, i64>(4)? as u32,
+                kind: SessionKind::from_db(row.get::<_, String>(2)?.as_str()),
+                outcome: SessionOutcome::from_db(row.get::<_, String>(3)?.as_str()),
+                next_break_kind: row
+                    .get::<_, Option<String>>(4)?
+                    .map(|value| SessionKind::from_db(value.as_str())),
+                started_at: row.get(5)?,
+                ended_at: row.get(6)?,
+                duration_seconds: row.get::<_, i64>(7)? as u32,
             })
         })?;
 
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to load pomodoro history")
+            .context("failed to load session history")
     }
 
-    fn stats(&self) -> Result<HistoryStats> {
+    fn stats_for_day(
+        &self,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+    ) -> Result<HistoryStats> {
         let mut statement = self.connection.prepare(
             "SELECT
-                COUNT(*) AS total_sessions,
-                COALESCE(SUM(duration_minutes), 0) AS total_minutes
-             FROM pomodoros",
+                COALESCE(SUM(CASE WHEN kind IN ('focus', 'work') THEN duration_seconds ELSE 0 END), 0) AS total_work_seconds,
+                COALESCE(SUM(CASE WHEN kind IN ('short_break', 'long_break') THEN duration_seconds ELSE 0 END), 0) AS total_break_seconds
+             FROM session_history
+             WHERE started_at >= ?1 AND started_at < ?2",
         )?;
 
-        let (total_sessions, total_minutes): (i64, i64) = statement
-            .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .context("failed to compute pomodoro stats")?;
+        let (total_work_seconds, total_break_seconds): (i64, i64) = statement
+            .query_row(params![started_at, ended_at], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .context("failed to compute session stats")?;
 
         // `optional()` converts "query returned no row" into `Ok(None)`.
         // For `COUNT(*)` that case should not really occur, but this keeps the
@@ -196,8 +243,20 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
             .unwrap_or(0_i64);
 
         Ok(HistoryStats {
-            total_sessions: total_sessions as usize,
-            total_minutes: total_minutes as u32,
+            total_sessions: self
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM session_history
+                     WHERE started_at >= ?1 AND started_at < ?2
+                       AND kind IN ('focus', 'work')",
+                    params![started_at, ended_at],
+                    |row| row.get::<_, i64>(0),
+                )
+                .context("failed to compute focus session count")?
+                as usize,
+            total_minutes: (total_work_seconds as u32).div_ceil(60),
+            total_work_seconds: total_work_seconds as u32,
+            total_break_seconds: total_break_seconds as u32,
             completed_tasks: completed_tasks as usize,
         })
     }
@@ -205,10 +264,11 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
     fn create(
         &self,
         task_id: Option<TaskId>,
+        next_break_kind: Option<SessionKind>,
         started_at: DateTime<Local>,
         ended_at: DateTime<Local>,
         duration_minutes: u32,
-    ) -> Result<PomodoroSession> {
+    ) -> Result<SessionEntry> {
         self.connection
             .execute(
                 "INSERT INTO pomodoros(task_id, started_at, ended_at, duration_minutes)
@@ -222,12 +282,52 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
             )
             .context("failed to insert pomodoro session")?;
 
-        Ok(PomodoroSession {
-            id: PomodoroId(self.connection.last_insert_rowid()),
+        self.record_session_entry(
             task_id,
+            SessionKind::Focus,
+            SessionOutcome::Completed,
+            next_break_kind,
             started_at,
-            ended_at: Some(ended_at),
-            duration_minutes,
+            ended_at,
+            duration_minutes * 60,
+        )
+    }
+
+    fn record_session_entry(
+        &self,
+        task_id: Option<TaskId>,
+        kind: SessionKind,
+        outcome: SessionOutcome,
+        next_break_kind: Option<SessionKind>,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+        duration_seconds: u32,
+    ) -> Result<SessionEntry> {
+        self.connection
+            .execute(
+                "INSERT INTO session_history(task_id, kind, outcome, next_break_kind, started_at, ended_at, duration_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    task_id.map(|task_id| task_id.0),
+                    kind.as_str(),
+                    outcome.as_str(),
+                    next_break_kind.as_ref().map(SessionKind::as_str),
+                    started_at,
+                    ended_at,
+                    i64::from(duration_seconds)
+                ],
+            )
+            .context("failed to insert session history entry")?;
+
+        Ok(SessionEntry {
+            id: self.connection.last_insert_rowid(),
+            task_id,
+            kind,
+            outcome,
+            next_break_kind,
+            started_at,
+            ended_at,
+            duration_seconds,
         })
     }
 }
@@ -235,6 +335,7 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
+    use chrono::Local;
 
     use super::{Database, PomodoroRepository, TaskRepository};
 
@@ -245,13 +346,22 @@ mod tests {
         // without the boilerplate of creating and deleting files yourself.
         let database = Database::open_in_memory()?;
         let tasks = database.task_repository().list_all()?;
-        let sessions = database.pomodoro_repository().list_recent(25)?;
-        let stats = database.pomodoro_repository().stats()?;
+        let now = Local::now();
+        let sessions = database.pomodoro_repository().list_day(
+            now - chrono::Duration::hours(1),
+            now + chrono::Duration::hours(1),
+        )?;
+        let stats = database.pomodoro_repository().stats_for_day(
+            now - chrono::Duration::hours(1),
+            now + chrono::Duration::hours(1),
+        )?;
 
         assert!(tasks.is_empty());
         assert!(sessions.is_empty());
         assert_eq!(stats.total_sessions, 0);
         assert_eq!(stats.total_minutes, 0);
+        assert_eq!(stats.total_work_seconds, 0);
+        assert_eq!(stats.total_break_seconds, 0);
         assert_eq!(stats.completed_tasks, 0);
 
         Ok(())

@@ -56,17 +56,70 @@ pub struct Task {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PomodoroSession {
-    pub id: PomodoroId,
+pub enum SessionKind {
+    Focus,
+    ShortBreak,
+    LongBreak,
+}
+
+impl SessionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Focus => "focus",
+            Self::ShortBreak => "short_break",
+            Self::LongBreak => "long_break",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "short_break" => Self::ShortBreak,
+            "long_break" => Self::LongBreak,
+            "work" | "focus" => Self::Focus,
+            _ => Self::Focus,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionOutcome {
+    Completed,
+    Voided,
+}
+
+impl SessionOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Voided => "voided",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "voided" => Self::Voided,
+            _ => Self::Completed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEntry {
+    pub id: i64,
     pub task_id: Option<TaskId>,
+    pub kind: SessionKind,
+    pub outcome: SessionOutcome,
+    pub next_break_kind: Option<SessionKind>,
     pub started_at: DateTime<Local>,
-    pub ended_at: Option<DateTime<Local>>,
-    pub duration_minutes: u32,
+    pub ended_at: DateTime<Local>,
+    pub duration_seconds: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HistoryStats {
     pub total_sessions: usize,
     pub total_minutes: u32,
+    pub total_work_seconds: u32,
+    pub total_break_seconds: u32,
     pub completed_tasks: usize,
 }

@@ -12,7 +12,7 @@ use tracing::info;
 
 use crate::{
     config::{AppConfig, AppPaths, GlyphMode, TimerSettings, init_tracing, load_app_config},
-    domain::{HistoryStats, PomodoroSession, Task},
+    domain::{HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task},
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
     storage::{Database, PomodoroRepository, TaskRepository},
     theme::ThemePalette,
@@ -145,7 +145,7 @@ impl TimerRunState {
         match self {
             Self::Idle => "Ready",
             Self::Running => match phase {
-                TimerPhase::Focus => "Work",
+                TimerPhase::Focus => "Focus",
                 TimerPhase::ShortBreak | TimerPhase::LongBreak => "Break",
             },
             Self::Paused => "Paused",
@@ -314,7 +314,7 @@ pub struct TimerView {
 #[derive(Debug, Clone, Default)]
 pub struct ScreenData {
     pub tasks: Vec<Task>,
-    pub recent_sessions: Vec<PomodoroSession>,
+    pub history_entries: Vec<SessionEntry>,
     pub stats: HistoryStats,
 }
 
@@ -331,6 +331,7 @@ pub struct App {
     glyph_mode: GlyphMode,
     theme: ThemePalette,
     timer: TimerState,
+    history_scroll: usize,
     should_quit: bool,
     status_message: String,
     screen_data: ScreenData,
@@ -353,6 +354,7 @@ impl App {
             glyph_mode,
             theme,
             timer: TimerState::new(long_break_interval),
+            history_scroll: 0,
             should_quit: false,
             status_message: "SQLite initialized. Local-first mode active.".to_string(),
             screen_data,
@@ -398,6 +400,10 @@ impl App {
         self.timer_view_at(Local::now())
     }
 
+    pub fn history_scroll(&self) -> usize {
+        self.history_scroll
+    }
+
     fn timer_view_at(&self, now: DateTime<Local>) -> TimerView {
         TimerView {
             phase: self.timer.phase,
@@ -419,6 +425,10 @@ impl App {
         // aliasing bugs that are easy to create in C.
         match code {
             KeyCode::Char('q') => {
+                if self.timer.run_state == TimerRunState::Running {
+                    self.record_voided_entry(now)?;
+                    self.refresh_history()?;
+                }
                 self.should_quit = true;
                 self.status_message = "Shutting down Triginta.".to_string();
             }
@@ -449,6 +459,24 @@ impl App {
                     RightPanelTab::Statistics => "Switched right panel to statistics.".to_string(),
                 };
             }
+            KeyCode::Char('j') | KeyCode::Down if self.focused_panel == PanelFocus::History => {
+                self.scroll_history_down();
+            }
+            KeyCode::Char('k') | KeyCode::Up if self.focused_panel == PanelFocus::History => {
+                self.scroll_history_up();
+            }
+            KeyCode::PageDown if self.focused_panel == PanelFocus::History => {
+                self.scroll_history_page_down();
+            }
+            KeyCode::PageUp if self.focused_panel == PanelFocus::History => {
+                self.scroll_history_page_up();
+            }
+            KeyCode::Home if self.focused_panel == PanelFocus::History => {
+                self.history_scroll = 0;
+            }
+            KeyCode::End if self.focused_panel == PanelFocus::History => {
+                self.history_scroll = self.max_history_scroll();
+            }
             KeyCode::Char('s') | KeyCode::Char(' ') | KeyCode::Enter
                 if self.focused_panel == PanelFocus::Timer =>
             {
@@ -471,8 +499,16 @@ impl App {
                     && current_cycle_state == CycleEntryState::NotStarted
                 {
                     self.status_message = "Timer already ready.".to_string();
+                } else if matches!(
+                    self.timer.phase,
+                    TimerPhase::ShortBreak | TimerPhase::LongBreak
+                ) {
+                    self.finish_break_early(now)?;
+                    self.status_message = "Break ended early. Focus ready.".to_string();
                 } else {
+                    self.record_voided_entry(now)?;
                     self.timer.void_current_and_prepare_next();
+                    self.refresh_history()?;
                     self.status_message =
                         "Current pomodoro voided. Next pomodoro ready.".to_string();
                 }
@@ -502,13 +538,6 @@ impl App {
                     .timer
                     .current_phase_started_at
                     .unwrap_or(now - chrono_duration(self.timer_settings.pomodoro_length));
-                self.database.pomodoro_repository().create(
-                    None,
-                    started_at,
-                    now,
-                    duration_to_stored_minutes(self.timer_settings.pomodoro_length),
-                )?;
-
                 let next_phase = if self.timer.completed_cycles_in_round + 1
                     == self.timer_settings.long_break_interval
                 {
@@ -516,6 +545,14 @@ impl App {
                 } else {
                     TimerPhase::ShortBreak
                 };
+
+                self.database.pomodoro_repository().create(
+                    None,
+                    Some(session_kind_for_phase(next_phase)),
+                    started_at,
+                    now,
+                    duration_to_stored_minutes(self.timer_settings.pomodoro_length),
+                )?;
 
                 self.timer.move_to_phase(next_phase);
                 self.timer.start_or_resume(now);
@@ -526,6 +563,21 @@ impl App {
                 );
             }
             TimerPhase::ShortBreak | TimerPhase::LongBreak => {
+                let break_phase = self.timer.phase;
+                let started_at = self
+                    .timer
+                    .current_phase_started_at
+                    .unwrap_or(now - break_phase.duration(&self.timer_settings));
+                self.database.pomodoro_repository().record_session_entry(
+                    None,
+                    session_kind_for_phase(break_phase),
+                    SessionOutcome::Completed,
+                    None,
+                    started_at,
+                    now,
+                    self.timer.elapsed_at(now).num_seconds().max(0) as u32,
+                )?;
+
                 let completed_long_break = self.timer.phase == TimerPhase::LongBreak;
                 self.timer.complete_break();
                 if completed_long_break {
@@ -535,6 +587,7 @@ impl App {
                     self.timer.move_to_phase(TimerPhase::Focus);
                     self.timer.prepare_next_focus_slot();
                 }
+                self.refresh_history()?;
                 self.status_message = "Break complete. Pomodoro ready.".to_string();
             }
         }
@@ -543,9 +596,83 @@ impl App {
     }
 
     fn refresh_history(&mut self) -> Result<()> {
-        self.screen_data.recent_sessions = self.database.pomodoro_repository().list_recent(10)?;
-        self.screen_data.stats = self.database.pomodoro_repository().stats()?;
+        let (started_at, ended_at) = today_bounds(Local::now());
+        self.screen_data.history_entries = self
+            .database
+            .pomodoro_repository()
+            .list_day(started_at, ended_at)?;
+        self.screen_data.stats = self
+            .database
+            .pomodoro_repository()
+            .stats_for_day(started_at, ended_at)?;
+        self.history_scroll = self.history_scroll.min(self.max_history_scroll());
         Ok(())
+    }
+
+    fn finish_break_early(&mut self, now: DateTime<Local>) -> Result<()> {
+        let break_phase = self.timer.phase;
+        let started_at = self.timer.current_phase_started_at.unwrap_or(now);
+        self.database.pomodoro_repository().record_session_entry(
+            None,
+            session_kind_for_phase(break_phase),
+            SessionOutcome::Completed,
+            None,
+            started_at,
+            now,
+            self.timer.elapsed_at(now).num_seconds().max(0) as u32,
+        )?;
+
+        let completed_long_break = break_phase == TimerPhase::LongBreak;
+        self.timer.complete_break();
+        if completed_long_break {
+            self.timer
+                .reset_round(self.timer_settings.long_break_interval);
+        } else {
+            self.timer.move_to_phase(TimerPhase::Focus);
+            self.timer.prepare_next_focus_slot();
+        }
+        self.refresh_history()?;
+        Ok(())
+    }
+
+    fn record_voided_entry(&mut self, now: DateTime<Local>) -> Result<()> {
+        let duration_seconds = self.timer.elapsed_at(now).num_seconds().max(0) as u32;
+        let started_at = self.timer.current_phase_started_at.unwrap_or(now);
+        self.database.pomodoro_repository().record_session_entry(
+            None,
+            session_kind_for_phase(self.timer.phase),
+            SessionOutcome::Voided,
+            None,
+            started_at,
+            now,
+            duration_seconds,
+        )?;
+        Ok(())
+    }
+
+    fn max_history_scroll(&self) -> usize {
+        self.screen_data
+            .history_entries
+            .iter()
+            .filter(|entry| entry.kind == SessionKind::Focus)
+            .count()
+            .saturating_sub(1)
+    }
+
+    fn scroll_history_down(&mut self) {
+        self.history_scroll = (self.history_scroll + 1).min(self.max_history_scroll());
+    }
+
+    fn scroll_history_up(&mut self) {
+        self.history_scroll = self.history_scroll.saturating_sub(1);
+    }
+
+    fn scroll_history_page_down(&mut self) {
+        self.history_scroll = (self.history_scroll + 5).min(self.max_history_scroll());
+    }
+
+    fn scroll_history_page_up(&mut self) {
+        self.history_scroll = self.history_scroll.saturating_sub(5);
     }
 }
 
@@ -563,10 +690,15 @@ pub fn run(options: RunOptions) -> Result<()> {
     info!("starting triginta");
 
     let database = Database::open(&paths.db_path)?;
+    let (started_at, ended_at) = today_bounds(Local::now());
     let screen_data = ScreenData {
         tasks: database.task_repository().list_all()?,
-        recent_sessions: database.pomodoro_repository().list_recent(10)?,
-        stats: database.pomodoro_repository().stats()?,
+        history_entries: database
+            .pomodoro_repository()
+            .list_day(started_at, ended_at)?,
+        stats: database
+            .pomodoro_repository()
+            .stats_for_day(started_at, ended_at)?,
     };
 
     let provider = DisabledTodoistProvider;
@@ -655,6 +787,31 @@ fn duration_to_stored_minutes(duration: Duration) -> u32 {
     duration.as_secs().div_ceil(60) as u32
 }
 
+fn session_kind_for_phase(phase: TimerPhase) -> SessionKind {
+    match phase {
+        TimerPhase::Focus => SessionKind::Focus,
+        TimerPhase::ShortBreak => SessionKind::ShortBreak,
+        TimerPhase::LongBreak => SessionKind::LongBreak,
+    }
+}
+
+fn today_bounds(now: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>) {
+    let date = now.date_naive();
+    let start = date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight should be valid")
+        .and_local_timezone(Local)
+        .single()
+        .expect("local midnight should be representable");
+    let end = (date + chrono::Days::new(1))
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight should be valid")
+        .and_local_timezone(Local)
+        .single()
+        .expect("local midnight should be representable");
+    (start, end)
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, Local};
@@ -733,6 +890,29 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Char('q'))
             .expect("quit should succeed");
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn quitting_while_timer_is_running_voids_current_session() {
+        let mut app = test_app();
+        let now = Local::now();
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('q'),
+            now + ChronoDuration::seconds(12),
+        )
+        .expect("quit should succeed");
+
+        assert!(app.should_quit());
+        assert_eq!(app.screen_data.stats.total_sessions, 1);
+        assert_eq!(app.screen_data.history_entries.len(), 1);
+        assert_eq!(
+            app.screen_data.history_entries[0].outcome,
+            crate::domain::SessionOutcome::Voided
+        );
+        assert_eq!(app.screen_data.history_entries[0].duration_seconds, 12);
     }
 
     #[test]
@@ -828,6 +1008,43 @@ mod tests {
                 CycleEntryState::NotStarted
             ]
         );
+    }
+
+    #[test]
+    fn voiding_during_break_completes_cycle_without_adding_extra_slot() {
+        let mut app = test_app();
+        let focus_started_at = Local::now() - chrono_duration(app.timer_settings.pomodoro_length);
+        app.timer.phase = TimerPhase::Focus;
+        app.timer.run_state = TimerRunState::Running;
+        app.timer.current_phase_started_at = Some(focus_started_at);
+        app.timer.running_since = Some(focus_started_at);
+        app.on_tick_at(Local::now())
+            .expect("tick should complete focus");
+
+        let break_now = Local::now();
+        let break_started_at = break_now - ChronoDuration::seconds(10);
+        app.timer.phase = TimerPhase::ShortBreak;
+        app.timer.run_state = TimerRunState::Running;
+        app.timer.current_phase_started_at = Some(break_started_at);
+        app.timer.running_since = Some(break_started_at);
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('x'), break_now)
+            .expect("ending break early should succeed");
+
+        assert_eq!(app.timer.phase, TimerPhase::Focus);
+        assert_eq!(app.timer.run_state, TimerRunState::Idle);
+        assert_eq!(
+            app.timer.cycle_entries,
+            vec![
+                CycleEntryState::Completed,
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted,
+                CycleEntryState::NotStarted
+            ]
+        );
+        assert_eq!(app.screen_data.stats.total_sessions, 1);
+        assert_eq!(app.screen_data.stats.total_break_seconds, 10);
+        assert_eq!(app.screen_data.history_entries.len(), 2);
     }
 
     #[test]

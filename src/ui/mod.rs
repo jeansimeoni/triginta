@@ -3,13 +3,13 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
 use crate::{
     app::{App, CycleEntryState, PanelFocus, RightPanelTab, ScreenData, TimerPhase},
     config::GlyphMode,
-    domain::{PomodoroSession, Task, TaskStatus},
+    domain::{SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
     theme::ThemePalette,
 };
 
@@ -59,14 +59,7 @@ fn render_left_column(
         .split(area);
 
     render_timer_panel(frame, app, sections[0], symbols, palette);
-    render_history_panel(
-        frame,
-        app.screen_data(),
-        sections[1],
-        symbols,
-        app.focused_panel(),
-        palette,
-    );
+    render_history_panel(frame, app, sections[1], symbols, palette);
     render_navigation_panel(frame, sections[2], symbols, app.focused_panel(), palette);
     render_favorites_panel(
         frame,
@@ -177,42 +170,73 @@ fn render_timer_panel(
 
 fn render_history_panel(
     frame: &mut Frame<'_>,
-    data: &ScreenData,
+    app: &App,
     area: Rect,
     symbols: Symbols,
-    focused_panel: PanelFocus,
     palette: ThemePalette,
 ) {
-    let mut lines = vec![
-        Line::from(vec![Span::styled(
-            format!(
-                "{} {} sessions  |  {} min",
-                symbols.focus, data.stats.total_sessions, data.stats.total_minutes
-            ),
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(""),
-    ];
+    let data = app.screen_data();
+    let rows = history_rows(data.history_entries.as_slice());
+    let selected = app.history_scroll().min(rows.len().saturating_sub(1));
+    let summary = Line::from(format!(
+        "{} focus  |  {} break  |  {} sessions",
+        format_duration_seconds(data.stats.total_work_seconds),
+        format_duration_seconds(data.stats.total_break_seconds),
+        data.stats.total_sessions,
+    ))
+    .right_aligned();
+    let block = panel_block(
+        Line::from("[2] Daily History"),
+        app.focused_panel() == PanelFocus::History,
+        palette,
+    )
+    .title_bottom(summary);
+    let inner = block.inner(area);
+    let content = inner.inner(Margin {
+        vertical: 0,
+        horizontal: 1,
+    });
+    frame.render_widget(block, area);
 
-    if data.recent_sessions.is_empty() {
-        lines.push(Line::from("No pomodoros recorded today."));
+    let lines = if rows.is_empty() {
+        vec![Line::from("No pomodoros recorded today.")]
     } else {
-        for session in data.recent_sessions.iter().take(5) {
-            lines.push(Line::from(format_session_summary(session, symbols)));
-        }
+        let show_selection = app.focused_panel() == PanelFocus::History;
+        let visible_height = content.height as usize;
+        let start = selected.saturating_sub(visible_height.saturating_sub(1));
+        let end = (start + visible_height).min(rows.len());
+
+        rows[start..end]
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                format_history_row(
+                    row,
+                    symbols,
+                    palette,
+                    content.width,
+                    show_selection && start + index == selected,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let history = Paragraph::new(lines).wrap(Wrap { trim: true });
+    frame.render_widget(history, content);
+
+    if rows.len() > content.height as usize {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(rows.len())
+            .position(selected);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("▐")
+            .thumb_style(Style::default().fg(palette.subtle_text));
+        frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
     }
-
-    let history = Paragraph::new(lines)
-        .block(panel_block(
-            Line::from("[2] Daily History"),
-            focused_panel == PanelFocus::History,
-            palette,
-        ))
-        .wrap(Wrap { trim: true });
-
-    frame.render_widget(history, area);
 }
 
 fn render_navigation_panel(
@@ -409,7 +433,7 @@ fn render_statistics_panel(
 
 fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, palette: ThemePalette) {
     let message = format!(
-        "{}  |  1-5: focus panel  tab: cycle focus  s/space: start  p: pause  x: void  q: quit",
+        "{}  |  1-5: focus panel  tab: cycle focus  j/k or ↑/↓: scroll history  s/space: start  p: pause  x: void  q: quit",
         app.status_message()
     );
 
@@ -436,21 +460,6 @@ fn favorite_tasks(tasks: &[Task]) -> Vec<&Task> {
         .collect()
 }
 
-fn format_session_summary(session: &PomodoroSession, symbols: Symbols) -> String {
-    let task_suffix = session
-        .task_id
-        .map(|task_id| format!("  {} task #{}", symbols.tasks, task_id.0))
-        .unwrap_or_default();
-
-    format!(
-        "{}  {} {} min{}",
-        session.started_at.format("%H:%M"),
-        symbols.timer,
-        session.duration_minutes,
-        task_suffix
-    )
-}
-
 fn format_task_summary(task: &Task, symbols: Symbols) -> String {
     let marker = match task.status {
         TaskStatus::Todo => symbols.todo,
@@ -459,6 +468,87 @@ fn format_task_summary(task: &Task, symbols: Symbols) -> String {
     };
 
     format!("{marker} {}", task.title)
+}
+
+#[derive(Debug, Clone)]
+struct HistoryRow {
+    started_at: chrono::DateTime<chrono::Local>,
+    focus_outcome: SessionOutcome,
+    focus_seconds: u32,
+    break_seconds: u32,
+    task_id: Option<crate::domain::TaskId>,
+}
+
+fn history_rows(entries: &[SessionEntry]) -> Vec<HistoryRow> {
+    let mut rows = Vec::new();
+    let mut previous_was_focus = false;
+
+    for entry in entries.iter().rev() {
+        match entry.kind {
+            SessionKind::Focus => {
+                rows.push(HistoryRow {
+                    started_at: entry.started_at,
+                    focus_outcome: entry.outcome.clone(),
+                    focus_seconds: entry.duration_seconds,
+                    break_seconds: 0,
+                    task_id: entry.task_id,
+                });
+                previous_was_focus = true;
+            }
+            SessionKind::ShortBreak | SessionKind::LongBreak => {
+                if previous_was_focus {
+                    if let Some(last) = rows.last_mut() {
+                        last.break_seconds = entry.duration_seconds;
+                    }
+                }
+                previous_was_focus = false;
+            }
+        }
+    }
+
+    rows.reverse();
+    rows
+}
+
+fn format_history_row(
+    row: &HistoryRow,
+    symbols: Symbols,
+    palette: ThemePalette,
+    width: u16,
+    selected: bool,
+) -> Line<'static> {
+    let (symbol, accent) = match row.focus_outcome {
+        SessionOutcome::Completed => (symbols.done, palette.success),
+        SessionOutcome::Voided => (symbols.voided, palette.error),
+    };
+    let timing = format!(
+        "{}/{}",
+        format_compact_duration(row.focus_seconds),
+        format_compact_duration(row.break_seconds)
+    );
+    let task_suffix = row
+        .task_id
+        .map(|task_id| format!("  {}#{}", symbols.tasks, task_id.0))
+        .unwrap_or_else(|| "  -".to_string());
+    let prefix = format!(
+        "{}  {}  {}{}",
+        row.started_at.format("%H:%M"),
+        symbol,
+        timing,
+        task_suffix
+    );
+    let full_line = format!("{prefix:<width$}", width = width as usize);
+
+    let style = if selected {
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.border)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(accent)
+    };
+
+    Line::from(vec![Span::styled(full_line, style)])
 }
 
 fn navigation_line(label: &str, selected: bool, palette: ThemePalette) -> Line<'static> {
@@ -537,6 +627,31 @@ fn format_duration(duration: chrono::Duration) -> String {
     format!("{minutes:02}:{seconds:02}")
 }
 
+fn format_duration_seconds(total_seconds: u32) -> String {
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+fn format_compact_duration(total_seconds: u32) -> String {
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    if total_seconds == 0 {
+        "00m".to_string()
+    } else if minutes > 0 && seconds == 0 {
+        format!("{minutes:02}m")
+    } else if minutes == 0 {
+        format!("{seconds:02}s")
+    } else {
+        format!("{minutes:02}m{seconds:02}s")
+    }
+}
+
 fn timer_color(phase: TimerPhase, palette: ThemePalette) -> Color {
     match phase {
         TimerPhase::Focus => palette.timer_work,
@@ -606,7 +721,6 @@ fn progress_meta_line(
 #[derive(Debug, Clone, Copy)]
 struct Symbols {
     timer: &'static str,
-    focus: &'static str,
     navigation: &'static str,
     favorite: &'static str,
     tasks: &'static str,
@@ -628,7 +742,6 @@ impl Symbols {
         match mode {
             GlyphMode::Ascii => Self {
                 timer: "*",
-                focus: "*",
                 navigation: ">",
                 favorite: "*",
                 tasks: "#",
@@ -646,7 +759,6 @@ impl Symbols {
             },
             GlyphMode::NerdFonts => Self {
                 timer: "󰔛",
-                focus: "󱎫",
                 navigation: "󰆍",
                 favorite: "󰓎",
                 tasks: "󰄱",
