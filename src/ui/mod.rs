@@ -10,30 +10,44 @@ use crate::{
     app::{App, CycleEntryState, PanelFocus, RightPanelTab, ScreenData, TimerPhase},
     config::GlyphMode,
     domain::{PomodoroSession, Task, TaskStatus},
+    theme::ThemePalette,
 };
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let symbols = Symbols::new(app.glyph_mode());
+    let palette = app.theme();
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(2)])
         .split(frame.area());
 
-    render_body(frame, app, layout[0], symbols);
-    render_status(frame, app, layout[1]);
+    render_body(frame, app, layout[0], symbols, palette);
+    render_status(frame, app, layout[1], palette);
 }
 
-fn render_body(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Symbols) {
+fn render_body(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(area);
 
-    render_left_column(frame, app, columns[0], symbols);
-    render_right_panel(frame, app, columns[1], symbols);
+    render_left_column(frame, app, columns[0], symbols, palette);
+    render_right_panel(frame, app, columns[1], symbols, palette);
 }
 
-fn render_left_column(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Symbols) {
+fn render_left_column(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -44,32 +58,50 @@ fn render_left_column(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Sym
         ])
         .split(area);
 
-    render_timer_panel(frame, app, sections[0], symbols);
+    render_timer_panel(frame, app, sections[0], symbols, palette);
     render_history_panel(
         frame,
         app.screen_data(),
         sections[1],
         symbols,
         app.focused_panel(),
+        palette,
     );
-    render_navigation_panel(frame, sections[2], symbols, app.focused_panel());
+    render_navigation_panel(frame, sections[2], symbols, app.focused_panel(), palette);
     render_favorites_panel(
         frame,
         app.screen_data(),
         sections[3],
         symbols,
         app.focused_panel(),
+        palette,
     );
 }
 
-fn render_right_panel(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Symbols) {
+fn render_right_panel(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
     match app.active_right_panel_tab() {
-        RightPanelTab::Tasks => {
-            render_tasks_workspace(frame, app.screen_data(), area, symbols, app.focused_panel())
-        }
-        RightPanelTab::Statistics => {
-            render_statistics_panel(frame, app.screen_data(), area, symbols, app.focused_panel())
-        }
+        RightPanelTab::Tasks => render_tasks_workspace(
+            frame,
+            app.screen_data(),
+            area,
+            symbols,
+            app.focused_panel(),
+            palette,
+        ),
+        RightPanelTab::Statistics => render_statistics_panel(
+            frame,
+            app.screen_data(),
+            area,
+            symbols,
+            app.focused_panel(),
+            palette,
+        ),
     }
 }
 
@@ -79,21 +111,29 @@ fn render_tasks_workspace(
     area: Rect,
     symbols: Symbols,
     focused_panel: PanelFocus,
+    palette: ThemePalette,
 ) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    render_task_list_panel(frame, data, sections[0], symbols, focused_panel);
-    render_task_details_panel(frame, data, sections[1], symbols);
+    render_task_list_panel(frame, data, sections[0], symbols, focused_panel, palette);
+    render_task_details_panel(frame, data, sections[1], symbols, palette);
 }
 
-fn render_timer_panel(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Symbols) {
+fn render_timer_panel(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
     let timer = app.timer_view();
     let block = panel_block(
         Line::from(format!("[1] Pomodoro")),
         app.focused_panel() == PanelFocus::Timer,
+        palette,
     );
     let inner = block.inner(area);
     let content = inner.inner(Margin {
@@ -117,16 +157,16 @@ fn render_timer_panel(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Sym
     let headline = Paragraph::new(vec![Line::from(vec![Span::styled(
         format!("{} {}", symbols.timer, timer.run_state.label(timer.phase)),
         Style::default()
-            .fg(timer_color(timer.phase))
+            .fg(timer_color(timer.phase, palette))
             .add_modifier(Modifier::BOLD),
     )])]);
 
     let progress = Paragraph::new(Line::from(progress_bar(&timer, symbols, content.width)))
-        .style(Style::default().fg(timer_color(timer.phase)))
+        .style(Style::default().fg(timer_color(timer.phase, palette)))
         .wrap(Wrap { trim: true });
 
-    let progress_meta = Paragraph::new(progress_meta_line(&timer, content.width));
-    let cycle = Paragraph::new(cycle_line(timer.cycle_entries.as_slice(), symbols));
+    let progress_meta = Paragraph::new(progress_meta_line(&timer, content.width, palette));
+    let cycle = Paragraph::new(cycle_line(timer.cycle_entries.as_slice(), symbols, palette));
 
     frame.render_widget(headline, sections[0]);
     frame.render_widget(progress, sections[1]);
@@ -141,6 +181,7 @@ fn render_history_panel(
     area: Rect,
     symbols: Symbols,
     focused_panel: PanelFocus,
+    palette: ThemePalette,
 ) {
     let mut lines = vec![
         Line::from(vec![Span::styled(
@@ -148,7 +189,9 @@ fn render_history_panel(
                 "{} {} sessions  |  {} min",
                 symbols.focus, data.stats.total_sessions, data.stats.total_minutes
             ),
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
     ];
@@ -165,6 +208,7 @@ fn render_history_panel(
         .block(panel_block(
             Line::from("[2] Daily History"),
             focused_panel == PanelFocus::History,
+            palette,
         ))
         .wrap(Wrap { trim: true });
 
@@ -176,17 +220,19 @@ fn render_navigation_panel(
     area: Rect,
     symbols: Symbols,
     focused_panel: PanelFocus,
+    palette: ThemePalette,
 ) {
     let content = Paragraph::new(vec![
-        navigation_line(&format!("{} Inbox", symbols.selected), true),
-        navigation_line(&format!("{} Today", symbols.unselected), false),
-        navigation_line(&format!("{} Soon", symbols.unselected), false),
+        navigation_line(&format!("{} Inbox", symbols.selected), true, palette),
+        navigation_line(&format!("{} Today", symbols.unselected), false, palette),
+        navigation_line(&format!("{} Soon", symbols.unselected), false, palette),
         Line::from(""),
         Line::from("Branch-style tab switching can be wired next."),
     ])
     .block(panel_block(
-        navigation_title(symbols),
+        navigation_title(symbols, palette),
         focused_panel == PanelFocus::Navigation,
+        palette,
     ))
     .wrap(Wrap { trim: true });
 
@@ -199,6 +245,7 @@ fn render_favorites_panel(
     area: Rect,
     symbols: Symbols,
     focused_panel: PanelFocus,
+    palette: ThemePalette,
 ) {
     let favorites = favorite_tasks(data.tasks.as_slice());
     let mut lines = vec![];
@@ -216,6 +263,7 @@ fn render_favorites_panel(
         .block(panel_block(
             Line::from("[4] Favorites"),
             focused_panel == PanelFocus::Favorites,
+            palette,
         ))
         .wrap(Wrap { trim: true });
 
@@ -228,11 +276,14 @@ fn render_task_list_panel(
     area: Rect,
     symbols: Symbols,
     focused_panel: PanelFocus,
+    palette: ThemePalette,
 ) {
     let mut lines = vec![
         Line::from(vec![Span::styled(
             format!("{} All Tasks", symbols.tasks),
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
     ];
@@ -250,8 +301,9 @@ fn render_task_list_panel(
 
     let tasks = Paragraph::new(lines)
         .block(panel_block(
-            right_panel_title(RightPanelTab::Tasks, symbols),
+            right_panel_title(RightPanelTab::Tasks, symbols, palette),
             focused_panel == PanelFocus::RightPane,
+            palette,
         ))
         .wrap(Wrap { trim: true });
 
@@ -263,6 +315,7 @@ fn render_task_details_panel(
     data: &ScreenData,
     area: Rect,
     symbols: Symbols,
+    palette: ThemePalette,
 ) {
     let lines = if let Some(task) = first_active_task(data.tasks.as_slice()) {
         vec![
@@ -292,8 +345,12 @@ fn render_task_details_panel(
     let details = Paragraph::new(lines)
         .block(
             Block::default()
-                .title(format!("{} Task Details", symbols.details))
-                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM),
+                .title(Span::styled(
+                    format!("{} Task Details", symbols.details),
+                    Style::default().fg(palette.accent),
+                ))
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                .border_style(Style::default().fg(palette.border)),
         )
         .wrap(Wrap { trim: true });
 
@@ -306,6 +363,7 @@ fn render_statistics_panel(
     area: Rect,
     symbols: Symbols,
     focused_panel: PanelFocus,
+    palette: ThemePalette,
 ) {
     let completed_width = 24usize;
     let total_minutes = data.stats.total_minutes;
@@ -322,7 +380,9 @@ fn render_statistics_panel(
     let lines = vec![
         Line::from(vec![Span::styled(
             format!("{} Pomodoro Statistics", symbols.stats),
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
         Line::from(format!("Sessions today: {}", data.stats.total_sessions)),
@@ -338,23 +398,28 @@ fn render_statistics_panel(
 
     let stats = Paragraph::new(lines)
         .block(panel_block(
-            right_panel_title(RightPanelTab::Statistics, symbols),
+            right_panel_title(RightPanelTab::Statistics, symbols, palette),
             focused_panel == PanelFocus::RightPane,
+            palette,
         ))
         .wrap(Wrap { trim: true });
 
     frame.render_widget(stats, area);
 }
 
-fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, palette: ThemePalette) {
     let message = format!(
         "{}  |  1-5: focus panel  tab: cycle focus  s/space: start  p: pause  x: void  q: quit",
         app.status_message()
     );
 
     let status = Paragraph::new(message)
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().borders(Borders::TOP));
+        .style(Style::default().fg(palette.subtle_text))
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(palette.border)),
+        );
 
     frame.render_widget(status, area);
 }
@@ -396,43 +461,50 @@ fn format_task_summary(task: &Task, symbols: Symbols) -> String {
     format!("{marker} {}", task.title)
 }
 
-fn navigation_line(label: &str, selected: bool) -> Line<'static> {
+fn navigation_line(label: &str, selected: bool, palette: ThemePalette) -> Line<'static> {
     if selected {
         Line::from(vec![Span::styled(
             label.to_string(),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
         )])
     } else {
-        Line::from(label.to_string())
+        Line::from(vec![Span::styled(
+            label.to_string(),
+            Style::default().fg(palette.text),
+        )])
     }
 }
 
-fn navigation_title(symbols: Symbols) -> Line<'static> {
+fn navigation_title(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     Line::from(vec![
         Span::raw("[3] "),
         Span::styled(
             format!("{} Navigation", symbols.navigation),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(palette.accent),
         ),
         Span::raw(" - "),
-        Span::styled("Filters & Tags", Style::default().fg(Color::DarkGray)),
+        Span::styled("Filters & Tags", Style::default().fg(palette.subtle_text)),
         Span::raw(" - "),
-        Span::styled("Projects", Style::default().fg(Color::DarkGray)),
+        Span::styled("Projects", Style::default().fg(palette.subtle_text)),
     ])
 }
 
-fn right_panel_title(active_tab: RightPanelTab, symbols: Symbols) -> Line<'static> {
+fn right_panel_title(
+    active_tab: RightPanelTab,
+    symbols: Symbols,
+    palette: ThemePalette,
+) -> Line<'static> {
     let tasks_style = if active_tab == RightPanelTab::Tasks {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(palette.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(palette.subtle_text)
     };
     let stats_style = if active_tab == RightPanelTab::Statistics {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(palette.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(palette.subtle_text)
     };
 
     Line::from(vec![
@@ -443,13 +515,13 @@ fn right_panel_title(active_tab: RightPanelTab, symbols: Symbols) -> Line<'stati
     ])
 }
 
-fn panel_block(title: Line<'static>, focused: bool) -> Block<'static> {
+fn panel_block(title: Line<'static>, focused: bool, palette: ThemePalette) -> Block<'static> {
     let border_style = if focused {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(palette.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(palette.border)
     };
 
     Block::default()
@@ -465,29 +537,35 @@ fn format_duration(duration: chrono::Duration) -> String {
     format!("{minutes:02}:{seconds:02}")
 }
 
-fn timer_color(phase: TimerPhase) -> Color {
+fn timer_color(phase: TimerPhase, palette: ThemePalette) -> Color {
     match phase {
-        TimerPhase::Focus => Color::Green,
-        TimerPhase::ShortBreak => Color::LightBlue,
-        TimerPhase::LongBreak => Color::Cyan,
+        TimerPhase::Focus => palette.timer_work,
+        TimerPhase::ShortBreak => palette.timer_short_break,
+        TimerPhase::LongBreak => palette.timer_long_break,
     }
 }
 
-fn cycle_line(entries: &[CycleEntryState], symbols: Symbols) -> Line<'static> {
+fn cycle_line(
+    entries: &[CycleEntryState],
+    symbols: Symbols,
+    palette: ThemePalette,
+) -> Line<'static> {
     let mut spans = vec![Span::styled(
         "Cycle ",
-        Style::default().add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD),
     )];
 
     for (index, entry) in entries.iter().enumerate() {
-        let symbol = match entry {
-            CycleEntryState::NotStarted => symbols.todo,
-            CycleEntryState::Running => symbols.in_progress,
-            CycleEntryState::Break => symbols.breaking,
-            CycleEntryState::Completed => symbols.done,
-            CycleEntryState::Voided => symbols.voided,
+        let (symbol, color) = match entry {
+            CycleEntryState::NotStarted => (symbols.todo, palette.subtle_text),
+            CycleEntryState::Running => (symbols.in_progress, palette.timer_work),
+            CycleEntryState::Break => (symbols.breaking, palette.timer_short_break),
+            CycleEntryState::Completed => (symbols.done, palette.success),
+            CycleEntryState::Voided => (symbols.voided, palette.error),
         };
-        spans.push(Span::raw(symbol.to_string()));
+        spans.push(Span::styled(symbol.to_string(), Style::default().fg(color)));
         if index + 1 < entries.len() {
             spans.push(Span::raw(" "));
         }
@@ -506,7 +584,11 @@ fn progress_bar(timer: &crate::app::TimerView, symbols: Symbols, width: u16) -> 
     )
 }
 
-fn progress_meta_line(timer: &crate::app::TimerView, width: u16) -> Line<'static> {
+fn progress_meta_line(
+    timer: &crate::app::TimerView,
+    width: u16,
+    palette: ThemePalette,
+) -> Line<'static> {
     let percent = format!(
         "{}%",
         (timer.progress.clamp(0.0, 1.0) * 100.0).round() as u32
@@ -514,7 +596,11 @@ fn progress_meta_line(timer: &crate::app::TimerView, width: u16) -> Line<'static
     let remaining = format_duration(timer.remaining);
     let available = width.saturating_sub(2) as usize;
     let spaces = available.saturating_sub(percent.len() + remaining.len());
-    Line::from(format!("{percent}{}{remaining}", " ".repeat(spaces)))
+    Line::from(vec![
+        Span::styled(percent, Style::default().fg(palette.subtle_text)),
+        Span::raw(" ".repeat(spaces)),
+        Span::styled(remaining, Style::default().fg(palette.text)),
+    ])
 }
 
 #[derive(Debug, Clone, Copy)]

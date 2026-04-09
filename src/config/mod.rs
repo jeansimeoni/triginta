@@ -18,6 +18,7 @@ pub struct AppPaths {
     pub config_toml_path: PathBuf,
     pub config_yaml_path: PathBuf,
     pub config_yml_path: PathBuf,
+    pub themes_dir: PathBuf,
 }
 
 impl AppPaths {
@@ -46,6 +47,7 @@ impl AppPaths {
             config_toml_path: config_dir.join("config.toml"),
             config_yaml_path: config_dir.join("config.yaml"),
             config_yml_path: config_dir.join("config.yml"),
+            themes_dir: config_dir.join("themes"),
         })
     }
 
@@ -54,6 +56,12 @@ impl AppPaths {
             format!(
                 "failed to create config dir at {}",
                 self.config_dir.display()
+            )
+        })?;
+        fs::create_dir_all(&self.themes_dir).with_context(|| {
+            format!(
+                "failed to create themes dir at {}",
+                self.themes_dir.display()
             )
         })?;
         fs::create_dir_all(&self.data_dir)
@@ -145,10 +153,20 @@ impl Default for AppConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub glyph_mode: GlyphMode,
+    pub theme: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            glyph_mode: GlyphMode::default(),
+            theme: "catppuccin-mocha".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
@@ -365,6 +383,10 @@ mod tests {
             paths.config_toml_path,
             PathBuf::from("/tmp/triginta-test/config/config.toml")
         );
+        assert_eq!(
+            paths.themes_dir,
+            PathBuf::from("/tmp/triginta-test/config/themes")
+        );
     }
 
     #[test]
@@ -376,6 +398,7 @@ mod tests {
         let config = load_app_config(&paths).expect("missing config should use defaults");
         assert_eq!(config, AppConfig::default());
         assert_eq!(config.ui.glyph_mode, GlyphMode::NerdFonts);
+        assert_eq!(config.ui.theme, "catppuccin-mocha");
     }
 
     #[test]
@@ -388,6 +411,7 @@ mod tests {
             &paths.config_toml_path,
             r#"[ui]
 glyph_mode = "ascii"
+theme = "catppuccin-frappe"
 
 [timer]
 pomodoro_length = "30m"
@@ -400,6 +424,7 @@ long_break_interval = 5
 
         let config = load_app_config(&paths).expect("config should load");
         assert_eq!(config.ui.glyph_mode, GlyphMode::Ascii);
+        assert_eq!(config.ui.theme, "catppuccin-frappe");
         assert_eq!(config.timer.long_break_interval, 5);
         assert_eq!(config.timer.pomodoro_length, Duration::from_secs(30 * 60));
     }
@@ -414,6 +439,7 @@ long_break_interval = 5
             &paths.config_yaml_path,
             r#"ui:
   glyph_mode: ascii
+  theme: forest
 timer:
   pomodoro_length: 1800
   short_break_length: 300
@@ -425,6 +451,7 @@ timer:
 
         let config = load_app_config(&paths).expect("config should load");
         assert_eq!(config.ui.glyph_mode, GlyphMode::Ascii);
+        assert_eq!(config.ui.theme, "forest");
         assert_eq!(config.timer.pomodoro_length, Duration::from_secs(1800));
         assert_eq!(config.timer.short_break_length, Duration::from_secs(300));
         assert_eq!(config.timer.long_break_length, Duration::from_secs(900));

@@ -27,6 +27,7 @@ The config is organized by sections.
 ```toml
 [ui]
 glyph_mode = "nerd-fonts"
+theme = "catppuccin-mocha"
 
 [timer]
 pomodoro_length = "25m"
@@ -40,6 +41,7 @@ long_break_interval = 4
 ```yaml
 ui:
   glyph_mode: nerd-fonts
+  theme: catppuccin-mocha
 
 timer:
   pomodoro_length: 25m
@@ -61,6 +63,61 @@ Allowed values:
 Default:
 
 - `nerd-fonts`
+
+`ui.theme` selects the active palette.
+
+Built-in themes:
+
+- `catppuccin-latte`
+- `catppuccin-frappe`
+- `catppuccin-macchiato`
+- `catppuccin-mocha`
+
+Default:
+
+- `catppuccin-mocha`
+
+## Theme Files
+
+Custom themes live in the app config `themes/` directory.
+
+Typical locations:
+
+- Linux: `~/.config/triginta/themes/`
+- macOS: `~/Library/Application Support/triginta/themes/`
+- Windows: `%APPDATA%\triginta\themes\`
+
+To use a custom theme, set `ui.theme` to the file name without the extension.
+For example, `ui.theme = "forest"` loads `themes/forest.toml` or the YAML
+equivalent.
+
+Theme files support these keys:
+
+- `text`
+- `subtle_text`
+- `border`
+- `accent`
+- `timer_work`
+- `timer_short_break`
+- `timer_long_break`
+- `success`
+- `error`
+
+Each value must be a 6-digit hex color like `"#cdd6f4"`.
+
+Example:
+
+```toml
+text = "#ddeedd"
+subtle_text = "#99aa99"
+border = "#557755"
+accent = "#88cc66"
+timer_work = "#77dd77"
+timer_short_break = "#66cccc"
+timer_long_break = "#4488cc"
+success = "#66dd88"
+error = "#dd6677"
+```
 
 ## Timer
 

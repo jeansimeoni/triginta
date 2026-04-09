@@ -15,6 +15,7 @@ use crate::{
     domain::{HistoryStats, PomodoroSession, Task},
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
     storage::{Database, PomodoroRepository, TaskRepository},
+    theme::ThemePalette,
     ui,
 };
 
@@ -328,6 +329,7 @@ pub struct App {
     active_right_panel_tab: RightPanelTab,
     focused_panel: PanelFocus,
     glyph_mode: GlyphMode,
+    theme: ThemePalette,
     timer: TimerState,
     should_quit: bool,
     status_message: String,
@@ -338,6 +340,7 @@ impl App {
     pub fn new(
         screen_data: ScreenData,
         glyph_mode: GlyphMode,
+        theme: ThemePalette,
         timer_settings: TimerSettings,
         database: Database,
     ) -> Self {
@@ -348,6 +351,7 @@ impl App {
             active_right_panel_tab: RightPanelTab::Tasks,
             focused_panel: PanelFocus::Timer,
             glyph_mode,
+            theme,
             timer: TimerState::new(long_break_interval),
             should_quit: false,
             status_message: "SQLite initialized. Local-first mode active.".to_string(),
@@ -369,6 +373,10 @@ impl App {
 
     pub fn glyph_mode(&self) -> GlyphMode {
         self.glyph_mode
+    }
+
+    pub fn theme(&self) -> ThemePalette {
+        self.theme
     }
 
     pub fn status_message(&self) -> &str {
@@ -550,6 +558,7 @@ pub fn run(options: RunOptions) -> Result<()> {
     let _tracing_guard = init_tracing(&paths)?;
     let mut config = load_app_config(&paths)?;
     apply_debug_overrides(&mut config, options);
+    let theme = ThemePalette::load(&paths, &config.ui.theme)?;
 
     info!("starting triginta");
 
@@ -567,7 +576,13 @@ pub fn run(options: RunOptions) -> Result<()> {
         "integration boundary initialized"
     );
 
-    let mut app = App::new(screen_data, config.ui.glyph_mode, config.timer, database);
+    let mut app = App::new(
+        screen_data,
+        config.ui.glyph_mode,
+        theme,
+        config.timer,
+        database,
+    );
     let mut terminal = setup_terminal()?;
 
     let result = run_event_loop(&mut terminal, &mut app);
@@ -646,6 +661,7 @@ mod tests {
 
     use crate::config::{AppConfig, GlyphMode, TimerSettings};
     use crate::storage::Database;
+    use crate::theme::ThemePalette;
 
     use super::{
         App, CycleEntryState, PanelFocus, RightPanelTab, RunOptions, ScreenData, TimerPhase,
@@ -656,6 +672,12 @@ mod tests {
         App::new(
             ScreenData::default(),
             GlyphMode::NerdFonts,
+            ThemePalette::load(
+                &crate::config::AppPaths::from_data_dir(std::env::temp_dir())
+                    .expect("paths should resolve"),
+                "catppuccin-mocha",
+            )
+            .expect("built-in theme should load"),
             TimerSettings::default(),
             Database::open_in_memory().expect("in-memory database should open"),
         )
@@ -667,6 +689,15 @@ mod tests {
         assert!(!app.should_quit());
         assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
         assert_eq!(app.glyph_mode(), GlyphMode::NerdFonts);
+        assert_eq!(
+            app.theme(),
+            ThemePalette::load(
+                &crate::config::AppPaths::from_data_dir(std::env::temp_dir())
+                    .expect("paths should resolve"),
+                "catppuccin-mocha",
+            )
+            .expect("built-in theme should load")
+        );
         assert_eq!(app.focused_panel(), PanelFocus::Timer);
         assert_eq!(app.timer_view().phase, TimerPhase::Focus);
         assert_eq!(app.timer_view().run_state, TimerRunState::Idle);

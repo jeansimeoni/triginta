@@ -7,4 +7,5 @@ pub mod config;
 pub mod domain;
 pub mod integrations;
 pub mod storage;
+pub mod theme;
 pub mod ui;

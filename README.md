@@ -146,6 +146,13 @@ Documentation:
 
 - [Configuration Guide](/home/jeansimeoni/Projects/triginta/docs/configuration.md)
 
+Themes:
+
+- `ui.theme = "catppuccin-mocha"` is the default
+- built-in themes currently include the Catppuccin variants
+- custom themes can be added as `toml` or `yaml` files under the per-user
+  `themes/` directory inside the app config directory
+
 Debug-only overrides:
 
 - `--ascii`: force ASCII glyphs regardless of config
