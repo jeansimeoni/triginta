@@ -7,6 +7,7 @@ use ratatui::{
         Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
@@ -57,9 +58,9 @@ fn render_left_column(
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(24),
-            Constraint::Percentage(34),
+            Constraint::Percentage(26),
+            Constraint::Percentage(22),
+            Constraint::Percentage(30),
             Constraint::Percentage(22),
         ])
         .split(area);
@@ -149,9 +150,10 @@ fn render_timer_panel(
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
             Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(content);
 
@@ -167,13 +169,15 @@ fn render_timer_panel(
         .wrap(Wrap { trim: true });
 
     let progress_meta = Paragraph::new(progress_meta_line(&timer, content.width, palette));
+    let assigned_task = Paragraph::new(assigned_task_line(app, symbols, palette, content.width));
     let cycle = Paragraph::new(cycle_line(timer.cycle_entries.as_slice(), symbols, palette));
 
     frame.render_widget(headline, sections[0]);
     frame.render_widget(progress, sections[1]);
     frame.render_widget(progress_meta, sections[2]);
-    frame.render_widget(Paragraph::new(""), sections[3]);
     frame.render_widget(cycle, sections[4]);
+    frame.render_widget(Paragraph::new(""), sections[5]);
+    frame.render_widget(assigned_task, sections[6]);
 }
 
 fn render_history_panel(
@@ -187,7 +191,7 @@ fn render_history_panel(
     let today_selected = app.history_scroll();
     let (summary, lines, right_indicator) = match app.active_history_panel_tab() {
         HistoryPanelTab::Today => {
-            let rows = history_rows(data.history_entries.as_slice());
+            let rows = history_rows(data.history_entries.as_slice(), data.tasks.as_slice());
             let selected = today_selected.min(rows.len().saturating_sub(1));
             let summary = Line::from(format!(
                 "{} focus  |  {} break  |  {} sessions",
@@ -211,7 +215,7 @@ fn render_history_panel(
                             row,
                             symbols,
                             palette,
-                            area.width.saturating_sub(2),
+                            area.width.saturating_sub(4),
                             show_selection && start + index == selected,
                         )
                     })
@@ -320,6 +324,7 @@ fn render_favorites_panel(
     palette: ThemePalette,
 ) {
     let favorites = favorite_tasks(data.tasks.as_slice());
+    let content_width = area.width.saturating_sub(2);
     let mut lines = vec![];
 
     if favorites.is_empty() {
@@ -327,7 +332,10 @@ fn render_favorites_panel(
         lines.push(Line::from("Pinned tasks or saved searches can live here."));
     } else {
         for task in favorites {
-            lines.push(Line::from(format!("{} {}", symbols.favorite, task.title)));
+            lines.push(Line::from(ellipsize_end(
+                &format!("{} {}", symbols.favorite, task.title),
+                content_width as usize,
+            )));
         }
     }
 
@@ -513,7 +521,7 @@ fn render_statistics_panel(
 
 fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, palette: ThemePalette) {
     let message = format!(
-        "{}  |  1-5: focus panel  tab: cycle focus  j/k or ↑/↓: navigate panels  c/e/d: task CRUD  space/x: toggle task or void timer  q: quit",
+        "{}  |  1-5: focus panel  tab: cycle focus  j/k or ↑/↓: navigate panels  c/e/d/a: task actions  space/x: toggle task or void timer  q: quit",
         app.status_message()
     );
 
@@ -575,7 +583,12 @@ fn render_task_input_popup(
     let area = centered_rect(frame.area(), 72, 3);
     frame.render_widget(Clear, area);
 
-    let lines = vec![Line::from(input.value.as_str())];
+    let visible_width = area.width.saturating_sub(4) as usize;
+    let lines = vec![Line::from(input_window_text(
+        &input.value,
+        input.cursor,
+        visible_width,
+    ))];
     let popup = Paragraph::new(lines).block(
         Block::default()
             .title(Span::styled(
@@ -638,22 +651,28 @@ struct HistoryRow {
     focus_outcome: SessionOutcome,
     focus_seconds: u32,
     break_seconds: u32,
-    task_id: Option<crate::domain::TaskId>,
+    task_title: Option<String>,
 }
 
-fn history_rows(entries: &[SessionEntry]) -> Vec<HistoryRow> {
+fn history_rows(entries: &[SessionEntry], tasks: &[Task]) -> Vec<HistoryRow> {
     let mut rows = Vec::new();
     let mut previous_was_focus = false;
 
     for entry in entries.iter().rev() {
         match entry.kind {
             SessionKind::Focus => {
+                let task_title = entry.task_id.and_then(|task_id| {
+                    tasks
+                        .iter()
+                        .find(|task| task.id == task_id)
+                        .map(|task| task.title.clone())
+                });
                 rows.push(HistoryRow {
                     started_at: entry.started_at,
                     focus_outcome: entry.outcome.clone(),
                     focus_seconds: entry.duration_seconds,
                     break_seconds: 0,
-                    task_id: entry.task_id,
+                    task_title,
                 });
                 previous_was_focus = true;
             }
@@ -688,17 +707,14 @@ fn format_history_row(
         format_compact_duration(row.focus_seconds),
         format_compact_duration(row.break_seconds)
     );
-    let task_suffix = row
-        .task_id
-        .map(|task_id| format!("  {}#{}", symbols.tasks, task_id.0))
-        .unwrap_or_else(|| "  -".to_string());
-    let prefix = format!(
-        "{}  {}  {}{}",
-        row.started_at.format("%H:%M"),
-        symbol,
-        timing,
-        task_suffix
-    );
+    let prefix = format!("{}  {}  {}", row.started_at.format("%H:%M"), symbol, timing);
+    let task_text = row.task_title.as_deref().unwrap_or("-");
+    let separator = "  ";
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+    let separator_width = UnicodeWidthStr::width(separator);
+    let remaining_width = (width as usize).saturating_sub(prefix_width + separator_width);
+    let visible_task_text = ellipsize_end(task_text, remaining_width);
+    let visible_text = format!("{prefix}{separator}{visible_task_text}");
 
     let style = if selected {
         Style::default()
@@ -709,7 +725,7 @@ fn format_history_row(
         Style::default().fg(accent)
     };
 
-    let mut spans = vec![Span::styled(prefix, style)];
+    let mut spans = vec![Span::styled(visible_text, style)];
     if selected {
         let current_width = Line::from(spans.clone()).width();
         let padding = (width as usize).saturating_sub(current_width);
@@ -817,7 +833,7 @@ fn selectable_line(
         Style::default().fg(palette.text)
     };
 
-    let text = format!("  {label}");
+    let text = ellipsize_end(&format!("  {label}"), width as usize);
     let mut spans = vec![Span::styled(text, style)];
     if selected {
         let current_width = Line::from(spans.clone()).width();
@@ -924,6 +940,27 @@ fn format_compact_duration(total_seconds: u32) -> String {
     }
 }
 
+fn assigned_task_line(
+    app: &App,
+    _symbols: Symbols,
+    palette: ThemePalette,
+    width: u16,
+) -> Line<'static> {
+    match app.assigned_task() {
+        Some(task) => Line::from(vec![
+            Span::styled("Task: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                ellipsize_end(&task.title, width.saturating_sub(6) as usize),
+                Style::default().fg(palette.text),
+            ),
+        ]),
+        None => Line::from(vec![Span::styled(
+            "Task: none",
+            Style::default().fg(palette.subtle_text),
+        )]),
+    }
+}
+
 fn timer_color(phase: TimerPhase, palette: ThemePalette) -> Color {
     match phase {
         TimerPhase::Focus => palette.timer_work,
@@ -969,6 +1006,123 @@ fn progress_bar(timer: &crate::app::TimerView, symbols: Symbols, width: u16) -> 
         symbols.bar_full.repeat(filled),
         symbols.bar_empty.repeat(width.saturating_sub(filled))
     )
+}
+
+fn ellipsize_end(text: &str, max_width: usize) -> String {
+    const ELLIPSIS: &str = "…";
+
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 1 {
+        return ELLIPSIS.to_string();
+    }
+
+    let mut width = 0;
+    let mut output = String::new();
+    for character in text.chars() {
+        let char_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width + char_width > max_width - 1 {
+            break;
+        }
+        width += char_width;
+        output.push(character);
+    }
+    output.push_str(ELLIPSIS);
+    output
+}
+
+fn tail_visible_text(text: &str, max_width: usize) -> String {
+    const ELLIPSIS: &str = "…";
+
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 1 {
+        return ELLIPSIS.to_string();
+    }
+
+    let mut width = 1;
+    let mut chars = Vec::new();
+    for character in text.chars().rev() {
+        let char_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width + char_width > max_width {
+            break;
+        }
+        width += char_width;
+        chars.push(character);
+    }
+    chars.reverse();
+
+    let mut output = String::from(ELLIPSIS);
+    for character in chars {
+        output.push(character);
+    }
+    output
+}
+
+fn input_window_text(text: &str, cursor: usize, max_width: usize) -> String {
+    const ELLIPSIS: &str = "…";
+
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+
+    let safe_cursor = cursor.min(text.len());
+    let before = &text[..safe_cursor];
+    let after = &text[safe_cursor..];
+
+    if UnicodeWidthStr::width(before) <= max_width / 2 {
+        return ellipsize_end(text, max_width);
+    }
+    if UnicodeWidthStr::width(after) <= max_width / 2 {
+        return tail_visible_text(text, max_width);
+    }
+
+    let left_budget = max_width.saturating_sub(2) / 2;
+    let right_budget = max_width.saturating_sub(2) - left_budget;
+
+    let mut left_width = 0;
+    let mut left_chars = Vec::new();
+    for character in before.chars().rev() {
+        let char_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if left_width + char_width > left_budget {
+            break;
+        }
+        left_width += char_width;
+        left_chars.push(character);
+    }
+    left_chars.reverse();
+
+    let mut right_width = 0;
+    let mut right_chars = Vec::new();
+    for character in after.chars() {
+        let char_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if right_width + char_width > right_budget {
+            break;
+        }
+        right_width += char_width;
+        right_chars.push(character);
+    }
+
+    let mut output = String::from(ELLIPSIS);
+    for character in left_chars {
+        output.push(character);
+    }
+    for character in right_chars {
+        output.push(character);
+    }
+    output.push_str(ELLIPSIS);
+    output
 }
 
 fn progress_meta_line(

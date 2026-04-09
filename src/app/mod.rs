@@ -398,12 +398,14 @@ enum TaskInputMode {
 struct TaskInputState {
     mode: TaskInputMode,
     value: String,
+    cursor: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskInputView {
     pub title: &'static str,
     pub value: String,
+    pub cursor: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,6 +431,8 @@ pub struct App {
     timer: TimerState,
     history_scroll: usize,
     selected_task_id: Option<TaskId>,
+    assigned_task_id: Option<TaskId>,
+    active_focus_task_id: Option<TaskId>,
     task_input: Option<TaskInputState>,
     delete_confirmation: Option<TaskId>,
     should_quit: bool,
@@ -457,6 +461,8 @@ impl App {
             timer: TimerState::new(long_break_interval),
             history_scroll: 0,
             selected_task_id: None,
+            assigned_task_id: None,
+            active_focus_task_id: None,
             task_input: None,
             delete_confirmation: None,
             should_quit: false,
@@ -516,6 +522,15 @@ impl App {
         })
     }
 
+    pub fn assigned_task(&self) -> Option<&Task> {
+        self.assigned_task_id.and_then(|task_id| {
+            self.screen_data
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+        })
+    }
+
     pub fn task_input_view(&self) -> Option<TaskInputView> {
         self.task_input.as_ref().map(|input| TaskInputView {
             title: match input.mode {
@@ -523,6 +538,7 @@ impl App {
                 TaskInputMode::Rename(_) => "Rename Task",
             },
             value: input.value.clone(),
+            cursor: input.cursor,
         })
     }
 
@@ -597,6 +613,16 @@ impl App {
 
     fn refresh_tasks(&mut self) -> Result<()> {
         self.screen_data.tasks = self.database.task_repository().list_all()?;
+        if let Some(task_id) = self.assigned_task_id {
+            if !self.screen_data.tasks.iter().any(|task| task.id == task_id) {
+                self.assigned_task_id = None;
+            }
+        }
+        if let Some(task_id) = self.active_focus_task_id {
+            if !self.screen_data.tasks.iter().any(|task| task.id == task_id) {
+                self.active_focus_task_id = None;
+            }
+        }
         self.sync_task_selection();
         Ok(())
     }
@@ -640,6 +666,7 @@ impl App {
         self.task_input = Some(TaskInputState {
             mode: TaskInputMode::Create,
             value: String::new(),
+            cursor: 0,
         });
         self.status_message = "Enter a new task title.".to_string();
     }
@@ -652,9 +679,37 @@ impl App {
 
         self.task_input = Some(TaskInputState {
             mode: TaskInputMode::Rename(task.id),
+            cursor: task.title.len(),
             value: task.title,
         });
         self.status_message = "Editing selected task title.".to_string();
+    }
+
+    fn move_input_cursor_home(input: &mut TaskInputState) {
+        input.cursor = 0;
+    }
+
+    fn move_input_cursor_end(input: &mut TaskInputState) {
+        input.cursor = input.value.len();
+    }
+
+    fn insert_input_char(input: &mut TaskInputState, character: char) {
+        input.value.insert(input.cursor, character);
+        input.cursor += character.len_utf8();
+    }
+
+    fn delete_input_char_before_cursor(input: &mut TaskInputState) {
+        if input.cursor == 0 {
+            return;
+        }
+
+        let previous_index = input.value[..input.cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        input.value.drain(previous_index..input.cursor);
+        input.cursor = previous_index;
     }
 
     fn open_delete_confirmation(&mut self) {
@@ -690,6 +745,27 @@ impl App {
         self.selected_task_id = Some(task.id);
         self.status_message = format!("Task marked {}.", next_status.as_str());
         Ok(())
+    }
+
+    fn toggle_selected_task_assignment(&mut self) {
+        let Some(task) = self.selected_task().cloned() else {
+            self.status_message = "Select a task to assign.".to_string();
+            return;
+        };
+
+        if self.assigned_task_id == Some(task.id) {
+            self.assigned_task_id = None;
+            self.status_message = "Pomodoro task cleared.".to_string();
+        } else {
+            self.assigned_task_id = Some(task.id);
+            self.status_message = format!("Pomodoro task set to {}.", task.title);
+        }
+    }
+
+    fn begin_focus_task_if_needed(&mut self) {
+        if self.timer.phase == TimerPhase::Focus && self.timer.current_phase_started_at.is_none() {
+            self.active_focus_task_id = self.assigned_task_id;
+        }
     }
 
     fn handle_task_overlay_key(&mut self, code: KeyCode, now: DateTime<Local>) -> Result<bool> {
@@ -744,11 +820,19 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                input.value.pop();
+                Self::delete_input_char_before_cursor(&mut input);
+                self.task_input = Some(input);
+            }
+            KeyCode::Home => {
+                Self::move_input_cursor_home(&mut input);
+                self.task_input = Some(input);
+            }
+            KeyCode::End => {
+                Self::move_input_cursor_end(&mut input);
                 self.task_input = Some(input);
             }
             KeyCode::Char(character) => {
-                input.value.push(character);
+                Self::insert_input_char(&mut input, character);
                 self.task_input = Some(input);
             }
             _ => {
@@ -894,6 +978,12 @@ impl App {
             {
                 self.open_delete_confirmation();
             }
+            KeyCode::Char('a')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.toggle_selected_task_assignment();
+            }
             KeyCode::Char('x') | KeyCode::Char(' ')
                 if self.focused_panel == PanelFocus::RightPane
                     && self.active_right_panel_tab == RightPanelTab::Tasks =>
@@ -903,6 +993,7 @@ impl App {
             KeyCode::Char('s') | KeyCode::Char(' ') | KeyCode::Enter
                 if self.focused_panel == PanelFocus::Timer =>
             {
+                self.begin_focus_task_if_needed();
                 self.timer.start_or_resume(now);
                 self.status_message = format!("{} started.", self.timer.phase.label());
             }
@@ -970,13 +1061,14 @@ impl App {
                 };
 
                 self.database.pomodoro_repository().create(
-                    None,
+                    self.active_focus_task_id,
                     Some(session_kind_for_phase(next_phase)),
                     started_at,
                     now,
                     duration_to_stored_minutes(self.timer_settings.pomodoro_length),
                 )?;
 
+                self.active_focus_task_id = None;
                 self.timer.move_to_phase(next_phase);
                 self.timer.start_or_resume(now);
                 self.refresh_history()?;
@@ -1072,7 +1164,7 @@ impl App {
         let duration_seconds = self.timer.elapsed_at(now).num_seconds().max(0) as u32;
         let started_at = self.timer.current_phase_started_at.unwrap_or(now);
         self.database.pomodoro_repository().record_session_entry(
-            None,
+            self.active_focus_task_id,
             session_kind_for_phase(self.timer.phase),
             SessionOutcome::Voided,
             None,
@@ -1080,6 +1172,9 @@ impl App {
             now,
             duration_seconds,
         )?;
+        if self.timer.phase == TimerPhase::Focus {
+            self.active_focus_task_id = None;
+        }
         Ok(())
     }
 
@@ -1409,6 +1504,31 @@ mod tests {
     }
 
     #[test]
+    fn input_popup_home_and_end_edit_at_cursor_position() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "World".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Home)
+            .expect("home should move cursor");
+        for character in "Hello ".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should insert at start");
+        }
+        app.handle_key(crossterm::event::KeyCode::End)
+            .expect("end should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Char('!'))
+            .expect("typing should insert at end");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+
+        assert_eq!(app.screen_data.tasks[0].title, "Hello World!");
+    }
+
+    #[test]
     fn app_requires_delete_confirmation() {
         let mut app = test_app();
         app.handle_key(crossterm::event::KeyCode::Char('5'))
@@ -1457,6 +1577,64 @@ mod tests {
         app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
             .expect("status should toggle");
         assert_eq!(app.screen_data.tasks[0].status, TaskStatus::Todo);
+    }
+
+    #[test]
+    fn app_toggles_selected_task_as_pomodoro_assignment() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Link me".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("assignment should toggle on");
+        assert_eq!(
+            app.assigned_task().expect("task should be assigned").title,
+            "Link me"
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("assignment should toggle off");
+        assert!(app.assigned_task().is_none());
+    }
+
+    #[test]
+    fn assigned_task_is_recorded_with_focus_session() {
+        let mut app = test_app();
+        let now = Local::now();
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Session task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+        let task_id = app.selected_task().expect("task should be selected").id;
+
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("assignment should toggle on");
+        app.handle_key(crossterm::event::KeyCode::Char('1'))
+            .expect("focus should switch");
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('x'),
+            now + ChronoDuration::seconds(5),
+        )
+        .expect("focus should void");
+
+        assert_eq!(app.screen_data.history_entries.len(), 1);
+        assert_eq!(app.screen_data.history_entries[0].task_id, Some(task_id));
     }
 
     #[test]
