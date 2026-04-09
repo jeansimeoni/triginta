@@ -432,10 +432,12 @@ fn render_task_details_panel(
                 .map(|datetime| datetime.format("%Y-%m-%d %H:%M").to_string())
                 .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
             lines.push(Line::from(format!("Due: {due_text}")));
-            lines.push(Line::from(format!(
-                "Recurring: {}",
-                if due.is_recurring { "yes" } else { "no" }
-            )));
+            if due.is_recurring {
+                lines.push(Line::from(format!(
+                    "Recurring: {}",
+                    format_recurring_rule(due.string.as_str())
+                )));
+            }
         }
         lines
     } else {
@@ -1722,4 +1724,24 @@ fn format_due_label(due: &crate::domain::TaskDue, today: NaiveDate) -> String {
     } else {
         day_label
     }
+}
+
+fn format_recurring_rule(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(capitalize_word)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn capitalize_word(word: &str) -> String {
+    let mut characters = word.chars();
+    let Some(first) = characters.next() else {
+        return String::new();
+    };
+
+    let mut output = String::new();
+    output.extend(first.to_uppercase());
+    output.push_str(characters.as_str());
+    output
 }
