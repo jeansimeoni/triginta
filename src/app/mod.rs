@@ -20,34 +20,30 @@ use crate::{
 const TICK_RATE: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppScreen {
-    Timer,
+pub enum RightPanelTab {
     Tasks,
-    History,
+    Statistics,
 }
 
-impl AppScreen {
+impl RightPanelTab {
     pub fn next(self) -> Self {
         match self {
-            Self::Timer => Self::Tasks,
-            Self::Tasks => Self::History,
-            Self::History => Self::Timer,
+            Self::Tasks => Self::Statistics,
+            Self::Statistics => Self::Tasks,
         }
     }
 
     pub fn previous(self) -> Self {
         match self {
-            Self::Timer => Self::History,
-            Self::Tasks => Self::Timer,
-            Self::History => Self::Tasks,
+            Self::Tasks => Self::Statistics,
+            Self::Statistics => Self::Tasks,
         }
     }
 
     pub fn index(self) -> usize {
         match self {
-            Self::Timer => 0,
-            Self::Tasks => 1,
-            Self::History => 2,
+            Self::Tasks => 0,
+            Self::Statistics => 1,
         }
     }
 }
@@ -59,9 +55,13 @@ pub struct ScreenData {
     pub stats: HistoryStats,
 }
 
+// `App` owns the mutable runtime state for the TUI loop.
+// Compared with a C program, this is the central state struct you would pass
+// around to input/render functions, but here methods are attached directly to
+// the type.
 #[derive(Debug, Clone)]
 pub struct App {
-    current_screen: AppScreen,
+    active_right_panel_tab: RightPanelTab,
     should_quit: bool,
     status_message: String,
     screen_data: ScreenData,
@@ -70,15 +70,15 @@ pub struct App {
 impl App {
     pub fn new(screen_data: ScreenData) -> Self {
         Self {
-            current_screen: AppScreen::Timer,
+            active_right_panel_tab: RightPanelTab::Tasks,
             should_quit: false,
             status_message: "SQLite initialized. Local-first mode active.".to_string(),
             screen_data,
         }
     }
 
-    pub fn current_screen(&self) -> AppScreen {
-        self.current_screen
+    pub fn active_right_panel_tab(&self) -> RightPanelTab {
+        self.active_right_panel_tab
     }
 
     pub fn should_quit(&self) -> bool {
@@ -90,39 +90,44 @@ impl App {
     }
 
     pub fn screen_data(&self) -> &ScreenData {
+        // Returning `&ScreenData` lends read-only access to the caller.
+        // No copy is made, and the borrow checker ensures the reference cannot
+        // outlive `self`.
         &self.screen_data
     }
 
     pub fn handle_key(&mut self, code: KeyCode) {
+        // `&mut self` is exclusive access: while this method runs, no other
+        // code can also mutate the app state. This prevents a whole class of
+        // aliasing bugs that are easy to create in C.
         match code {
             KeyCode::Char('q') => {
                 self.should_quit = true;
                 self.status_message = "Shutting down Triginta.".to_string();
             }
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => {
-                self.current_screen = self.current_screen.next();
-                self.status_message = format!("Switched to {}.", self.current_screen.label());
+                self.active_right_panel_tab = self.active_right_panel_tab.next();
+                self.status_message = match self.active_right_panel_tab {
+                    RightPanelTab::Tasks => "Switched right panel to tasks.".to_string(),
+                    RightPanelTab::Statistics => "Switched right panel to statistics.".to_string(),
+                };
             }
             KeyCode::BackTab | KeyCode::Char('h') | KeyCode::Left => {
-                self.current_screen = self.current_screen.previous();
-                self.status_message = format!("Switched to {}.", self.current_screen.label());
+                self.active_right_panel_tab = self.active_right_panel_tab.previous();
+                self.status_message = match self.active_right_panel_tab {
+                    RightPanelTab::Tasks => "Switched right panel to tasks.".to_string(),
+                    RightPanelTab::Statistics => "Switched right panel to statistics.".to_string(),
+                };
             }
             _ => {}
         }
     }
 }
 
-impl AppScreen {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Timer => "Timer",
-            Self::Tasks => "Tasks",
-            Self::History => "History",
-        }
-    }
-}
-
 pub fn run() -> Result<()> {
+    // Startup is written as a straight-line sequence of fallible operations.
+    // The `?` operator keeps this readable: each step either succeeds and
+    // continues, or returns early with an error.
     let paths = AppPaths::resolve()?;
     paths.ensure_dirs()?;
     let _tracing_guard = init_tracing(&paths)?;
@@ -147,6 +152,9 @@ pub fn run() -> Result<()> {
     let mut terminal = setup_terminal()?;
 
     let result = run_event_loop(&mut terminal, &mut app);
+    // Terminal state must be restored even if the event loop returned an error.
+    // This is the same concern as putting tty cleanup in a `goto cleanup` path
+    // in C, just expressed more directly.
     restore_terminal(&mut terminal)?;
     result
 }
@@ -160,6 +168,9 @@ fn run_event_loop(
             .draw(|frame| ui::render(frame, app))
             .context("failed to draw terminal frame")?;
 
+        // `poll` waits up to `TICK_RATE`; if an event exists we read it.
+        // The `let ... else` form is a concise "if not a key event, continue"
+        // branch without nesting the main control flow.
         if event::poll(TICK_RATE).context("failed to poll for terminal events")? {
             let Event::Key(key) = event::read().context("failed to read terminal event")? else {
                 continue;
@@ -175,6 +186,9 @@ fn run_event_loop(
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
+    // The return type looks verbose because the concrete terminal backend type
+    // is spelled out explicitly. Rust often prefers exact types over hidden
+    // pointers, especially in lower-level code.
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")?;
@@ -191,32 +205,24 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) 
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::HistoryStats;
-
-    use super::{App, AppScreen, ScreenData};
+    use super::{App, RightPanelTab, ScreenData};
 
     #[test]
-    fn app_starts_on_timer_screen() {
+    fn app_starts_running() {
         let app = App::new(ScreenData::default());
-        assert_eq!(app.current_screen(), AppScreen::Timer);
         assert!(!app.should_quit());
+        assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
     }
 
     #[test]
-    fn app_switches_screens_forward_and_back() {
-        let mut app = App::new(ScreenData {
-            stats: HistoryStats::default(),
-            ..ScreenData::default()
-        });
+    fn app_switches_right_panel_tabs() {
+        let mut app = App::new(ScreenData::default());
 
         app.handle_key(crossterm::event::KeyCode::Tab);
-        assert_eq!(app.current_screen(), AppScreen::Tasks);
-
-        app.handle_key(crossterm::event::KeyCode::Right);
-        assert_eq!(app.current_screen(), AppScreen::History);
+        assert_eq!(app.active_right_panel_tab(), RightPanelTab::Statistics);
 
         app.handle_key(crossterm::event::KeyCode::Left);
-        assert_eq!(app.current_screen(), AppScreen::Tasks);
+        assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
     }
 
     #[test]

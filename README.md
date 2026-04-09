@@ -1,0 +1,159 @@
+# Triginta
+
+Triginta is a local-first Rust TUI for Pomodoro tracking and task management.
+
+The application is designed to stay fully usable offline. SQLite is the source of truth, and any future Todoist sync work is intended to sit behind an explicit integration boundary instead of driving core app behavior.
+
+## Status
+
+The project is currently an early vertical slice. It already includes:
+
+- A `ratatui` + `crossterm` terminal shell
+- Screen navigation for timer, tasks, and history views
+- SQLite bootstrap and schema initialization
+- Empty-state handling for a first run with no data
+- A placeholder Todoist integration boundary
+- Unit and bootstrap tests around app state and storage initialization
+
+What is not implemented yet:
+
+- The actual Pomodoro timer engine
+- Task creation and editing flows
+- History recording from real sessions
+- Live Todoist synchronization
+
+## Tech Stack
+
+- Rust 2024 edition
+- `ratatui` for terminal rendering
+- `crossterm` for terminal input/output
+- `rusqlite` with bundled SQLite
+- `chrono` for timestamps
+- `tracing` for file-based logging
+- `mise` for toolchain management
+
+## Prerequisites
+
+- `mise`
+- A working Rust toolchain managed by `mise`
+
+If `mise` is installed, the repository will use the toolchain declared in [`mise.toml`](/home/jeansimeoni/Projects/triginta/mise.toml).
+
+## Getting Started
+
+Install the configured toolchain if needed:
+
+```bash
+mise install
+```
+
+Build the project:
+
+```bash
+mise exec -- cargo build
+```
+
+Run the TUI:
+
+```bash
+mise exec -- cargo run
+```
+
+Run the test suite:
+
+```bash
+mise exec -- cargo test
+```
+
+Build an optimized release binary:
+
+```bash
+mise exec -- cargo build --release
+```
+
+## Running The App
+
+Launch the app with:
+
+```bash
+mise exec -- cargo run
+```
+
+Current key bindings:
+
+- `Tab`, `l`, or `Right Arrow`: next screen
+- `Shift+Tab`, `h`, or `Left Arrow`: previous screen
+- `q`: quit
+
+Current screens:
+
+- `Timer`: placeholder screen for the future Pomodoro engine
+- `Tasks`: lists locally stored tasks or an empty-state message
+- `History`: shows aggregate stats and recent pomodoros
+
+## Data And Logging
+
+On startup, Triginta creates its local directories, initializes SQLite if needed, and writes logs to disk.
+
+By default, application paths are resolved through the platform-specific project directories for:
+
+- Qualifier: `dev`
+- Organization: `jeansimeoni`
+- Application: `Triginta`
+
+The app also supports overriding the data location with `TRIGINTA_DATA_DIR`.
+
+When `TRIGINTA_DATA_DIR` is set, Triginta uses this layout:
+
+- Data directory: `$TRIGINTA_DATA_DIR`
+- Config directory: `$TRIGINTA_DATA_DIR/config`
+- SQLite database: `$TRIGINTA_DATA_DIR/triginta.sqlite3`
+- Log file: `$TRIGINTA_DATA_DIR/logs/triginta.log`
+
+Example:
+
+```bash
+TRIGINTA_DATA_DIR=/tmp/triginta-dev mise exec -- cargo run
+```
+
+This is useful for local development and for keeping test data isolated from your normal app state.
+
+## Project Layout
+
+```text
+src/
+  app/           application state and event loop
+  config/        path resolution and tracing setup
+  domain/        core domain types
+  integrations/  sync provider boundaries
+  storage/       SQLite bootstrap and repositories
+  ui/            ratatui rendering
+tests/
+  bootstrap.rs   fresh-install database bootstrap coverage
+```
+
+## Testing
+
+The current tests focus on the parts that matter for a stable local-first base:
+
+- App state transitions between screens
+- Quit behavior
+- In-memory database bootstrap
+- Fresh database file creation on disk
+
+Run them with:
+
+```bash
+mise exec -- cargo test
+```
+
+## Development Notes
+
+- The repository is intentionally a single Cargo package for now.
+- SQLite remains the local source of truth.
+- Empty-state behavior is intentional and should continue to work on a fresh database.
+- Todoist integration is planned, but should remain decoupled from core app logic.
+
+## License
+
+MIT

@@ -5,6 +5,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{HistoryStats, PomodoroId, PomodoroSession, Task, TaskId, TaskStatus};
 
+// Keeping the schema as a string literal makes bootstrap simple for this early
+// vertical slice. `execute_batch` sends the whole script to SQLite at once,
+// which is similar to feeding a schema file to sqlite3 in a C program.
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,6 +32,9 @@ CREATE TABLE IF NOT EXISTS app_metadata (
 );
 "#;
 
+// These traits define the storage-facing API the rest of the app relies on.
+// This separation matters because it keeps the higher layers talking in domain
+// terms (`Task`, `PomodoroSession`) instead of raw SQL concepts.
 pub trait TaskRepository {
     fn list_all(&self) -> Result<Vec<Task>>;
 }
@@ -45,6 +51,8 @@ pub struct Database {
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
+        // `Connection` is owned by `Database`, so Rust guarantees the SQLite
+        // handle lives at least as long as any repository borrowed from it.
         let connection = Connection::open(path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
         let database = Self { connection };
@@ -61,6 +69,9 @@ impl Database {
     }
 
     fn initialize(&self) -> Result<()> {
+        // `&self` means initialization can use the connection without taking
+        // ownership of the `Database`. The caller still owns the database after
+        // this method returns.
         self.connection
             .execute_batch(SCHEMA)
             .context("failed to initialize database schema")?;
@@ -74,6 +85,9 @@ impl Database {
     }
 
     pub fn task_repository(&self) -> SqliteTaskRepository<'_> {
+        // The repository borrows the connection instead of cloning or moving
+        // it. The lifetime parameter (`'_`) is Rust's way of saying "this
+        // repository cannot outlive the `Database` it came from."
         SqliteTaskRepository {
             connection: &self.connection,
         }
@@ -92,6 +106,9 @@ pub struct SqliteTaskRepository<'a> {
 
 impl TaskRepository for SqliteTaskRepository<'_> {
     fn list_all(&self) -> Result<Vec<Task>> {
+        // `prepare` compiles SQL once and `query_map` walks each row through a
+        // closure. The closure is conceptually similar to a row-to-struct
+        // callback in C, but its return type is checked by the compiler.
         let mut statement = self.connection.prepare(
             "SELECT id, title, status, created_at, completed_at
              FROM tasks
@@ -108,6 +125,8 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             })
         })?;
 
+        // `collect` turns the iterator of per-row results into one
+        // `Result<Vec<Task>>`, stopping early if any row conversion fails.
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .context("failed to load tasks")
     }
@@ -129,6 +148,9 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
         let rows = statement.query_map([limit as i64], |row| {
             Ok(PomodoroSession {
                 id: PomodoroId(row.get(0)?),
+                // `Option<T>` replaces the common C pattern of sentinel values
+                // or NULL checks. `map(TaskId)` converts `Some(i64)` into
+                // `Some(TaskId)` and leaves `None` unchanged.
                 task_id: row.get::<_, Option<i64>>(1)?.map(TaskId),
                 started_at: row.get(2)?,
                 ended_at: row.get(3)?,
@@ -152,6 +174,9 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
             .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
             .context("failed to compute pomodoro stats")?;
 
+        // `optional()` converts "query returned no row" into `Ok(None)`.
+        // For `COUNT(*)` that case should not really occur, but this keeps the
+        // code explicit about the database API contract we are handling.
         let completed_tasks = self
             .connection
             .query_row(
@@ -178,6 +203,9 @@ mod tests {
 
     #[test]
     fn in_memory_database_bootstraps_empty_state() -> Result<()> {
+        // In-memory SQLite is ideal for unit tests: fast, isolated, and no
+        // manual cleanup. This is the same testing goal as using a temp DB in C
+        // without the boilerplate of creating and deleting files yourself.
         let database = Database::open_in_memory()?;
         let tasks = database.task_repository().list_all()?;
         let sessions = database.pomodoro_repository().list_recent(25)?;

@@ -1,11 +1,17 @@
 use chrono::{DateTime, Local};
 
+// Tuple structs are lightweight "newtypes": this is roughly like wrapping an
+// `int64_t` in a dedicated typedef, except Rust keeps it type-safe so a
+// `TaskId` cannot be passed where a `PomodoroId` is expected by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PomodoroId(pub i64);
 
+// Enums in Rust are tagged unions built into the language.
+// This is much closer to "an enum plus guaranteed exhaustive handling" than a
+// plain C enum, because `match` must cover every variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStatus {
     Todo,
@@ -15,6 +21,9 @@ pub enum TaskStatus {
 
 impl TaskStatus {
     pub fn as_str(&self) -> &'static str {
+        // `&'static str` is a borrowed reference to string data baked into the
+        // binary, similar in spirit to returning a pointer to a string literal
+        // in C. No allocation happens here.
         match self {
             Self::Todo => "todo",
             Self::InProgress => "in_progress",
@@ -23,6 +32,9 @@ impl TaskStatus {
     }
 
     pub fn from_db(value: &str) -> Self {
+        // `&str` is a borrowed string slice, not an owning buffer like
+        // `String`. This function reads the input and returns an owned enum
+        // value, so there are no lifetime issues for the caller to manage.
         match value {
             "in_progress" => Self::InProgress,
             "done" => Self::Done,
@@ -31,6 +43,9 @@ impl TaskStatus {
     }
 }
 
+// These structs are plain data carriers, similar to C structs, but ownership
+// is explicit per field. For example `title: String` means the `Task` owns the
+// heap-allocated text and will free it automatically when dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub id: TaskId,

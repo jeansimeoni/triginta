@@ -5,6 +5,9 @@ use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 use tracing_appender::non_blocking::WorkerGuard;
 
+// This struct centralizes every filesystem location the app cares about.
+// It plays the same role that a "resolved paths" config struct would in C,
+// but `PathBuf` gives an owned, growable path type instead of raw strings.
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     pub config_dir: PathBuf,
@@ -15,6 +18,9 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn resolve() -> Result<Self> {
+        // Environment-variable override first, then platform-default lookup.
+        // The early return is common Rust style when one branch can finish the
+        // function immediately.
         if let Ok(override_dir) = std::env::var("TRIGINTA_DATA_DIR") {
             return Self::from_data_dir(PathBuf::from(override_dir));
         }
@@ -31,6 +37,8 @@ impl AppPaths {
     }
 
     fn from_project_dirs(config_dir: &Path, data_dir: &Path) -> Result<Self> {
+        // `&Path` means we borrow the input paths rather than taking ownership.
+        // `to_path_buf()` performs the owned copy when we want to store them.
         Ok(Self {
             config_dir: config_dir.to_path_buf(),
             data_dir: data_dir.to_path_buf(),
@@ -40,6 +48,9 @@ impl AppPaths {
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
+        // `with_context` enriches low-level I/O errors with app-specific
+        // details. In C you might log the path near each failing syscall;
+        // here we attach that context to the error value itself.
         fs::create_dir_all(&self.config_dir).with_context(|| {
             format!(
                 "failed to create config dir at {}",
@@ -59,6 +70,9 @@ impl AppPaths {
 }
 
 pub fn init_tracing(paths: &AppPaths) -> Result<WorkerGuard> {
+    // The guard value keeps the background logging worker alive.
+    // This is an RAII pattern: when the guard is dropped, cleanup happens
+    // automatically. In C this would usually be a manual init/shutdown pair.
     let file_appender = tracing_appender::rolling::never(
         paths.log_path.parent().expect("log path has parent"),
         paths
