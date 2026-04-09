@@ -9,8 +9,13 @@ fn main() -> Result<()> {
 
 #[cfg(debug_assertions)]
 fn debug_run_options() -> triginta::app::RunOptions {
-    let force_ascii = std::env::args().skip(1).any(|arg| arg == "--ascii");
-    triginta::app::RunOptions { force_ascii }
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let force_ascii = args.iter().any(|arg| arg == "--ascii");
+    let force_short_timer = args.iter().any(|arg| arg == "--short-timer");
+    triginta::app::RunOptions {
+        force_ascii,
+        force_short_timer,
+    }
 }
 
 #[cfg(not(debug_assertions))]

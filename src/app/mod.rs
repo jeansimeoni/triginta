@@ -11,7 +11,7 @@ use ratatui::{Terminal, prelude::CrosstermBackend};
 use tracing::info;
 
 use crate::{
-    config::{AppPaths, GlyphMode, init_tracing, load_ui_config},
+    config::{AppConfig, AppPaths, GlyphMode, TimerSettings, init_tracing, load_app_config},
     domain::{HistoryStats, PomodoroSession, Task},
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
     storage::{Database, PomodoroRepository, TaskRepository},
@@ -19,14 +19,11 @@ use crate::{
 };
 
 const TICK_RATE: Duration = Duration::from_millis(250);
-const FOCUS_MINUTES: i64 = 25;
-const SHORT_BREAK_MINUTES: i64 = 5;
-const LONG_BREAK_MINUTES: i64 = 15;
-const LONG_BREAK_INTERVAL: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RunOptions {
     pub force_ascii: bool,
+    pub force_short_timer: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,11 +123,11 @@ impl TimerPhase {
         }
     }
 
-    pub fn duration(self) -> ChronoDuration {
+    pub fn duration(self, settings: &TimerSettings) -> ChronoDuration {
         match self {
-            Self::Focus => ChronoDuration::minutes(FOCUS_MINUTES),
-            Self::ShortBreak => ChronoDuration::minutes(SHORT_BREAK_MINUTES),
-            Self::LongBreak => ChronoDuration::minutes(LONG_BREAK_MINUTES),
+            Self::Focus => chrono_duration(settings.pomodoro_length),
+            Self::ShortBreak => chrono_duration(settings.short_break_length),
+            Self::LongBreak => chrono_duration(settings.long_break_length),
         }
     }
 }
@@ -183,12 +180,12 @@ impl TimerState {
         }
     }
 
-    fn duration(&self) -> ChronoDuration {
-        self.phase.duration()
+    fn duration(&self, settings: &TimerSettings) -> ChronoDuration {
+        self.phase.duration(settings)
     }
 
-    fn remaining_at(&self, now: DateTime<Local>) -> ChronoDuration {
-        let remaining = self.duration() - self.elapsed_at(now);
+    fn remaining_at(&self, now: DateTime<Local>, settings: &TimerSettings) -> ChronoDuration {
+        let remaining = self.duration(settings) - self.elapsed_at(now);
         if remaining < ChronoDuration::zero() {
             ChronoDuration::zero()
         } else {
@@ -196,8 +193,8 @@ impl TimerState {
         }
     }
 
-    fn progress_at(&self, now: DateTime<Local>) -> f64 {
-        let total_ms = self.duration().num_milliseconds();
+    fn progress_at(&self, now: DateTime<Local>, settings: &TimerSettings) -> f64 {
+        let total_ms = self.duration(settings).num_milliseconds();
         if total_ms <= 0 {
             return 0.0;
         }
@@ -270,6 +267,7 @@ pub struct ScreenData {
 #[derive(Debug)]
 pub struct App {
     database: Database,
+    timer_settings: TimerSettings,
     active_right_panel_tab: RightPanelTab,
     focused_panel: PanelFocus,
     glyph_mode: GlyphMode,
@@ -280,9 +278,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(screen_data: ScreenData, glyph_mode: GlyphMode, database: Database) -> Self {
+    pub fn new(
+        screen_data: ScreenData,
+        glyph_mode: GlyphMode,
+        timer_settings: TimerSettings,
+        database: Database,
+    ) -> Self {
         Self {
             database,
+            timer_settings,
             active_right_panel_tab: RightPanelTab::Tasks,
             focused_panel: PanelFocus::Timer,
             glyph_mode,
@@ -320,6 +324,10 @@ impl App {
         &self.screen_data
     }
 
+    pub fn timer_settings(&self) -> &TimerSettings {
+        &self.timer_settings
+    }
+
     pub fn timer_view(&self) -> TimerView {
         self.timer_view_at(Local::now())
     }
@@ -329,8 +337,8 @@ impl App {
             phase: self.timer.phase,
             run_state: self.timer.run_state,
             elapsed: self.timer.elapsed_at(now),
-            remaining: self.timer.remaining_at(now),
-            progress: self.timer.progress_at(now),
+            remaining: self.timer.remaining_at(now, &self.timer_settings),
+            progress: self.timer.progress_at(now, &self.timer_settings),
             completed_focus_sessions: self.timer.completed_focus_sessions,
         }
     }
@@ -404,7 +412,7 @@ impl App {
             return Ok(());
         }
 
-        if self.timer.elapsed_at(now) < self.timer.duration() {
+        if self.timer.elapsed_at(now) < self.timer.duration(&self.timer_settings) {
             return Ok(());
         }
 
@@ -413,16 +421,19 @@ impl App {
                 let started_at = self
                     .timer
                     .current_phase_started_at
-                    .unwrap_or(now - ChronoDuration::minutes(FOCUS_MINUTES));
+                    .unwrap_or(now - chrono_duration(self.timer_settings.pomodoro_length));
                 self.database.pomodoro_repository().create(
                     None,
                     started_at,
                     now,
-                    FOCUS_MINUTES as u32,
+                    duration_to_stored_minutes(self.timer_settings.pomodoro_length),
                 )?;
                 self.timer.completed_focus_sessions += 1;
 
-                let next_phase = if self.timer.completed_focus_sessions % LONG_BREAK_INTERVAL == 0 {
+                let next_phase = if self.timer.completed_focus_sessions
+                    % self.timer_settings.long_break_interval
+                    == 0
+                {
                     TimerPhase::LongBreak
                 } else {
                     TimerPhase::ShortBreak
@@ -459,11 +470,8 @@ pub fn run(options: RunOptions) -> Result<()> {
     let paths = AppPaths::resolve()?;
     paths.ensure_dirs()?;
     let _tracing_guard = init_tracing(&paths)?;
-    let glyph_mode = if options.force_ascii {
-        GlyphMode::Ascii
-    } else {
-        load_ui_config(&paths)?.glyph_mode
-    };
+    let mut config = load_app_config(&paths)?;
+    apply_debug_overrides(&mut config, options);
 
     info!("starting triginta");
 
@@ -481,7 +489,7 @@ pub fn run(options: RunOptions) -> Result<()> {
         "integration boundary initialized"
     );
 
-    let mut app = App::new(screen_data, glyph_mode, database);
+    let mut app = App::new(screen_data, config.ui.glyph_mode, config.timer, database);
     let mut terminal = setup_terminal()?;
 
     let result = run_event_loop(&mut terminal, &mut app);
@@ -537,21 +545,40 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) 
     terminal.show_cursor().context("failed to show cursor")
 }
 
+fn apply_debug_overrides(config: &mut AppConfig, options: RunOptions) {
+    if options.force_ascii {
+        config.ui.glyph_mode = GlyphMode::Ascii;
+    }
+    if options.force_short_timer {
+        config.timer = TimerSettings::short_timer_preset();
+    }
+}
+
+fn chrono_duration(duration: Duration) -> ChronoDuration {
+    ChronoDuration::from_std(duration).expect("timer duration should fit in chrono duration")
+}
+
+fn duration_to_stored_minutes(duration: Duration) -> u32 {
+    duration.as_secs().div_ceil(60) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, Local};
 
-    use crate::config::GlyphMode;
+    use crate::config::{AppConfig, GlyphMode, TimerSettings};
     use crate::storage::Database;
 
     use super::{
-        App, FOCUS_MINUTES, PanelFocus, RightPanelTab, ScreenData, TimerPhase, TimerRunState,
+        App, PanelFocus, RightPanelTab, RunOptions, ScreenData, TimerPhase, TimerRunState,
+        apply_debug_overrides, chrono_duration, duration_to_stored_minutes,
     };
 
     fn test_app() -> App {
         App::new(
             ScreenData::default(),
             GlyphMode::NerdFonts,
+            TimerSettings::default(),
             Database::open_in_memory().expect("in-memory database should open"),
         )
     }
@@ -617,7 +644,7 @@ mod tests {
     #[test]
     fn completed_pomodoro_transitions_to_break_and_updates_history() {
         let mut app = test_app();
-        let started_at = Local::now() - ChronoDuration::minutes(FOCUS_MINUTES);
+        let started_at = Local::now() - chrono_duration(app.timer_settings.pomodoro_length);
         app.timer.phase = TimerPhase::Focus;
         app.timer.run_state = TimerRunState::Running;
         app.timer.current_phase_started_at = Some(started_at);
@@ -629,6 +656,23 @@ mod tests {
         assert_eq!(app.timer.phase, TimerPhase::ShortBreak);
         assert_eq!(app.timer.run_state, TimerRunState::Running);
         assert_eq!(app.screen_data.stats.total_sessions, 1);
-        assert_eq!(app.screen_data.stats.total_minutes, FOCUS_MINUTES as u32);
+        assert_eq!(
+            app.screen_data.stats.total_minutes,
+            duration_to_stored_minutes(app.timer_settings.pomodoro_length)
+        );
+    }
+
+    #[test]
+    fn debug_short_timer_override_replaces_timer_settings() {
+        let mut config = AppConfig::default();
+        apply_debug_overrides(
+            &mut config,
+            RunOptions {
+                force_ascii: false,
+                force_short_timer: true,
+            },
+        );
+
+        assert_eq!(config.timer, TimerSettings::short_timer_preset());
     }
 }

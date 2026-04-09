@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -96,6 +96,10 @@ fn render_timer_panel(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Sym
         app.focused_panel() == PanelFocus::Timer,
     );
     let inner = block.inner(area);
+    let content = inner.inner(Margin {
+        vertical: 0,
+        horizontal: 1,
+    });
     frame.render_widget(block, area);
 
     let sections = Layout::default()
@@ -106,8 +110,9 @@ fn render_timer_panel(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Sym
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Min(0),
         ])
-        .split(inner);
+        .split(content);
 
     let headline = Paragraph::new(vec![Line::from(vec![Span::styled(
         format!("{} {}", symbols.timer, timer.run_state.label()),
@@ -116,22 +121,18 @@ fn render_timer_panel(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Sym
             .add_modifier(Modifier::BOLD),
     )])]);
 
-    let progress = Paragraph::new(Line::from(progress_bar(&timer, symbols, inner.width)))
+    let progress = Paragraph::new(Line::from(progress_bar(&timer, symbols, content.width)))
         .style(Style::default().fg(timer_accent_color(&timer)))
         .wrap(Wrap { trim: true });
 
-    let progress_meta = Paragraph::new(progress_meta_line(&timer, inner.width));
-    let cycle = Paragraph::new(cycle_line(
-        timer.phase,
-        timer.completed_focus_sessions,
-        symbols,
-    ));
+    let progress_meta = Paragraph::new(progress_meta_line(&timer, content.width));
+    let cycle = Paragraph::new(cycle_line(timer.completed_focus_sessions, symbols));
 
     frame.render_widget(headline, sections[0]);
     frame.render_widget(progress, sections[1]);
     frame.render_widget(progress_meta, sections[2]);
-    frame.render_widget(cycle, sections[3]);
-    frame.render_widget(Paragraph::new(""), sections[4]);
+    frame.render_widget(Paragraph::new(""), sections[3]);
+    frame.render_widget(cycle, sections[4]);
 }
 
 fn render_history_panel(
@@ -485,16 +486,12 @@ fn timer_accent_color(timer: &crate::app::TimerView) -> Color {
     }
 }
 
-fn cycle_line(phase: TimerPhase, completed_focus_sessions: u32, symbols: Symbols) -> Line<'static> {
+fn cycle_line(completed_focus_sessions: u32, symbols: Symbols) -> Line<'static> {
     let current_slot = (completed_focus_sessions % 4) as usize;
     let mut spans = vec![Span::styled(
-        format!("{}  ", phase.label()),
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
-    spans.push(Span::styled(
         "Cycle ",
         Style::default().add_modifier(Modifier::BOLD),
-    ));
+    )];
 
     for index in 0..4usize {
         let symbol = if index < current_slot {

@@ -65,6 +65,12 @@ Force ASCII-only symbols in debug builds:
 mise exec -- cargo run -- --ascii
 ```
 
+Use short timer durations in debug builds:
+
+```bash
+mise exec -- cargo run -- --short-timer
+```
+
 Run the test suite:
 
 ```bash
@@ -89,6 +95,10 @@ Current key bindings:
 
 - `Tab`, `l`, or `Right Arrow`: next right-side tab
 - `Shift+Tab`, `h`, or `Left Arrow`: previous right-side tab
+- `1` through `5`: focus a panel
+- `s`, `Space`, or `Enter`: start or resume the timer when the timer panel is focused
+- `p`: pause the timer when the timer panel is focused
+- `x` or `Esc`: void the current timer when the timer panel is focused
 - `q`: quit
 
 Current layout:
@@ -100,11 +110,8 @@ Current layout:
 
 On startup, Triginta creates its local directories, initializes SQLite if needed, and writes logs to disk.
 
-By default, application paths are resolved through the platform-specific project directories for:
-
-- Qualifier: `dev`
-- Organization: `jeansimeoni`
-- Application: `Triginta`
+By default, application paths are resolved through the platform-specific
+standard app directories for `triginta`.
 
 The app also supports overriding the data location with `TRIGINTA_DATA_DIR`.
 
@@ -112,7 +119,7 @@ When `TRIGINTA_DATA_DIR` is set, Triginta uses this layout:
 
 - Data directory: `$TRIGINTA_DATA_DIR`
 - Config directory: `$TRIGINTA_DATA_DIR/config`
-- UI config file: `$TRIGINTA_DATA_DIR/config/ui.toml`
+- App config file: `$TRIGINTA_DATA_DIR/config/config.toml` or YAML equivalent
 - SQLite database: `$TRIGINTA_DATA_DIR/triginta.sqlite3`
 - Log file: `$TRIGINTA_DATA_DIR/logs/triginta.log`
 
@@ -124,26 +131,25 @@ TRIGINTA_DATA_DIR=/tmp/triginta-dev mise exec -- cargo run
 
 This is useful for local development and for keeping test data isolated from your normal app state.
 
-## UI Configuration
+## Configuration
 
-Triginta now prefers Nerd Font glyphs by default for richer icons and indicators.
+Triginta uses a single application configuration file with sectioned settings
+such as `ui` and `timer`.
 
-Create `config/ui.toml` with:
+Supported formats:
 
-```toml
-glyph_mode = "nerd-fonts"
-```
+- `config.toml`
+- `config.yaml`
+- `config.yml`
 
-Available values:
+Documentation:
 
-- `nerd-fonts`
-- `ascii`
+- [Configuration Guide](/home/jeansimeoni/Projects/triginta/docs/configuration.md)
 
-In debug builds, `--ascii` overrides the config file for quick testing:
+Debug-only overrides:
 
-```bash
-mise exec -- cargo run -- --ascii
-```
+- `--ascii`: force ASCII glyphs regardless of config
+- `--short-timer`: force `30s/10s/20s` timer lengths for testing
 
 ## Project Layout
 
