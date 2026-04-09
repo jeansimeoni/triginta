@@ -401,6 +401,20 @@ struct TaskInputState {
     cursor: usize,
 }
 
+#[derive(Debug, Clone)]
+struct TaskSearchState {
+    mode: TaskSearchMode,
+    query: String,
+    cursor: usize,
+    selected_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskSearchMode {
+    TimerAssignment,
+    HistoryAssignment(i64),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskInputView {
     pub title: &'static str,
@@ -412,6 +426,21 @@ pub struct TaskInputView {
 pub struct DeleteConfirmationView {
     pub task_id: TaskId,
     pub task_title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSearchResultView {
+    pub task_id: TaskId,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSearchView {
+    pub title: &'static str,
+    pub query: String,
+    pub cursor: usize,
+    pub selected_index: usize,
+    pub results: Vec<TaskSearchResultView>,
 }
 
 // `App` owns the mutable runtime state for the TUI loop.
@@ -434,6 +463,7 @@ pub struct App {
     assigned_task_id: Option<TaskId>,
     active_focus_task_id: Option<TaskId>,
     task_input: Option<TaskInputState>,
+    task_search: Option<TaskSearchState>,
     delete_confirmation: Option<TaskId>,
     should_quit: bool,
     status_message: String,
@@ -464,6 +494,7 @@ impl App {
             assigned_task_id: None,
             active_focus_task_id: None,
             task_input: None,
+            task_search: None,
             delete_confirmation: None,
             should_quit: false,
             status_message: "SQLite initialized. Local-first mode active.".to_string(),
@@ -552,6 +583,27 @@ impl App {
         Some(DeleteConfirmationView {
             task_id,
             task_title: task.title.clone(),
+        })
+    }
+
+    pub fn task_search_view(&self) -> Option<TaskSearchView> {
+        let search = self.task_search.as_ref()?;
+        Some(TaskSearchView {
+            title: match search.mode {
+                TaskSearchMode::TimerAssignment => "Assign Task",
+                TaskSearchMode::HistoryAssignment(_) => "Assign Session Task",
+            },
+            query: search.query.clone(),
+            cursor: search.cursor,
+            selected_index: search.selected_index,
+            results: self
+                .searchable_tasks(search.query.as_str())
+                .into_iter()
+                .map(|task| TaskSearchResultView {
+                    task_id: task.id,
+                    title: task.title.clone(),
+                })
+                .collect(),
         })
     }
 
@@ -662,6 +714,14 @@ impl App {
         self.selected_task_id = visible_ids.get(next_index).copied();
     }
 
+    fn searchable_tasks(&self, query: &str) -> Vec<&Task> {
+        self.screen_data
+            .tasks
+            .iter()
+            .filter(|task| fuzzy_matches(query, task.title.as_str()))
+            .collect()
+    }
+
     fn open_create_task_popup(&mut self) {
         self.task_input = Some(TaskInputState {
             mode: TaskInputMode::Create,
@@ -722,6 +782,31 @@ impl App {
         self.status_message = "Confirm task deletion.".to_string();
     }
 
+    fn open_timer_task_search(&mut self) {
+        self.task_search = Some(TaskSearchState {
+            mode: TaskSearchMode::TimerAssignment,
+            query: String::new(),
+            cursor: 0,
+            selected_index: 0,
+        });
+        self.status_message = "Search for a task to assign.".to_string();
+    }
+
+    fn open_history_task_search(&mut self) {
+        let Some(entry) = self.selected_history_focus_entry().cloned() else {
+            self.status_message = "Select a focus session to assign.".to_string();
+            return;
+        };
+
+        self.task_search = Some(TaskSearchState {
+            mode: TaskSearchMode::HistoryAssignment(entry.id),
+            query: String::new(),
+            cursor: 0,
+            selected_index: 0,
+        });
+        self.status_message = "Search for a task to assign to the session.".to_string();
+    }
+
     fn toggle_selected_task_status(&mut self, now: DateTime<Local>) -> Result<()> {
         let Some(task) = self.selected_task().cloned() else {
             self.status_message = "Select a task to update.".to_string();
@@ -762,6 +847,41 @@ impl App {
         }
     }
 
+    fn clear_assigned_task(&mut self) {
+        if self.assigned_task_id.is_some() {
+            self.assigned_task_id = None;
+            self.status_message = "Pomodoro task cleared.".to_string();
+        } else {
+            self.status_message = "No pomodoro task assigned.".to_string();
+        }
+    }
+
+    fn clear_selected_history_task(&mut self) -> Result<()> {
+        let Some(entry) = self.selected_history_focus_entry().cloned() else {
+            self.status_message = "Select a focus session to clear.".to_string();
+            return Ok(());
+        };
+
+        self.database
+            .pomodoro_repository()
+            .update_session_task(entry.id, None)?;
+        self.refresh_history()?;
+        self.status_message = "Session task cleared.".to_string();
+        Ok(())
+    }
+
+    fn selected_history_focus_entry(&self) -> Option<&SessionEntry> {
+        if self.active_history_panel_tab != HistoryPanelTab::Today {
+            return None;
+        }
+
+        self.screen_data
+            .history_entries
+            .iter()
+            .filter(|entry| entry.kind == SessionKind::Focus)
+            .nth(self.history_scroll)
+    }
+
     fn begin_focus_task_if_needed(&mut self) {
         if self.timer.phase == TimerPhase::Focus && self.timer.current_phase_started_at.is_none() {
             self.active_focus_task_id = self.assigned_task_id;
@@ -769,6 +889,73 @@ impl App {
     }
 
     fn handle_task_overlay_key(&mut self, code: KeyCode, now: DateTime<Local>) -> Result<bool> {
+        if let Some(mut search) = self.task_search.take() {
+            match code {
+                KeyCode::Esc => {
+                    self.status_message = "Task search canceled.".to_string();
+                }
+                KeyCode::Enter => {
+                    let matches = self.searchable_tasks(search.query.as_str());
+                    if let Some(task) = matches.get(search.selected_index) {
+                        let task_id = task.id;
+                        let task_title = task.title.clone();
+                        match search.mode {
+                            TaskSearchMode::TimerAssignment => {
+                                self.assigned_task_id = Some(task_id);
+                                self.status_message =
+                                    format!("Pomodoro task set to {}.", task_title);
+                            }
+                            TaskSearchMode::HistoryAssignment(session_id) => {
+                                self.database
+                                    .pomodoro_repository()
+                                    .update_session_task(session_id, Some(task_id))?;
+                                self.refresh_history()?;
+                                self.status_message =
+                                    format!("Session task set to {}.", task_title);
+                            }
+                        }
+                    } else {
+                        self.task_search = Some(search);
+                        self.status_message = "No matching task to assign.".to_string();
+                    }
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let last_index = self
+                        .searchable_tasks(search.query.as_str())
+                        .len()
+                        .saturating_sub(1);
+                    search.selected_index = (search.selected_index + 1).min(last_index);
+                    self.task_search = Some(search);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    search.selected_index = search.selected_index.saturating_sub(1);
+                    self.task_search = Some(search);
+                }
+                KeyCode::Backspace => {
+                    Self::delete_search_char_before_cursor(&mut search);
+                    search.selected_index = 0;
+                    self.task_search = Some(search);
+                }
+                KeyCode::Home => {
+                    Self::move_search_cursor_home(&mut search);
+                    self.task_search = Some(search);
+                }
+                KeyCode::End => {
+                    Self::move_search_cursor_end(&mut search);
+                    self.task_search = Some(search);
+                }
+                KeyCode::Char(character) => {
+                    Self::insert_search_char(&mut search, character);
+                    search.selected_index = 0;
+                    self.task_search = Some(search);
+                }
+                _ => {
+                    self.task_search = Some(search);
+                }
+            }
+            return Ok(true);
+        }
+
         if let Some(task_id) = self.delete_confirmation {
             match code {
                 KeyCode::Enter | KeyCode::Char('y') => {
@@ -841,6 +1028,33 @@ impl App {
         }
 
         Ok(true)
+    }
+
+    fn move_search_cursor_home(search: &mut TaskSearchState) {
+        search.cursor = 0;
+    }
+
+    fn move_search_cursor_end(search: &mut TaskSearchState) {
+        search.cursor = search.query.len();
+    }
+
+    fn insert_search_char(search: &mut TaskSearchState, character: char) {
+        search.query.insert(search.cursor, character);
+        search.cursor += character.len_utf8();
+    }
+
+    fn delete_search_char_before_cursor(search: &mut TaskSearchState) {
+        if search.cursor == 0 {
+            return;
+        }
+
+        let previous_index = search.query[..search.cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        search.query.drain(previous_index..search.cursor);
+        search.cursor = previous_index;
     }
 
     pub fn handle_key(&mut self, code: KeyCode) -> Result<()> {
@@ -983,6 +1197,18 @@ impl App {
                     && self.active_right_panel_tab == RightPanelTab::Tasks =>
             {
                 self.toggle_selected_task_assignment();
+            }
+            KeyCode::Char('a') if self.focused_panel == PanelFocus::Timer => {
+                self.open_timer_task_search();
+            }
+            KeyCode::Char('u') if self.focused_panel == PanelFocus::Timer => {
+                self.clear_assigned_task();
+            }
+            KeyCode::Char('a') if self.focused_panel == PanelFocus::History => {
+                self.open_history_task_search();
+            }
+            KeyCode::Char('u') if self.focused_panel == PanelFocus::History => {
+                self.clear_selected_history_task()?;
             }
             KeyCode::Char('x') | KeyCode::Char(' ')
                 if self.focused_panel == PanelFocus::RightPane
@@ -1360,6 +1586,29 @@ fn last_7_days_bounds(now: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>
     (start, today_end)
 }
 
+fn fuzzy_matches(query: &str, candidate: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+
+    let mut query_chars = query.chars().flat_map(char::to_lowercase);
+    let mut current = query_chars.next();
+    if current.is_none() {
+        return true;
+    }
+
+    for candidate_char in candidate.chars().flat_map(char::to_lowercase) {
+        if Some(candidate_char) == current {
+            current = query_chars.next();
+            if current.is_none() {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, Local};
@@ -1634,6 +1883,90 @@ mod tests {
         .expect("focus should void");
 
         assert_eq!(app.screen_data.history_entries.len(), 1);
+        assert_eq!(app.screen_data.history_entries[0].task_id, Some(task_id));
+    }
+
+    #[test]
+    fn timer_panel_can_assign_and_clear_task_via_search_popup() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Alpha task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Beta item".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        app.handle_key(crossterm::event::KeyCode::Char('1'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("search should open");
+        for character in "bt".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should filter");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("selected search result should assign");
+
+        assert_eq!(
+            app.assigned_task().expect("task should be assigned").title,
+            "Beta item"
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Char('u'))
+            .expect("clear should succeed");
+        assert!(app.assigned_task().is_none());
+    }
+
+    #[test]
+    fn history_panel_can_assign_and_clear_selected_session_task() {
+        let mut app = test_app();
+        let now = Local::now();
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Alpha task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+        let task_id = app.selected_task().expect("task should exist").id;
+
+        app.handle_key(crossterm::event::KeyCode::Char('1'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("timer search should open");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("assignment should succeed");
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('x'),
+            now + ChronoDuration::seconds(5),
+        )
+        .expect("focus should void");
+
+        assert_eq!(app.screen_data.history_entries[0].task_id, Some(task_id));
+
+        app.handle_key(crossterm::event::KeyCode::Char('2'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('u'))
+            .expect("clear should succeed");
+        assert_eq!(app.screen_data.history_entries[0].task_id, None);
+
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("search should open");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("reassignment should succeed");
         assert_eq!(app.screen_data.history_entries[0].task_id, Some(task_id));
     }
 

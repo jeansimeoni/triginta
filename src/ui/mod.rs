@@ -12,7 +12,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     app::{
         App, CycleEntryState, DeleteConfirmationView, HistoryPanelTab, PanelFocus, RightPanelTab,
-        ScreenData, TaskInputView, TaskView, TimerPhase,
+        ScreenData, TaskInputView, TaskSearchView, TaskView, TimerPhase,
     },
     config::GlyphMode,
     domain::{DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
@@ -521,7 +521,7 @@ fn render_statistics_panel(
 
 fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, palette: ThemePalette) {
     let message = format!(
-        "{}  |  1-5: focus panel  tab: cycle focus  j/k or ↑/↓: navigate panels  c/e/d/a: task actions  space/x: toggle task or void timer  q: quit",
+        "{}  |  1-5: focus panel  tab: cycle focus  j/k or ↑/↓: navigate panels  c/e/d/a: task actions  a/u on timer: assign or clear  space/x: toggle task or void timer  q: quit",
         app.status_message()
     );
 
@@ -564,6 +564,11 @@ fn task_summary_line(
 }
 
 fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palette: ThemePalette) {
+    if let Some(search) = app.task_search_view() {
+        render_task_search_popup(frame, &search, palette);
+        return;
+    }
+
     if let Some(input) = app.task_input_view() {
         render_task_input_popup(frame, &input, symbols, palette);
         return;
@@ -632,6 +637,52 @@ fn render_delete_confirmation(
             ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette.error)),
+    );
+
+    frame.render_widget(popup, area);
+}
+
+fn render_task_search_popup(frame: &mut Frame<'_>, search: &TaskSearchView, palette: ThemePalette) {
+    let area = centered_rect(frame.area(), 72, 8);
+    frame.render_widget(Clear, area);
+
+    let visible_width = area.width.saturating_sub(4) as usize;
+    let mut lines = vec![Line::from(input_window_text(
+        &search.query,
+        search.cursor,
+        visible_width,
+    ))];
+    lines.push(Line::from(""));
+
+    if search.results.is_empty() {
+        lines.push(Line::from("No matching tasks."));
+    } else {
+        let visible_count = 4usize;
+        let start = search
+            .selected_index
+            .saturating_sub(visible_count.saturating_sub(1));
+        let end = (start + visible_count).min(search.results.len());
+        for (offset, result) in search.results[start..end].iter().enumerate() {
+            let selected = start + offset == search.selected_index;
+            lines.push(selectable_line(
+                result.title.as_str(),
+                selected,
+                area.width.saturating_sub(4),
+                palette,
+            ));
+        }
+    }
+
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                search.title,
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.accent)),
     );
 
     frame.render_widget(popup, area);

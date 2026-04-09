@@ -98,6 +98,7 @@ pub trait PomodoroRepository {
         ended_at: DateTime<Local>,
         duration_seconds: u32,
     ) -> Result<SessionEntry>;
+    fn update_session_task(&self, session_id: i64, task_id: Option<TaskId>) -> Result<()>;
 }
 
 #[derive(Debug)]
@@ -451,6 +452,16 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
             ended_at,
             duration_seconds,
         })
+    }
+
+    fn update_session_task(&self, session_id: i64, task_id: Option<TaskId>) -> Result<()> {
+        self.connection
+            .execute(
+                "UPDATE session_history SET task_id = ?1 WHERE id = ?2",
+                params![task_id.map(|task_id| task_id.0), session_id],
+            )
+            .with_context(|| format!("failed to update task for session {}", session_id))?;
+        Ok(())
     }
 }
 
