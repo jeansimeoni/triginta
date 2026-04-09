@@ -115,7 +115,7 @@ fn render_timer_panel(frame: &mut Frame<'_>, app: &App, area: Rect, symbols: Sym
         .split(content);
 
     let headline = Paragraph::new(vec![Line::from(vec![Span::styled(
-        format!("{} {}", symbols.timer, timer.run_state.label()),
+        format!("{} {}", symbols.timer, timer.run_state.label(timer.phase)),
         Style::default()
             .fg(timer_color(timer.phase))
             .add_modifier(Modifier::BOLD),

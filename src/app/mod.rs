@@ -140,10 +140,13 @@ pub enum TimerRunState {
 }
 
 impl TimerRunState {
-    pub fn label(self) -> &'static str {
+    pub fn label(self, phase: TimerPhase) -> &'static str {
         match self {
             Self::Idle => "Ready",
-            Self::Running => "Running",
+            Self::Running => match phase {
+                TimerPhase::Focus => "Work",
+                TimerPhase::ShortBreak | TimerPhase::LongBreak => "Break",
+            },
             Self::Paused => "Paused",
         }
     }
