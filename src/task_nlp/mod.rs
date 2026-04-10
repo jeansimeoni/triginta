@@ -24,6 +24,14 @@ pub fn parse_task_input(input: &str, reference_date: NaiveDate) -> ParsedTaskInp
     }
 }
 
+pub fn parse_due_input(input: &str, reference_date: NaiveDate) -> Option<TaskDue> {
+    parse_task_input(format!("Placeholder {input}").as_str(), reference_date).due
+}
+
+pub fn parse_due_time_input(input: &str) -> Option<NaiveTime> {
+    parse_time_token(input.trim())
+}
+
 fn extract_due(input: &str, reference_date: NaiveDate) -> Option<((usize, usize), TaskDue)> {
     let lower = input.to_ascii_lowercase();
     let mut best: Option<((usize, usize), TaskDue)> = None;

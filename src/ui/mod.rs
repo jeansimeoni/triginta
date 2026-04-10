@@ -5,21 +5,23 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+        calendar::{CalendarEventStore, Monthly},
     },
 };
+use time::{Date as TimeDate, Month as TimeMonth};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
-        App, CycleEntryState, DeleteConfirmationView, HistoryPanelTab, PanelFocus, RightPanelTab,
-        ScreenData, ShortcutSection, ShortcutTip, TaskInputView, TaskSearchView, TaskView,
-        TimerPhase,
+        App, CalendarPickerView, CycleEntryState, DeleteConfirmationView, HistoryPanelTab,
+        PanelFocus, RightPanelTab, ScreenData, ShortcutSection, ShortcutTip, TaskEditorView,
+        TaskInputView, TaskSearchView, TaskView, TimerPhase,
     },
     config::GlyphMode,
     domain::{DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
     theme::ThemePalette,
 };
-use chrono::{Local, NaiveDate};
+use chrono::{Datelike, Local, NaiveDate};
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let symbols = Symbols::new(app.glyph_mode());
@@ -655,7 +657,7 @@ fn task_summary_line(
         .saturating_sub(due_gap);
     let title_text = ellipsize_end(&format!("{marker} {}", task.title), left_width);
 
-    let row_style = task_row_style(task, palette, selected);
+    let row_style = task_row_style(task, palette, selected, now);
     let due_style = task_due_style(task, palette, selected, now);
     let recurring_style = task_recurring_style(task, palette, selected, now);
     let mut spans = vec![
@@ -702,6 +704,11 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
 
     if let Some(search) = app.task_search_view() {
         render_task_search_popup(frame, &search, palette);
+        return;
+    }
+
+    if let Some(editor) = app.task_editor_view() {
+        render_task_editor_popup(frame, &editor, symbols, palette);
         return;
     }
 
@@ -976,6 +983,324 @@ fn render_task_due_preview(
     );
 
     frame.render_widget(panel, area);
+}
+
+fn render_task_editor_popup(
+    frame: &mut Frame<'_>,
+    editor: &TaskEditorView,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let area = centered_rect(frame.area(), 96, 17);
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            editor.title,
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(editor_shortcuts_line(symbols, palette))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Length(4),
+            Constraint::Length(4),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    render_editor_field(
+        frame,
+        sections[0],
+        "Title [F1]",
+        &editor.title_value,
+        editor.title_cursor,
+        editor.focus.title,
+        symbols,
+        None,
+        palette,
+    );
+    render_editor_field(
+        frame,
+        sections[1],
+        "Description [F2]",
+        &editor.description_value,
+        editor.description_cursor,
+        editor.focus.description,
+        symbols,
+        Some("Longer task notes will live here"),
+        palette,
+    );
+
+    let due_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(sections[2]);
+    render_editor_field(
+        frame,
+        due_row[0],
+        "Due Date [F3]",
+        &editor.due_date_value,
+        editor.due_date_cursor,
+        editor.focus.due_date,
+        symbols,
+        Some("YYYY-MM-DD"),
+        palette,
+    );
+    render_editor_field(
+        frame,
+        due_row[1],
+        "Due Time [F4]",
+        &editor.due_time_value,
+        editor.due_time_cursor,
+        editor.focus.due_time,
+        symbols,
+        Some("HH:MM"),
+        palette,
+    );
+    render_editor_field(
+        frame,
+        sections[3],
+        "Recurrence [F5]",
+        &editor.recurrence_value,
+        editor.recurrence_cursor,
+        editor.focus.recurrence,
+        symbols,
+        Some("every monday at 9am"),
+        palette,
+    );
+    render_editor_due_preview_panel(frame, sections[4], editor, palette);
+
+    if let Some(calendar) = editor.calendar {
+        let calendar_area = anchored_dropdown_rect(frame.area(), due_row[0], 24, 10);
+        render_editor_calendar(frame, calendar_area, calendar, palette);
+    }
+}
+
+fn render_editor_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: &str,
+    cursor: usize,
+    focused: bool,
+    symbols: Symbols,
+    placeholder: Option<&str>,
+    palette: ThemePalette,
+) {
+    let border_style = if focused {
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.subtle_text)
+    };
+    let text = if focused {
+        vec![Line::from(editor_input_text(
+            value,
+            cursor,
+            area.width.saturating_sub(4) as usize,
+            symbols,
+            palette,
+        ))]
+    } else if value.is_empty() {
+        vec![Line::from(Span::styled(
+            placeholder.unwrap_or(""),
+            Style::default()
+                .fg(palette.subtle_text)
+                .add_modifier(Modifier::DIM),
+        ))]
+    } else if area.height > 3 {
+        vec![Line::from(ellipsize_end(value, area.width.saturating_sub(4) as usize))]
+    } else {
+        vec![Line::from(input_window_text(
+            value,
+            cursor,
+            area.width.saturating_sub(4) as usize,
+        ))]
+    };
+    let widget = Paragraph::new(text).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .title(Span::styled(label, border_style))
+            .borders(Borders::ALL)
+            .border_style(border_style),
+    );
+    frame.render_widget(widget, area);
+}
+
+fn editor_input_text(
+    value: &str,
+    cursor: usize,
+    max_width: usize,
+    symbols: Symbols,
+    palette: ThemePalette,
+) -> Span<'static> {
+    let cursor_symbol = if symbols.tasks == "#" { "|" } else { "▏" };
+    let safe_cursor = cursor.min(value.len());
+    let mut with_cursor = value.to_string();
+    with_cursor.insert_str(safe_cursor, cursor_symbol);
+    Span::styled(
+        input_window_text(with_cursor.as_str(), safe_cursor + cursor_symbol.len(), max_width),
+        Style::default().fg(palette.text),
+    )
+}
+
+fn render_editor_due_preview_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &TaskEditorView,
+    palette: ThemePalette,
+) {
+    let lines = if let Some(due_preview) = &editor.due_preview {
+        let mut lines = vec![Line::from(vec![
+            Span::styled("Summary: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                due_preview.string.clone(),
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])];
+        lines.push(Line::from(vec![
+            Span::styled("Date: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                due_preview.date.format("%Y-%m-%d").to_string(),
+                Style::default().fg(palette.text),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Time: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                due_preview
+                    .datetime
+                    .map(|datetime| datetime.format("%H:%M").to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                Style::default().fg(palette.text),
+            ),
+            Span::raw("   "),
+            Span::styled("Recurring: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                if due_preview.is_recurring { "yes" } else { "no" },
+                Style::default().fg(palette.text),
+            ),
+        ]));
+        lines
+    } else {
+        vec![Line::from(vec![
+            Span::styled("Summary: ", Style::default().fg(palette.subtle_text)),
+            Span::styled("no due date", Style::default().fg(palette.text)),
+        ])]
+    };
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(Span::styled("Due Preview", Style::default().fg(palette.accent)))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.accent)),
+        ),
+        area,
+    );
+}
+
+fn render_editor_calendar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    calendar: CalendarPickerView,
+    palette: ThemePalette,
+) {
+    let mut events = CalendarEventStore::default();
+    let selected = time_date(calendar.selected_date);
+    events.add(
+        selected,
+        Style::default()
+            .fg(Color::Black)
+            .bg(palette.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+    let widget = Monthly::new(
+        TimeDate::from_calendar_date(
+            calendar.display_date.year(),
+            time_month(calendar.display_date.month()),
+            1,
+        )
+        .expect("valid display date"),
+        events,
+    )
+    .show_month_header(Style::default().fg(palette.text).add_modifier(Modifier::BOLD))
+    .show_weekdays_header(Style::default().fg(palette.subtle_text))
+    .show_surrounding(Style::default().fg(palette.subtle_text))
+    .default_style(Style::default().fg(palette.text))
+    .block(
+        Block::default()
+            .title(Span::styled(
+                "Calendar",
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.accent)),
+    );
+    frame.render_widget(Clear, area);
+    frame.render_widget(widget, area);
+}
+
+fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    if symbols.tasks == "#" {
+        return Line::from(vec![Span::styled(
+            "F6 calendar  u clear due  Enter save  Esc cancel",
+            Style::default().fg(palette.subtle_text),
+        )])
+        .right_aligned();
+    }
+
+    Line::from(vec![
+        Span::styled("F6", Style::default().fg(palette.subtle_text)),
+        Span::raw(" 󰃭  "),
+        Span::styled("u", Style::default().fg(palette.subtle_text)),
+        Span::raw(" due  "),
+        Span::styled("󰄬", Style::default().fg(palette.subtle_text)),
+        Span::raw(" ↵  "),
+        Span::styled(symbols.voided.to_string(), Style::default().fg(palette.subtle_text)),
+        Span::raw(" esc"),
+    ])
+    .right_aligned()
+}
+
+fn anchored_dropdown_rect(area: Rect, anchor: Rect, width: u16, height: u16) -> Rect {
+    let popup_width = width.min(area.width.saturating_sub(2)).max(1);
+    let popup_height = height.min(area.height.saturating_sub(2)).max(1);
+
+    let preferred_x = anchor.x;
+    let max_x = area
+        .x
+        .saturating_add(area.width.saturating_sub(popup_width).saturating_sub(1));
+    let x = preferred_x.clamp(area.x.saturating_add(1), max_x.max(area.x.saturating_add(1)));
+
+    let below_y = anchor.y.saturating_add(anchor.height.saturating_sub(1));
+    let above_y = anchor.y.saturating_sub(popup_height.saturating_sub(1));
+    let max_y = area
+        .y
+        .saturating_add(area.height.saturating_sub(popup_height).saturating_sub(1));
+
+    let y = if below_y.saturating_add(popup_height) <= area.y.saturating_add(area.height) {
+        below_y
+    } else {
+        above_y.clamp(area.y.saturating_add(1), max_y.max(area.y.saturating_add(1)))
+    };
+
+    Rect::new(x, y, popup_width, popup_height)
 }
 
 fn render_delete_confirmation(
@@ -1631,7 +1956,12 @@ impl Symbols {
     }
 }
 
-fn task_row_style(task: &Task, palette: ThemePalette, selected: bool) -> Style {
+fn task_row_style(
+    task: &Task,
+    palette: ThemePalette,
+    selected: bool,
+    now: chrono::DateTime<Local>,
+) -> Style {
     let base = if selected {
         Style::default()
             .bg(palette.border)
@@ -1642,6 +1972,7 @@ fn task_row_style(task: &Task, palette: ThemePalette, selected: bool) -> Style {
 
     match task.status {
         TaskStatus::Done => base.fg(palette.subtle_text).add_modifier(Modifier::DIM),
+        TaskStatus::Todo if task_is_overdue(task, now) => base.fg(palette.error),
         TaskStatus::Todo => base.fg(palette.text),
     }
 }
@@ -1744,4 +2075,27 @@ fn capitalize_word(word: &str) -> String {
     output.extend(first.to_uppercase());
     output.push_str(characters.as_str());
     output
+}
+
+fn time_date(date: NaiveDate) -> TimeDate {
+    TimeDate::from_calendar_date(date.year(), time_month(date.month()), date.day() as u8)
+        .expect("valid date")
+}
+
+fn time_month(month: u32) -> TimeMonth {
+    match month {
+        1 => TimeMonth::January,
+        2 => TimeMonth::February,
+        3 => TimeMonth::March,
+        4 => TimeMonth::April,
+        5 => TimeMonth::May,
+        6 => TimeMonth::June,
+        7 => TimeMonth::July,
+        8 => TimeMonth::August,
+        9 => TimeMonth::September,
+        10 => TimeMonth::October,
+        11 => TimeMonth::November,
+        12 => TimeMonth::December,
+        _ => TimeMonth::January,
+    }
 }

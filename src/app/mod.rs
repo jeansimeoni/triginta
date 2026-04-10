@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -14,11 +14,11 @@ use crate::{
     config::{AppConfig, AppPaths, GlyphMode, TimerSettings, init_tracing, load_app_config},
     domain::{
         DayHistorySummary, HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task, TaskId,
-        TaskStatus,
+        TaskStatus, TaskUpdate,
     },
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
     storage::{Database, PomodoroRepository, TaskRepository},
-    task_nlp::parse_task_input,
+    task_nlp::{parse_due_input, parse_due_time_input, parse_task_input},
     theme::ThemePalette,
     ui,
 };
@@ -389,17 +389,76 @@ pub struct ScreenData {
     pub weekly_stats: HistoryStats,
 }
 
+#[derive(Debug, Clone)]
+struct TaskInputState {
+    value: String,
+    cursor: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TaskInputMode {
-    Create,
-    Rename(TaskId),
+enum TaskEditorField {
+    Title,
+    Description,
+    DueDate,
+    DueTime,
+    Recurrence,
+}
+
+impl TaskEditorField {
+    const ALL: [Self; 5] = [
+        Self::Title,
+        Self::Description,
+        Self::DueDate,
+        Self::DueTime,
+        Self::Recurrence,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Title => 0,
+            Self::Description => 1,
+            Self::DueDate => 2,
+            Self::DueTime => 3,
+            Self::Recurrence => 4,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self::ALL[index.min(Self::ALL.len().saturating_sub(1))]
+    }
+
+    fn next(self) -> Self {
+        Self::from_index((self.index() + 1).min(Self::ALL.len().saturating_sub(1)))
+    }
+
+    fn previous(self) -> Self {
+        Self::from_index(self.index().saturating_sub(1))
+    }
 }
 
 #[derive(Debug, Clone)]
-struct TaskInputState {
-    mode: TaskInputMode,
-    value: String,
-    cursor: usize,
+struct TaskEditorState {
+    task_id: TaskId,
+    title_input: String,
+    title_cursor: usize,
+    description_input: String,
+    description_cursor: usize,
+    due_date_input: String,
+    due_date_cursor: usize,
+    due_time_input: String,
+    due_time_cursor: usize,
+    recurrence_input: String,
+    recurrence_cursor: usize,
+    due_natural: String,
+    due_from_title: bool,
+    focused_field: TaskEditorField,
+    calendar: Option<CalendarState>,
+}
+
+#[derive(Debug, Clone)]
+struct CalendarState {
+    display_date: NaiveDate,
+    selected_date: NaiveDate,
 }
 
 #[derive(Debug, Clone)]
@@ -422,6 +481,39 @@ pub struct TaskInputView {
     pub value: String,
     pub cursor: usize,
     pub due_preview: Option<TaskDuePreviewView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalendarPickerView {
+    pub display_date: NaiveDate,
+    pub selected_date: NaiveDate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskEditorFocusView {
+    pub title: bool,
+    pub description: bool,
+    pub due_date: bool,
+    pub due_time: bool,
+    pub recurrence: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskEditorView {
+    pub title: &'static str,
+    pub title_value: String,
+    pub title_cursor: usize,
+    pub description_value: String,
+    pub description_cursor: usize,
+    pub due_date_value: String,
+    pub due_date_cursor: usize,
+    pub due_time_value: String,
+    pub due_time_cursor: usize,
+    pub recurrence_value: String,
+    pub recurrence_cursor: usize,
+    pub focus: TaskEditorFocusView,
+    pub due_preview: Option<TaskDuePreviewView>,
+    pub calendar: Option<CalendarPickerView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,7 +653,7 @@ const TASKS_SHORTCUTS: &[ShortcutTip] = &[
     },
     ShortcutTip {
         keys: "e/d",
-        description: "rename/delete",
+        description: "edit/delete",
     },
     ShortcutTip {
         keys: "a",
@@ -594,6 +686,33 @@ const INPUT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "Backspace",
         description: "delete char",
+    },
+];
+
+const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter",
+        description: "submit",
+    },
+    ShortcutTip {
+        keys: "Esc",
+        description: "cancel/close calendar",
+    },
+    ShortcutTip {
+        keys: "Tab/S-Tab",
+        description: "next/prev field",
+    },
+    ShortcutTip {
+        keys: "F1-F5",
+        description: "jump to field",
+    },
+    ShortcutTip {
+        keys: "F6",
+        description: "open calendar",
+    },
+    ShortcutTip {
+        keys: "u",
+        description: "clear due",
     },
 ];
 
@@ -651,6 +770,7 @@ pub struct App {
     assigned_task_id: Option<TaskId>,
     active_focus_task_id: Option<TaskId>,
     task_input: Option<TaskInputState>,
+    task_editor: Option<TaskEditorState>,
     task_search: Option<TaskSearchState>,
     delete_confirmation: Option<TaskId>,
     help_open: bool,
@@ -684,6 +804,7 @@ impl App {
             assigned_task_id: None,
             active_focus_task_id: None,
             task_input: None,
+            task_editor: None,
             task_search: None,
             delete_confirmation: None,
             help_open: false,
@@ -753,27 +874,49 @@ impl App {
 
     pub fn task_input_view(&self) -> Option<TaskInputView> {
         self.task_input.as_ref().map(|input| {
-            let due_preview = match input.mode {
-                TaskInputMode::Create => parse_task_input(input.value.as_str(), self.today())
-                    .due
-                    .map(|due| TaskDuePreviewView {
-                        date: due.date,
-                        datetime: due.datetime,
-                        string: due.string,
-                        is_recurring: due.is_recurring,
-                    }),
-                TaskInputMode::Rename(_) => None,
-            };
+            let due_preview = parse_task_input(input.value.as_str(), self.today())
+                .due
+                .map(|due| TaskDuePreviewView {
+                    date: due.date,
+                    datetime: due.datetime,
+                    string: due.string,
+                    is_recurring: due.is_recurring,
+                });
 
             TaskInputView {
-                title: match input.mode {
-                    TaskInputMode::Create => "New Task",
-                    TaskInputMode::Rename(_) => "Rename Task",
-                },
+                title: "New Task",
                 value: input.value.clone(),
                 cursor: input.cursor,
                 due_preview,
             }
+        })
+    }
+
+    pub fn task_editor_view(&self) -> Option<TaskEditorView> {
+        self.task_editor.as_ref().map(|editor| TaskEditorView {
+            title: "Edit Task",
+            title_value: editor.title_input.clone(),
+            title_cursor: editor.title_cursor,
+            description_value: editor.description_input.clone(),
+            description_cursor: editor.description_cursor,
+            due_date_value: editor.due_date_input.clone(),
+            due_date_cursor: editor.due_date_cursor,
+            due_time_value: editor.due_time_input.clone(),
+            due_time_cursor: editor.due_time_cursor,
+            recurrence_value: editor.recurrence_input.clone(),
+            recurrence_cursor: editor.recurrence_cursor,
+            focus: TaskEditorFocusView {
+                title: editor.focused_field == TaskEditorField::Title,
+                description: editor.focused_field == TaskEditorField::Description,
+                due_date: editor.focused_field == TaskEditorField::DueDate,
+                due_time: editor.focused_field == TaskEditorField::DueTime,
+                recurrence: editor.focused_field == TaskEditorField::Recurrence,
+            },
+            due_preview: self.editor_due_preview(editor),
+            calendar: editor.calendar.as_ref().map(|calendar| CalendarPickerView {
+                display_date: calendar.display_date,
+                selected_date: calendar.selected_date,
+            }),
         })
     }
 
@@ -851,6 +994,12 @@ impl App {
     }
 
     pub fn focused_panel_shortcuts(&self) -> &'static [ShortcutTip] {
+        if self.task_editor.is_some() {
+            return EDITOR_POPUP_SHORTCUTS;
+        }
+        if self.task_input.is_some() {
+            return INPUT_POPUP_SHORTCUTS;
+        }
         match self.focused_panel {
             PanelFocus::Timer => TIMER_SHORTCUTS,
             PanelFocus::History => HISTORY_SHORTCUTS,
@@ -899,6 +1048,12 @@ impl App {
             sections.push(ShortcutSection {
                 title: "Task Input Popup",
                 tips: INPUT_POPUP_SHORTCUTS,
+            });
+        }
+        if self.task_editor.is_some() {
+            sections.push(ShortcutSection {
+                title: "Task Editor",
+                tips: EDITOR_POPUP_SHORTCUTS,
             });
         }
         if self.task_search.is_some() {
@@ -959,6 +1114,103 @@ impl App {
 
     fn today(&self) -> NaiveDate {
         Local::now().date_naive()
+    }
+
+    fn editor_due_preview(&self, editor: &TaskEditorState) -> Option<TaskDuePreviewView> {
+        Self::build_due_from_editor(editor, self.today()).ok().flatten().map(|due| {
+            TaskDuePreviewView {
+                date: due.date,
+                datetime: due.datetime,
+                string: due.string,
+                is_recurring: due.is_recurring,
+            }
+        })
+    }
+
+    fn build_due_from_editor(
+        editor: &TaskEditorState,
+        reference_date: NaiveDate,
+    ) -> Result<Option<crate::domain::TaskDue>> {
+        let date_text = editor.due_date_input.trim();
+        let time_text = editor.due_time_input.trim();
+        let recurrence_text = editor.recurrence_input.trim();
+
+        if date_text.is_empty() && time_text.is_empty() && recurrence_text.is_empty() {
+            return Ok(None);
+        }
+
+        let recurring_due = if recurrence_text.is_empty() {
+            None
+        } else {
+            let due = parse_due_input(recurrence_text, reference_date)
+                .filter(|due| due.is_recurring)
+                .context("recurring pattern must use a Todoist-style recurring phrase")?;
+            Some(due)
+        };
+
+        let date = if date_text.is_empty() {
+            recurring_due
+                .as_ref()
+                .map(|due| due.date)
+                .context("due date is required when a due time is set")?
+        } else {
+            NaiveDate::parse_from_str(date_text, "%Y-%m-%d")
+                .ok()
+                .or_else(|| parse_due_input(date_text, reference_date).map(|due| due.date))
+                .with_context(|| format!("invalid due date: {date_text}"))?
+        };
+
+        let datetime = if time_text.is_empty() {
+            if date_text.is_empty() {
+                recurring_due.as_ref().and_then(|due| due.datetime)
+            } else {
+                None
+            }
+        } else {
+            let time = chrono::NaiveTime::parse_from_str(time_text, "%H:%M")
+                .ok()
+                .or_else(|| parse_due_time_input(time_text))
+                .with_context(|| format!("invalid due time: {time_text}"))?;
+            Some(NaiveDateTime::new(date, time))
+        };
+
+        let string = if !editor.due_natural.trim().is_empty() {
+            editor.due_natural.trim().to_string()
+        } else if !recurrence_text.is_empty() {
+            recurrence_text.to_string()
+        } else if let Some(datetime) = datetime {
+            format!("{} at {}", date.format("%Y-%m-%d"), datetime.format("%H:%M"))
+        } else {
+            date.format("%Y-%m-%d").to_string()
+        };
+
+        Ok(Some(crate::domain::TaskDue {
+            date,
+            datetime,
+            string,
+            is_recurring: recurring_due.is_some(),
+        }))
+    }
+
+    fn focus_editor_field(editor: &mut TaskEditorState, field: TaskEditorField) {
+        editor.focused_field = field;
+    }
+
+    fn open_editor_calendar(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+        let selected_date = NaiveDate::parse_from_str(editor.due_date_input.trim(), "%Y-%m-%d")
+            .ok()
+            .or_else(|| {
+                Self::build_due_from_editor(editor, reference_date)
+                    .ok()
+                    .flatten()
+                    .map(|due| due.date)
+            })
+            .unwrap_or(reference_date);
+        let display_date = selected_date.with_day(1).unwrap_or(selected_date);
+        editor.calendar = Some(CalendarState {
+            display_date,
+            selected_date,
+        });
     }
 
     fn task_matches_active_view(&self, task: &Task) -> bool {
@@ -1062,21 +1314,59 @@ impl App {
 
     fn open_create_task_popup(&mut self) {
         self.task_input = Some(TaskInputState {
-            mode: TaskInputMode::Create,
             value: String::new(),
             cursor: 0,
         });
     }
 
-    fn open_rename_task_popup(&mut self) {
+    fn open_edit_task_popup(&mut self) {
         let Some(task) = self.selected_task().cloned() else {
             return;
         };
 
-        self.task_input = Some(TaskInputState {
-            mode: TaskInputMode::Rename(task.id),
-            cursor: task.title.len(),
-            value: task.title,
+        let (due_date_input, due_time_input, recurrence_input, due_natural) =
+            if let Some(due) = &task.due {
+                (
+                    due.date.format("%Y-%m-%d").to_string(),
+                    due.datetime
+                        .map(|datetime| datetime.format("%H:%M").to_string())
+                        .unwrap_or_default(),
+                    if due.is_recurring {
+                        due.string.clone()
+                    } else {
+                        String::new()
+                    },
+                    due.string.clone(),
+                )
+            } else {
+                (
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                )
+            };
+
+        let due_date_cursor = due_date_input.len();
+        let due_time_cursor = due_time_input.len();
+        let recurrence_cursor = recurrence_input.len();
+
+        self.task_editor = Some(TaskEditorState {
+            task_id: task.id,
+            title_cursor: task.title.len(),
+            title_input: task.title,
+            description_input: String::new(),
+            description_cursor: 0,
+            due_date_input,
+            due_date_cursor,
+            due_time_input,
+            due_time_cursor,
+            recurrence_input,
+            recurrence_cursor,
+            due_natural,
+            due_from_title: false,
+            focused_field: TaskEditorField::Title,
+            calendar: None,
         });
     }
 
@@ -1105,6 +1395,208 @@ impl App {
             .unwrap_or(0);
         input.value.drain(previous_index..input.cursor);
         input.cursor = previous_index;
+    }
+
+    fn editor_value_mut(editor: &mut TaskEditorState) -> (&mut String, &mut usize) {
+        match editor.focused_field {
+            TaskEditorField::Title => (&mut editor.title_input, &mut editor.title_cursor),
+            TaskEditorField::Description => {
+                (&mut editor.description_input, &mut editor.description_cursor)
+            }
+            TaskEditorField::DueDate => (&mut editor.due_date_input, &mut editor.due_date_cursor),
+            TaskEditorField::DueTime => (&mut editor.due_time_input, &mut editor.due_time_cursor),
+            TaskEditorField::Recurrence => {
+                (&mut editor.recurrence_input, &mut editor.recurrence_cursor)
+            }
+        }
+    }
+
+    fn move_editor_cursor_home(editor: &mut TaskEditorState) {
+        let (_, cursor) = Self::editor_value_mut(editor);
+        *cursor = 0;
+    }
+
+    fn move_editor_cursor_end(editor: &mut TaskEditorState) {
+        let (value, cursor) = Self::editor_value_mut(editor);
+        *cursor = value.len();
+    }
+
+    fn insert_editor_char(editor: &mut TaskEditorState, character: char, reference_date: NaiveDate) {
+        let (value, cursor) = Self::editor_value_mut(editor);
+        value.insert(*cursor, character);
+        *cursor += character.len_utf8();
+        Self::after_editor_text_change(editor, reference_date);
+    }
+
+    fn delete_editor_char_before_cursor(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+        let (value, cursor) = Self::editor_value_mut(editor);
+        if *cursor == 0 {
+            return;
+        }
+
+        let previous_index = value[..*cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        value.drain(previous_index..*cursor);
+        *cursor = previous_index;
+        Self::after_editor_text_change(editor, reference_date);
+    }
+
+    fn after_editor_text_change(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+        match editor.focused_field {
+            TaskEditorField::Title => Self::sync_editor_due_from_title(editor, reference_date),
+            TaskEditorField::DueDate | TaskEditorField::DueTime => {
+                editor.due_from_title = false;
+                if !editor.recurrence_input.trim().is_empty() {
+                    editor.due_natural = editor.recurrence_input.trim().to_string();
+                } else {
+                    editor.due_natural.clear();
+                }
+            }
+            TaskEditorField::Recurrence => {
+                editor.due_from_title = false;
+                Self::sync_editor_due_from_recurrence(editor, reference_date);
+            }
+            TaskEditorField::Description => {}
+        }
+    }
+
+    fn sync_editor_due_from_title(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+        let parsed = parse_task_input(editor.title_input.as_str(), reference_date);
+        if let Some(due) = parsed.due {
+            editor.due_date_input = due.date.format("%Y-%m-%d").to_string();
+            editor.due_time_input = due
+                .datetime
+                .map(|datetime| datetime.format("%H:%M").to_string())
+                .unwrap_or_default();
+            editor.recurrence_input = if due.is_recurring {
+                due.string.clone()
+            } else {
+                String::new()
+            };
+            editor.due_natural = due.string;
+            editor.due_from_title = true;
+            return;
+        }
+
+        if editor.due_from_title {
+            Self::clear_editor_due(editor);
+        }
+    }
+
+    fn sync_editor_due_from_recurrence(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+        let recurrence = editor.recurrence_input.trim();
+        if recurrence.is_empty() {
+            editor.due_natural.clear();
+            return;
+        }
+
+        let parsed = parse_task_input(
+            format!("Placeholder {recurrence}").as_str(),
+            reference_date,
+        );
+        let Some(due) = parsed.due else {
+            return;
+        };
+        if !due.is_recurring {
+            return;
+        }
+
+        editor.due_date_input = due.date.format("%Y-%m-%d").to_string();
+        editor.due_natural = recurrence.to_string();
+        if editor.due_time_input.trim().is_empty() {
+            editor.due_time_input = due
+                .datetime
+                .map(|datetime| datetime.format("%H:%M").to_string())
+                .unwrap_or_default();
+        }
+    }
+
+    fn clear_editor_due(editor: &mut TaskEditorState) {
+        editor.due_date_input.clear();
+        editor.due_date_cursor = 0;
+        editor.due_time_input.clear();
+        editor.due_time_cursor = 0;
+        editor.recurrence_input.clear();
+        editor.recurrence_cursor = 0;
+        editor.due_natural.clear();
+        editor.due_from_title = false;
+        editor.calendar = None;
+    }
+
+    fn shift_calendar_month(date: NaiveDate, months: i32) -> NaiveDate {
+        let shifted = if months >= 0 {
+            date.checked_add_months(chrono::Months::new(months as u32))
+        } else {
+            date.checked_sub_months(chrono::Months::new(months.unsigned_abs()))
+        };
+        shifted.unwrap_or(date)
+    }
+
+    fn move_calendar_selection(editor: &mut TaskEditorState, days: i64) {
+        let Some(calendar) = editor.calendar.as_mut() else {
+            return;
+        };
+
+        let next = calendar
+            .selected_date
+            .checked_add_signed(ChronoDuration::days(days))
+            .unwrap_or(calendar.selected_date);
+        calendar.selected_date = next;
+        calendar.display_date = next.with_day(1).unwrap_or(next);
+    }
+
+    fn shift_calendar_page(editor: &mut TaskEditorState, months: i32) {
+        let Some(calendar) = editor.calendar.as_mut() else {
+            return;
+        };
+
+        calendar.display_date = Self::shift_calendar_month(calendar.display_date, months)
+            .with_day(1)
+            .unwrap_or(calendar.display_date);
+        calendar.selected_date = Self::shift_calendar_month(calendar.selected_date, months);
+    }
+
+    fn apply_calendar_selection(editor: &mut TaskEditorState) {
+        let Some(calendar) = editor.calendar.take() else {
+            return;
+        };
+
+        editor.due_date_input = calendar.selected_date.format("%Y-%m-%d").to_string();
+        editor.due_date_cursor = editor.due_date_input.len();
+        editor.due_from_title = false;
+        if editor.recurrence_input.trim().is_empty() {
+            editor.due_natural.clear();
+        }
+    }
+
+    fn submit_task_editor(&mut self, editor: TaskEditorState, now: DateTime<Local>) -> Result<bool> {
+        let parsed = parse_task_input(editor.title_input.as_str(), now.date_naive());
+        if parsed.cleaned_title.is_empty() {
+            self.task_editor = Some(editor);
+            return Ok(true);
+        }
+
+        let due = match Self::build_due_from_editor(&editor, now.date_naive()) {
+            Ok(due) => due,
+            Err(_) => {
+                self.task_editor = Some(editor);
+                return Ok(true);
+            }
+        };
+
+        self.database.task_repository().update(
+            editor.task_id,
+            &TaskUpdate {
+                title: parsed.cleaned_title,
+                due,
+            },
+        )?;
+        self.refresh_tasks()?;
+        self.selected_task_id = Some(editor.task_id);
+        Ok(true)
     }
 
     fn open_delete_confirmation(&mut self) {
@@ -1281,42 +1773,124 @@ impl App {
             return Ok(true);
         }
 
+        if let Some(mut editor) = self.task_editor.take() {
+            if editor.calendar.is_some() {
+                match code {
+                    KeyCode::Esc => {
+                        editor.calendar = None;
+                    }
+                    KeyCode::Enter => {
+                        Self::apply_calendar_selection(&mut editor);
+                    }
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        Self::move_calendar_selection(&mut editor, -1);
+                    }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        Self::move_calendar_selection(&mut editor, 1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        Self::move_calendar_selection(&mut editor, -7);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        Self::move_calendar_selection(&mut editor, 7);
+                    }
+                    KeyCode::PageUp => {
+                        Self::shift_calendar_page(&mut editor, -1);
+                    }
+                    KeyCode::PageDown => {
+                        Self::shift_calendar_page(&mut editor, 1);
+                    }
+                    _ => {}
+                }
+                self.task_editor = Some(editor);
+                return Ok(true);
+            }
+
+            match code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => {
+                    return self.submit_task_editor(editor, now);
+                }
+                KeyCode::Tab => {
+                    editor.focused_field = editor.focused_field.next();
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::BackTab => {
+                    editor.focused_field = editor.focused_field.previous();
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::F(1) => {
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Title);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::F(2) => {
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Description);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::F(3) => {
+                    Self::focus_editor_field(&mut editor, TaskEditorField::DueDate);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::F(4) => {
+                    Self::focus_editor_field(&mut editor, TaskEditorField::DueTime);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::F(5) => {
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Recurrence);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Char('u') => {
+                    Self::clear_editor_due(&mut editor);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::F(6) if editor.focused_field == TaskEditorField::DueDate => {
+                    Self::open_editor_calendar(&mut editor, now.date_naive());
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Home => {
+                    Self::move_editor_cursor_home(&mut editor);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::End => {
+                    Self::move_editor_cursor_end(&mut editor);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Backspace => {
+                    Self::delete_editor_char_before_cursor(&mut editor, now.date_naive());
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Char(character) => {
+                    Self::insert_editor_char(&mut editor, character, now.date_naive());
+                    self.task_editor = Some(editor);
+                }
+                _ => {
+                    self.task_editor = Some(editor);
+                }
+            }
+            return Ok(true);
+        }
+
         let Some(mut input) = self.task_input.take() else {
             return Ok(false);
         };
 
         match code {
             KeyCode::Esc => {}
-            KeyCode::Enter => match input.mode {
-                TaskInputMode::Create => {
-                    let parsed = parse_task_input(input.value.as_str(), now.date_naive());
-                    if parsed.cleaned_title.is_empty() {
-                        self.task_input = Some(input);
-                        return Ok(true);
-                    }
-
-                    let task = self.database.task_repository().create(
-                        parsed.cleaned_title.as_str(),
-                        parsed.due.as_ref(),
-                        now,
-                    )?;
-                    self.refresh_tasks()?;
-                    self.selected_task_id = Some(task.id);
+            KeyCode::Enter => {
+                let parsed = parse_task_input(input.value.as_str(), now.date_naive());
+                if parsed.cleaned_title.is_empty() {
+                    self.task_input = Some(input);
+                    return Ok(true);
                 }
-                TaskInputMode::Rename(task_id) => {
-                    let title = input.value.trim();
-                    if title.is_empty() {
-                        self.task_input = Some(input);
-                        return Ok(true);
-                    }
 
-                    self.database
-                        .task_repository()
-                        .update_title(task_id, title)?;
-                    self.refresh_tasks()?;
-                    self.selected_task_id = Some(task_id);
-                }
-            },
+                let task = self.database.task_repository().create(
+                    parsed.cleaned_title.as_str(),
+                    parsed.due.as_ref(),
+                    now,
+                )?;
+                self.refresh_tasks()?;
+                self.selected_task_id = Some(task.id);
+            }
             KeyCode::Backspace => {
                 Self::delete_input_char_before_cursor(&mut input);
                 self.task_input = Some(input);
@@ -1507,7 +2081,7 @@ impl App {
                 if self.focused_panel == PanelFocus::RightPane
                     && self.active_right_panel_tab == RightPanelTab::Tasks =>
             {
-                self.open_rename_task_popup();
+                self.open_edit_task_popup();
             }
             KeyCode::Char('d')
                 if self.focused_panel == PanelFocus::RightPane
@@ -1929,6 +2503,7 @@ mod tests {
     use crate::config::{AppConfig, GlyphMode, TimerSettings};
     use crate::domain::{TaskDue, TaskStatus};
     use crate::storage::{Database, TaskRepository};
+    use crate::task_nlp::parse_task_input;
     use crate::theme::ThemePalette;
 
     use super::{
@@ -2030,7 +2605,7 @@ mod tests {
     }
 
     #[test]
-    fn app_creates_and_renames_task_through_popup_flow() {
+    fn app_creates_and_edits_task_title_through_form_flow() {
         let mut app = test_app();
         app.handle_key(crossterm::event::KeyCode::Char('5'))
             .expect("focus should switch");
@@ -2051,7 +2626,7 @@ mod tests {
         );
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
-            .expect("rename popup should open");
+            .expect("editor should open");
         for _ in 0.."Write tests".len() {
             app.handle_key(crossterm::event::KeyCode::Backspace)
                 .expect("backspace should work");
@@ -2061,9 +2636,210 @@ mod tests {
                 .expect("typing should succeed");
         }
         app.handle_key(crossterm::event::KeyCode::Enter)
-            .expect("rename should submit");
+            .expect("edit should submit");
 
         assert_eq!(app.screen_data.tasks[0].title, "Ship tests");
+    }
+
+    #[test]
+    fn task_editor_updates_due_from_title_nlp() {
+        let mut app = test_app();
+        let tomorrow = app.today() + chrono::Days::new(1);
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Write tests".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        for character in " tomorrow at 3pm".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        let due_preview = editor.due_preview.expect("due preview should be visible");
+        assert_eq!(due_preview.date, tomorrow);
+        assert_eq!(
+            due_preview.datetime,
+            Some(tomorrow.and_hms_opt(15, 0, 0).expect("valid time"))
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("edit should submit");
+
+        let task = app.selected_task().expect("task should still exist");
+        assert_eq!(task.title, "Write tests");
+        assert_eq!(
+            task.due,
+            Some(TaskDue {
+                date: tomorrow,
+                datetime: Some(tomorrow.and_hms_opt(15, 0, 0).expect("valid time")),
+                string: "tomorrow at 3pm".to_string(),
+                is_recurring: false,
+            })
+        );
+    }
+
+    #[test]
+    fn task_editor_can_clear_due() {
+        let mut app = test_app();
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Write tests tomorrow".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+        assert!(app.selected_task().expect("task should exist").due.is_some());
+
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::Char('u'))
+            .expect("clear due should succeed");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("edit should submit");
+
+        assert_eq!(app.selected_task().expect("task should exist").due, None);
+    }
+
+    #[test]
+    fn task_editor_calendar_sets_due_date() {
+        let mut app = test_app();
+        let today = app.today();
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Write tests".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::F(3))
+            .expect("focus should switch to due date");
+        app.handle_key(crossterm::event::KeyCode::F(6))
+            .expect("calendar should open");
+        assert!(app
+            .task_editor_view()
+            .expect("editor should be visible")
+            .calendar
+            .is_some());
+
+        app.handle_key(crossterm::event::KeyCode::Right)
+            .expect("calendar should move selection");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("calendar selection should apply");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("edit should submit");
+
+        assert_eq!(
+            app.selected_task().expect("task should exist").due,
+            Some(TaskDue {
+                date: today + chrono::Days::new(1),
+                datetime: None,
+                string: (today + chrono::Days::new(1))
+                    .format("%Y-%m-%d")
+                    .to_string(),
+                is_recurring: false,
+            })
+        );
+    }
+
+    #[test]
+    fn task_editor_recurrence_field_updates_due_pattern() {
+        let mut app = test_app();
+        let expected_due = parse_task_input("Placeholder every monday at 9am", app.today())
+            .due
+            .expect("recurrence should parse");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Write tests".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::F(5))
+            .expect("focus should switch to recurrence");
+        for character in "every monday at 9am".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("edit should submit");
+
+        assert_eq!(app.selected_task().expect("task should exist").due, Some(expected_due));
+    }
+
+    #[test]
+    fn task_editor_due_fields_accept_natural_language() {
+        let mut app = test_app();
+        let expected_date = app.today() + chrono::Days::new(1);
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Finish this".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::F(3))
+            .expect("focus should switch to due date");
+        for _ in 0.."YYYY-MM-DD".len() {
+            app.handle_key(crossterm::event::KeyCode::Backspace)
+                .ok();
+        }
+        for character in "tomorrow".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("date typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::F(4))
+            .expect("focus should switch to due time");
+        for character in "3pm".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("time typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("edit should submit");
+
+        assert_eq!(
+            app.selected_task().expect("task should exist").due,
+            Some(TaskDue {
+                date: expected_date,
+                datetime: Some(expected_date.and_hms_opt(15, 0, 0).expect("valid time")),
+                string: format!("{} at 15:00", expected_date.format("%Y-%m-%d")),
+                is_recurring: false,
+            })
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
     DayHistorySummary, HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task, TaskDue,
-    TaskId, TaskStatus,
+    TaskId, TaskStatus, TaskUpdate,
 };
 
 // Keeping the schema as a string literal makes bootstrap simple for this early
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS app_metadata (
 pub trait TaskRepository {
     fn list_all(&self) -> Result<Vec<Task>>;
     fn create(&self, title: &str, due: Option<&TaskDue>, now: DateTime<Local>) -> Result<Task>;
-    fn update_title(&self, task_id: TaskId, title: &str) -> Result<Task>;
+    fn update(&self, task_id: TaskId, update: &TaskUpdate) -> Result<Task>;
     fn update_status(
         &self,
         task_id: TaskId,
@@ -262,16 +262,29 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             .context("created task could not be reloaded")
     }
 
-    fn update_title(&self, task_id: TaskId, title: &str) -> Result<Task> {
+    fn update(&self, task_id: TaskId, update: &TaskUpdate) -> Result<Task> {
         self.connection
             .execute(
-                "UPDATE tasks SET title = ?1 WHERE id = ?2",
-                params![title, task_id.0],
+                "UPDATE tasks
+                 SET title = ?1, due_date = ?2, due_datetime = ?3, due_string = ?4, due_is_recurring = ?5
+                 WHERE id = ?6",
+                params![
+                    update.title,
+                    update.due.as_ref().map(|due| due.date),
+                    update.due.as_ref().and_then(|due| due.datetime),
+                    update.due.as_ref().map(|due| due.string.clone()),
+                    update
+                        .due
+                        .as_ref()
+                        .map(|due| if due.is_recurring { 1_i64 } else { 0_i64 })
+                        .unwrap_or(0_i64),
+                    task_id.0,
+                ],
             )
-            .with_context(|| format!("failed to rename task {}", task_id.0))?;
+            .with_context(|| format!("failed to update task {}", task_id.0))?;
 
         self.load_task(task_id)?
-            .context("renamed task could not be reloaded")
+            .context("updated task could not be reloaded")
     }
 
     fn update_status(
@@ -549,7 +562,7 @@ mod tests {
     use anyhow::Result;
     use chrono::{Local, NaiveDate};
 
-    use crate::domain::{TaskDue, TaskStatus};
+    use crate::domain::{TaskDue, TaskStatus, TaskUpdate};
 
     use super::{Database, PomodoroRepository, TaskRepository};
 
@@ -593,9 +606,15 @@ mod tests {
         assert_eq!(created.deleted_at, None);
         assert_eq!(created.due, None);
 
-        let renamed = repository.update_title(created.id, "Ship release notes")?;
-        assert_eq!(renamed.title, "Ship release notes");
-        assert_eq!(renamed.status, TaskStatus::Todo);
+        let updated = repository.update(
+            created.id,
+            &TaskUpdate {
+                title: "Ship release notes".to_string(),
+                due: None,
+            },
+        )?;
+        assert_eq!(updated.title, "Ship release notes");
+        assert_eq!(updated.status, TaskStatus::Todo);
 
         let completed_at = Local::now();
         let completed =
@@ -676,6 +695,52 @@ mod tests {
             })
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn task_repository_updates_due_fields_atomically() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let repository = database.task_repository();
+        let created = repository.create("Draft roadmap", None, Local::now())?;
+        let due_date = NaiveDate::from_ymd_opt(2026, 4, 15).expect("valid date");
+        let due_datetime = due_date.and_hms_opt(9, 30, 0).expect("valid time");
+
+        let updated = repository.update(
+            created.id,
+            &TaskUpdate {
+                title: "Draft quarterly roadmap".to_string(),
+                due: Some(TaskDue {
+                    date: due_date,
+                    datetime: Some(due_datetime),
+                    string: "every week at 9:30am".to_string(),
+                    is_recurring: true,
+                }),
+            },
+        )?;
+
+        assert_eq!(updated.title, "Draft quarterly roadmap");
+        assert_eq!(
+            updated.due,
+            Some(TaskDue {
+                date: due_date,
+                datetime: Some(due_datetime),
+                string: "every week at 9:30am".to_string(),
+                is_recurring: true,
+            })
+        );
+
+        let cleared = repository.update(
+            created.id,
+            &TaskUpdate {
+                title: "Draft quarterly roadmap".to_string(),
+                due: None,
+            },
+        )?;
+
+        assert_eq!(cleared.due, None);
+        assert_eq!(cleared.status, TaskStatus::Todo);
+        assert_eq!(cleared.completed_at, None);
         Ok(())
     }
 }

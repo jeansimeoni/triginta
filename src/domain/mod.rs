@@ -63,6 +63,12 @@ pub struct Task {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskUpdate {
+    pub title: String,
+    pub due: Option<TaskDue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionKind {
     Focus,
     ShortBreak,
