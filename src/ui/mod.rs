@@ -14,7 +14,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     app::{
         App, CalendarPickerView, CycleEntryState, DeleteConfirmationView, HistoryPanelTab,
-        PanelFocus, RightPanelTab, ScreenData, ShortcutSection, ShortcutTip, TaskEditorView,
+        PanelFocus, ProjectDeleteConfirmationView, ProjectEditorView, ProjectTreeRowView,
+        RightPanelTab, ScreenData, ShortcutSection, ShortcutTip, SidebarTab, TaskEditorView,
         TaskInputView, TaskSearchView, TaskSortPopupView, TaskView, TimerPhase,
     },
     config::GlyphMode,
@@ -285,35 +286,51 @@ fn render_navigation_panel(
     palette: ThemePalette,
 ) {
     let content_width = area.width.saturating_sub(2);
-    let lines = TaskView::all()
-        .iter()
-        .map(|view| {
-            let selected = app.active_task_view() == *view;
-            selectable_line(
-                &format!("{} {}", task_view_symbol(*view, symbols), view.label()),
-                selected,
-                content_width,
-                palette,
-            )
-        })
-        .collect::<Vec<_>>();
+    let lines = match app.active_sidebar_tab() {
+        SidebarTab::Navigation => TaskView::all()
+            .iter()
+            .map(|view| {
+                let selected = app.active_task_view() == *view;
+                selectable_count_line(
+                    &format!("{} {}", task_view_symbol(*view, symbols), view.label()),
+                    app.task_count_for_view(*view),
+                    selected,
+                    content_width,
+                    palette,
+                )
+            })
+            .collect::<Vec<_>>(),
+        SidebarTab::FiltersTags => vec![
+            Line::from("Filters and tags are reserved here."),
+            Line::from("Project metadata now occupies the third tab."),
+        ],
+        SidebarTab::Projects => {
+            let rows = app.project_tree_rows();
+            if rows.len() == 1 {
+                vec![Line::from("No projects yet.")]
+            } else {
+                rows.into_iter()
+                    .map(|row| project_tree_line(row, content_width, palette))
+                    .collect::<Vec<_>>()
+            }
+        }
+    };
 
-    let task_count = app.visible_tasks().len();
-    let summary = Line::from(format!(
-        "{}  |  {} tasks",
-        app.active_task_view().label(),
-        task_count
-    ))
-    .right_aligned();
+    let footer_hint = match app.active_sidebar_tab() {
+        SidebarTab::Navigation => Line::from(" j/k move  Home/End jump ").right_aligned(),
+        SidebarTab::FiltersTags => Line::from("").right_aligned(),
+        SidebarTab::Projects => Line::from(" C new  e edit  d delete  f favorite  c task ")
+            .right_aligned(),
+    };
 
     let content = Paragraph::new(lines)
         .block(
             panel_block(
-                navigation_title(symbols, palette),
+                navigation_title(app.active_sidebar_tab(), palette),
                 focused_panel == PanelFocus::Navigation,
                 palette,
             )
-            .title_bottom(summary),
+            .title_bottom(footer_hint),
         )
         .wrap(Wrap { trim: true });
 
@@ -346,7 +363,7 @@ fn render_favorites_panel(
 
     let panel = Paragraph::new(lines)
         .block(panel_block(
-            Line::from("[4] Favorites"),
+            Line::from("[6] Favorites"),
             focused_panel == PanelFocus::Favorites,
             palette,
         ))
@@ -384,12 +401,19 @@ fn render_task_list_panel(
         }
     } else {
         let show_selection = focused_panel == PanelFocus::RightPane;
-        for task in visible_tasks.iter().take(12) {
+        for task in visible_tasks.iter().take(6) {
             let selected =
                 show_selection && app.selected_task().map(|selected| selected.id) == Some(task.id);
             lines.push(task_summary_line(
                 task,
                 symbols,
+                palette,
+                selected,
+                content_width,
+            ));
+            lines.push(task_project_line(
+                app.screen_data(),
+                task,
                 palette,
                 selected,
                 content_width,
@@ -450,6 +474,9 @@ fn render_task_details_panel(
                     format_recurring_rule(due.string.as_str())
                 )));
             }
+        }
+        if let Some(project_name) = project_name_for_task(app.screen_data(), task) {
+            lines.push(Line::from(format!("Project: {project_name}")));
         }
         lines
     } else {
@@ -687,6 +714,126 @@ fn task_summary_line(
     Line::from(spans)
 }
 
+fn task_project_line(
+    data: &ScreenData,
+    task: &Task,
+    palette: ThemePalette,
+    selected: bool,
+    width: u16,
+) -> Line<'static> {
+    let (project_name, project_color) = project_meta_for_task(data, task)
+        .map(|(name, color)| (name, palette.project_color(color)))
+        .unwrap_or(("Inbox", palette.subtle_text));
+    let glyph_style = if selected {
+        Style::default().fg(palette.subtle_text)
+    } else {
+        Style::default().fg(project_color)
+    };
+    let name_style = if selected {
+        Style::default().fg(project_color).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(project_color)
+    };
+    let mut spans = vec![
+        Span::styled("  ", Style::default().fg(palette.subtle_text)),
+        Span::styled("󰉋", glyph_style),
+        Span::styled(" ", Style::default().fg(palette.subtle_text)),
+        Span::styled(
+            ellipsize_end(project_name, width.saturating_sub(4) as usize),
+            name_style,
+        ),
+    ];
+    let current_width = Line::from(spans.clone()).width();
+    let padding = (width as usize).saturating_sub(current_width);
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), Style::default()));
+    }
+    Line::from(spans)
+}
+
+fn project_name_for_task<'a>(data: &'a ScreenData, task: &Task) -> Option<&'a str> {
+    data.projects
+        .iter()
+        .find(|project| project.id == task.project_id)
+        .map(|project| project.name.as_str())
+}
+
+fn project_meta_for_task<'a>(
+    data: &'a ScreenData,
+    task: &Task,
+) -> Option<(&'a str, crate::domain::ProjectColor)> {
+    data.projects
+        .iter()
+        .find(|project| project.id == task.project_id)
+        .map(|project| (project.name.as_str(), project.color))
+}
+
+fn project_tree_line(row: ProjectTreeRowView, width: u16, palette: ThemePalette) -> Line<'static> {
+    let mut label = String::new();
+    label.push_str(&"  ".repeat(row.depth));
+    if row.depth > 0 {
+        label.push_str("└ ");
+    }
+    if row.is_favorite {
+        label.push_str("★ ");
+    }
+    let color = row
+        .color
+        .map(|color| palette.project_color(color))
+        .unwrap_or(palette.text);
+    let selection_style = if row.is_selected {
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.border)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let mut spans = vec![
+        Span::styled(
+            label,
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(palette.subtle_text))
+            },
+        ),
+        Span::styled(
+            "󰉋 ".to_string(),
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(color))
+            },
+        ),
+        Span::styled(
+            ellipsize_end(
+                row.name.as_str(),
+                width.saturating_sub(7 + row.task_count.to_string().width() as u16) as usize,
+            ),
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(color))
+            },
+        ),
+        Span::styled(
+            format!(" {}", row.task_count),
+            if row.is_selected {
+                Style::default().fg(palette.subtle_text).bg(palette.border)
+            } else {
+                Style::default().fg(palette.subtle_text)
+            },
+        ),
+    ];
+    let current_width = Line::from(spans.clone()).width();
+    let padding = (width as usize).saturating_sub(current_width);
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), selection_style));
+    }
+    Line::from(spans)
+}
+
 fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palette: ThemePalette) {
     if app.is_help_open() {
         render_help_dialog(frame, app, palette);
@@ -709,8 +856,18 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
         return;
     }
 
+    if let Some(editor) = app.project_editor_view() {
+        render_project_editor_popup(frame, &editor, palette);
+        return;
+    }
+
     if let Some(input) = app.task_input_view() {
         render_task_input_popup(frame, &input, symbols, palette);
+        return;
+    }
+
+    if let Some(confirmation) = app.project_delete_confirmation_view() {
+        render_project_delete_confirmation(frame, &confirmation, palette);
         return;
     }
 
@@ -895,15 +1052,15 @@ fn render_task_input_popup(
     _symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let show_due_preview = input.due_preview.is_some();
-    let total_height = if show_due_preview { 9 } else { 3 };
+    let show_details = input.due_preview.is_some() || !input.project_suggestions.is_empty() || !input.project_name.is_empty();
+    let total_height = if show_details { 11 } else { 3 };
     let area = centered_rect(frame.area(), 72, total_height);
     frame.render_widget(Clear, area);
 
-    if show_due_preview {
+    if show_details {
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Length(6)])
+            .constraints([Constraint::Length(3), Constraint::Length(8)])
             .split(area);
         render_task_input_box(frame, sections[0], input, palette);
         render_task_due_preview(frame, sections[1], input, palette);
@@ -946,10 +1103,20 @@ fn render_task_due_preview(
     palette: ThemePalette,
 ) {
     let Some(due_preview) = &input.due_preview else {
+        let lines = task_input_meta_lines(input, None, palette);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.accent)),
+            ),
+            area,
+        );
         return;
     };
 
-    let mut lines = vec![Line::from(vec![
+    let mut lines = task_input_meta_lines(input, Some(due_preview), palette);
+    lines.push(Line::from(vec![
         Span::styled("Due Date: ", Style::default().fg(palette.subtle_text)),
         Span::styled(
             due_preview.date.format("%Y-%m-%d").to_string(),
@@ -957,7 +1124,7 @@ fn render_task_due_preview(
                 .fg(palette.text)
                 .add_modifier(Modifier::BOLD),
         ),
-    ])];
+    ]));
     if let Some(datetime) = due_preview.datetime {
         lines.push(Line::from(vec![
             Span::styled("Due Time: ", Style::default().fg(palette.subtle_text)),
@@ -1008,6 +1175,40 @@ fn render_task_due_preview(
     );
 
     frame.render_widget(panel, area);
+}
+
+fn task_input_meta_lines(
+    input: &TaskInputView,
+    due_preview: Option<&crate::app::TaskDuePreviewView>,
+    palette: ThemePalette,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Project: ", Style::default().fg(palette.subtle_text)),
+        Span::styled(input.project_name.clone(), Style::default().fg(palette.text)),
+    ])];
+    if !input.project_suggestions.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Match: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                input.project_suggestions.join(", "),
+                Style::default().fg(palette.accent),
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "Tab accepts the top project suggestion",
+            Style::default()
+                .fg(palette.subtle_text)
+                .add_modifier(Modifier::DIM),
+        )));
+    }
+    if due_preview.is_none() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Type # to fuzzy-match a project",
+            Style::default().fg(palette.subtle_text),
+        )));
+    }
+    lines
 }
 
 fn task_list_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
@@ -1104,12 +1305,12 @@ fn render_task_editor_popup(
     render_editor_field(
         frame,
         sections[1],
-        "Description [F2]",
-        &editor.description_value,
-        editor.description_cursor,
-        editor.focus.description,
+        "Project [F2]",
+        &editor.project_value,
+        editor.project_cursor,
+        editor.focus.project,
         symbols,
-        Some("Longer task notes will live here"),
+        Some("h/l cycles projects"),
         palette,
     );
 
@@ -1348,7 +1549,7 @@ fn render_editor_calendar(
 fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "F6 calendar  F7 clear due  Enter save  Esc cancel",
+            "h/l project  F6 calendar  F7 clear due  Enter save",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
@@ -1433,6 +1634,164 @@ fn render_delete_confirmation(
     );
 
     frame.render_widget(popup, area);
+}
+
+fn render_project_delete_confirmation(
+    frame: &mut Frame<'_>,
+    confirmation: &ProjectDeleteConfirmationView,
+    palette: ThemePalette,
+) {
+    let area = centered_rect(frame.area(), 64, 7);
+    frame.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from("Remove this project and its subtree?"),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("\"{}\"", confirmation.project_name),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Tasks in this subtree will be soft-deleted."),
+        Line::from("History links will be preserved."),
+        Line::from("Enter/Y confirm  Esc/N cancel"),
+    ];
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                "Remove Project",
+                Style::default()
+                    .fg(palette.error)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.error)),
+    );
+
+    frame.render_widget(popup, area);
+}
+
+fn render_project_editor_popup(
+    frame: &mut Frame<'_>,
+    editor: &ProjectEditorView,
+    palette: ThemePalette,
+) {
+    let show_parent_dropdown = !editor.parent_suggestions.is_empty();
+    let area = centered_rect(frame.area(), 72, if show_parent_dropdown { 12 } else { 8 });
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(Span::styled(
+            editor.title,
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from("Tab next field  h/l change value  Enter save").right_aligned())
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(if show_parent_dropdown {
+            [
+                Constraint::Length(3),
+                Constraint::Length(4),
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ]
+        } else {
+            [
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Min(0),
+            ]
+        })
+        .split(inner);
+
+    render_editor_field(
+        frame,
+        sections[0],
+        "Name",
+        &editor.name_value,
+        editor.name_cursor,
+        editor.focus.name,
+        Symbols::new(GlyphMode::Ascii),
+        None,
+        palette,
+    );
+
+    if show_parent_dropdown {
+        render_project_parent_suggestions(frame, sections[1], editor, palette);
+    }
+
+    let mut meta_lines = vec![Line::from(vec![
+        Span::styled("Color: ", Style::default().fg(palette.subtle_text)),
+        Span::styled(
+            editor.color_label.clone(),
+            Style::default().fg(palette.project_color(editor.color_value)),
+        ),
+    ])];
+    if editor.parent_label != "No Parent" {
+        meta_lines.push(Line::from(vec![
+            Span::styled("Parent: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(editor.parent_label.clone(), Style::default().fg(palette.text)),
+        ]));
+    }
+    meta_lines.push(Line::from(vec![
+        Span::styled("Favorite: ", Style::default().fg(palette.subtle_text)),
+        Span::styled(
+            if editor.is_favorite { "yes" } else { "no" },
+            Style::default().fg(palette.text),
+        ),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(meta_lines)
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(palette.border))),
+        if show_parent_dropdown { sections[2] } else { sections[1] },
+    );
+}
+
+fn render_project_parent_suggestions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &ProjectEditorView,
+    palette: ThemePalette,
+) {
+    let lines = editor
+        .parent_suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let style = if index == editor
+                .selected_parent_suggestion
+                .min(editor.parent_suggestions.len().saturating_sub(1))
+            {
+                Style::default()
+                    .fg(palette.text)
+                    .bg(palette.border)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            Line::from(vec![Span::styled(
+                ellipsize_end(suggestion, area.width.saturating_sub(2) as usize),
+                style,
+            )])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(Span::styled("Parent", Style::default().fg(palette.accent)))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.accent)),
+        ),
+        area,
+    );
 }
 
 fn render_task_search_popup(frame: &mut Frame<'_>, search: &TaskSearchView, palette: ThemePalette) {
@@ -1765,6 +2124,45 @@ fn selectable_line(
     Line::from(spans)
 }
 
+fn selectable_count_line(
+    label: &str,
+    count: usize,
+    selected: bool,
+    width: u16,
+    palette: ThemePalette,
+) -> Line<'static> {
+    let base_style = if selected {
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.border)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.text)
+    };
+    let count_style = if selected {
+        Style::default().fg(palette.subtle_text).bg(palette.border)
+    } else {
+        Style::default().fg(palette.subtle_text)
+    };
+    let count_text = format!("{count}");
+    let count_width = count_text.width() + 2;
+    let label_width = (width as usize).saturating_sub(count_width + 2);
+    let mut spans = vec![
+        Span::styled(
+            ellipsize_end(&format!("  {label}"), label_width),
+            base_style,
+        ),
+        Span::styled(" ".to_string(), base_style),
+        Span::styled(count_text, count_style),
+    ];
+    let current_width = Line::from(spans.clone()).width();
+    let padding = (width as usize).saturating_sub(current_width);
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), base_style));
+    }
+    Line::from(spans)
+}
+
 fn task_view_symbol(view: TaskView, symbols: Symbols) -> &'static str {
     match view {
         TaskView::All => symbols.tasks,
@@ -1774,17 +2172,30 @@ fn task_view_symbol(view: TaskView, symbols: Symbols) -> &'static str {
     }
 }
 
-fn navigation_title(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+fn navigation_title(active_tab: SidebarTab, palette: ThemePalette) -> Line<'static> {
+    let nav_style = if active_tab == SidebarTab::Navigation {
+        Style::default().fg(palette.accent)
+    } else {
+        Style::default().fg(palette.subtle_text)
+    };
+    let filters_style = if active_tab == SidebarTab::FiltersTags {
+        Style::default().fg(palette.accent)
+    } else {
+        Style::default().fg(palette.subtle_text)
+    };
+    let projects_style = if active_tab == SidebarTab::Projects {
+        Style::default().fg(palette.accent)
+    } else {
+        Style::default().fg(palette.subtle_text)
+    };
+
     Line::from(vec![
         Span::raw("[3] "),
-        Span::styled(
-            format!("{} Navigation", symbols.navigation),
-            Style::default().fg(palette.accent),
-        ),
+        Span::styled("Navigation", nav_style),
         Span::raw(" - "),
-        Span::styled("Filters & Tags", Style::default().fg(palette.subtle_text)),
+        Span::styled("[4] Filters & Tags", filters_style),
         Span::raw(" - "),
-        Span::styled("Projects", Style::default().fg(palette.subtle_text)),
+        Span::styled("[5] Projects", projects_style),
     ])
 }
 
@@ -1805,7 +2216,7 @@ fn right_panel_title(
     };
 
     Line::from(vec![
-        Span::raw("[5] "),
+        Span::raw("[7] "),
         Span::styled(format!("{} Tasks", symbols.tasks), tasks_style),
         Span::raw(" - "),
         Span::styled(format!("{} Stats", symbols.stats), stats_style),
@@ -2066,7 +2477,6 @@ fn progress_meta_line(
 #[derive(Debug, Clone, Copy)]
 struct Symbols {
     timer: &'static str,
-    navigation: &'static str,
     favorite: &'static str,
     tasks: &'static str,
     inbox: &'static str,
@@ -2092,7 +2502,6 @@ impl Symbols {
         match mode {
             GlyphMode::Ascii => Self {
                 timer: "*",
-                navigation: ">",
                 favorite: "*",
                 tasks: "#",
                 inbox: "I",
@@ -2114,7 +2523,6 @@ impl Symbols {
             },
             GlyphMode::NerdFonts => Self {
                 timer: "󰔛",
-                navigation: "󰆍",
                 favorite: "󰓎",
                 tasks: "󰄱",
                 inbox: "󰏆",

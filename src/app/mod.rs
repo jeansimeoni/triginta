@@ -16,11 +16,11 @@ use crate::{
         load_app_config, save_app_config,
     },
     domain::{
-        DayHistorySummary, HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task, TaskId,
-        TaskStatus, TaskUpdate,
+        DayHistorySummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate,
+        SessionEntry, SessionKind, SessionOutcome, Task, TaskId, TaskStatus, TaskUpdate,
     },
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
-    storage::{Database, PomodoroRepository, TaskRepository},
+    storage::{Database, PomodoroRepository, ProjectRepository, TaskRepository},
     task_nlp::{next_recurring_due, parse_due_input, parse_due_time_input, parse_task_input},
     theme::ThemePalette,
     ui,
@@ -38,6 +38,23 @@ pub struct RunOptions {
 pub enum RightPanelTab {
     Tasks,
     Statistics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarTab {
+    Navigation,
+    FiltersTags,
+    Projects,
+}
+
+impl SidebarTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Navigation => "Navigation",
+            Self::FiltersTags => "Filters & Tags",
+            Self::Projects => "Projects",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,9 +179,9 @@ impl PanelFocus {
         match key {
             '1' => Some(Self::Timer),
             '2' => Some(Self::History),
-            '3' => Some(Self::Navigation),
-            '4' => Some(Self::Favorites),
-            '5' => Some(Self::RightPane),
+            '6' => Some(Self::Favorites),
+            '7' => Some(Self::RightPane),
+            '3' | '4' | '5' => Some(Self::Navigation),
             _ => None,
         }
     }
@@ -386,6 +403,7 @@ pub struct TimerView {
 #[derive(Debug, Clone, Default)]
 pub struct ScreenData {
     pub tasks: Vec<Task>,
+    pub projects: Vec<Project>,
     pub history_entries: Vec<SessionEntry>,
     pub today_stats: HistoryStats,
     pub weekly_summaries: Vec<DayHistorySummary>,
@@ -396,12 +414,13 @@ pub struct ScreenData {
 struct TaskInputState {
     value: String,
     cursor: usize,
+    project_id: ProjectId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskEditorField {
     Title,
-    Description,
+    Project,
     DueDate,
     DueTime,
     Recurrence,
@@ -410,7 +429,7 @@ enum TaskEditorField {
 impl TaskEditorField {
     const ALL: [Self; 5] = [
         Self::Title,
-        Self::Description,
+        Self::Project,
         Self::DueDate,
         Self::DueTime,
         Self::Recurrence,
@@ -419,7 +438,7 @@ impl TaskEditorField {
     fn index(self) -> usize {
         match self {
             Self::Title => 0,
-            Self::Description => 1,
+            Self::Project => 1,
             Self::DueDate => 2,
             Self::DueTime => 3,
             Self::Recurrence => 4,
@@ -444,8 +463,9 @@ struct TaskEditorState {
     task_id: TaskId,
     title_input: String,
     title_cursor: usize,
-    description_input: String,
-    description_cursor: usize,
+    project_input: String,
+    project_cursor: usize,
+    project_id: ProjectId,
     due_date_input: String,
     due_date_cursor: usize,
     due_time_input: String,
@@ -464,12 +484,56 @@ struct CalendarState {
     selected_date: NaiveDate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectEditorField {
+    Name,
+    Parent,
+    Color,
+    Favorite,
+}
+
+impl ProjectEditorField {
+    const ALL: [Self; 4] = [Self::Name, Self::Parent, Self::Color, Self::Favorite];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Name => 0,
+            Self::Parent => 1,
+            Self::Color => 2,
+            Self::Favorite => 3,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self::ALL[index.min(Self::ALL.len().saturating_sub(1))]
+    }
+
+    fn next(self) -> Self {
+        Self::from_index((self.index() + 1).min(Self::ALL.len().saturating_sub(1)))
+    }
+
+    fn previous(self) -> Self {
+        Self::from_index(self.index().saturating_sub(1))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TaskSearchState {
     mode: TaskSearchMode,
     query: String,
     cursor: usize,
     selected_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectEditorState {
+    project_id: Option<ProjectId>,
+    name_input: String,
+    name_cursor: usize,
+    color_index: usize,
+    is_favorite: bool,
+    suggestion_index: usize,
+    focused_field: ProjectEditorField,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,6 +552,8 @@ pub struct TaskInputView {
     pub title: &'static str,
     pub value: String,
     pub cursor: usize,
+    pub project_name: String,
+    pub project_suggestions: Vec<String>,
     pub due_preview: Option<TaskDuePreviewView>,
 }
 
@@ -500,7 +566,7 @@ pub struct CalendarPickerView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskEditorFocusView {
     pub title: bool,
-    pub description: bool,
+    pub project: bool,
     pub due_date: bool,
     pub due_time: bool,
     pub recurrence: bool,
@@ -511,8 +577,8 @@ pub struct TaskEditorView {
     pub title: &'static str,
     pub title_value: String,
     pub title_cursor: usize,
-    pub description_value: String,
-    pub description_cursor: usize,
+    pub project_value: String,
+    pub project_cursor: usize,
     pub due_date_value: String,
     pub due_date_cursor: usize,
     pub due_time_value: String,
@@ -530,6 +596,13 @@ pub struct TaskDuePreviewView {
     pub datetime: Option<NaiveDateTime>,
     pub string: String,
     pub is_recurring: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedTaskDraft {
+    cleaned_title: String,
+    due: Option<crate::domain::TaskDue>,
+    project_id: ProjectId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,6 +624,45 @@ pub struct TaskSearchView {
     pub cursor: usize,
     pub selected_index: usize,
     pub results: Vec<TaskSearchResultView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectTreeRowView {
+    pub project_id: Option<ProjectId>,
+    pub name: String,
+    pub depth: usize,
+    pub is_favorite: bool,
+    pub color: Option<ProjectColor>,
+    pub task_count: usize,
+    pub is_selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectEditorFocusView {
+    pub name: bool,
+    pub parent: bool,
+    pub color: bool,
+    pub favorite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectEditorView {
+    pub title: &'static str,
+    pub name_value: String,
+    pub name_cursor: usize,
+    pub parent_label: String,
+    pub parent_suggestions: Vec<String>,
+    pub selected_parent_suggestion: usize,
+    pub color_label: String,
+    pub color_value: ProjectColor,
+    pub is_favorite: bool,
+    pub focus: ProjectEditorFocusView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectDeleteConfirmationView {
+    pub project_id: ProjectId,
+    pub project_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -580,7 +692,7 @@ pub struct ShortcutSection {
 
 const GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
-        keys: "1-5",
+        keys: "1-7",
         description: "focus panel",
     },
     ShortcutTip {
@@ -651,6 +763,34 @@ const NAVIGATION_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "Home/End",
         description: "jump first/last",
+    },
+];
+
+const FILTERS_TAGS_SHORTCUTS: &[ShortcutTip] = &[ShortcutTip {
+    keys: "3/4/5",
+    description: "switch tab",
+}];
+
+const PROJECTS_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "move project",
+    },
+    ShortcutTip {
+        keys: "Home",
+        description: "all projects",
+    },
+    ShortcutTip {
+        keys: "C/e/d",
+        description: "new/edit/delete project",
+    },
+    ShortcutTip {
+        keys: "f",
+        description: "toggle favorite",
+    },
+    ShortcutTip {
+        keys: "c",
+        description: "new task here",
     },
 ];
 
@@ -732,6 +872,10 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "jump to field",
     },
     ShortcutTip {
+        keys: "h/l",
+        description: "change project/date",
+    },
+    ShortcutTip {
         keys: "F6",
         description: "open calendar",
     },
@@ -775,6 +919,36 @@ const DELETE_CONFIRMATION_SHORTCUTS: &[ShortcutTip] = &[
     },
 ];
 
+const PROJECT_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter",
+        description: "save",
+    },
+    ShortcutTip {
+        keys: "Esc",
+        description: "cancel",
+    },
+    ShortcutTip {
+        keys: "Tab/S-Tab",
+        description: "next/prev field",
+    },
+    ShortcutTip {
+        keys: "h/l or j/k",
+        description: "change value",
+    },
+];
+
+const PROJECT_DELETE_CONFIRMATION_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter/y",
+        description: "confirm",
+    },
+    ShortcutTip {
+        keys: "Esc/n",
+        description: "cancel",
+    },
+];
+
 const SORT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "Enter",
@@ -802,6 +976,7 @@ pub struct App {
     timer_settings: TimerSettings,
     active_right_panel_tab: RightPanelTab,
     active_history_panel_tab: HistoryPanelTab,
+    active_sidebar_tab: SidebarTab,
     active_task_view: TaskView,
     focused_panel: PanelFocus,
     glyph_mode: GlyphMode,
@@ -809,13 +984,16 @@ pub struct App {
     timer: TimerState,
     history_scroll: usize,
     selected_task_id: Option<TaskId>,
+    selected_project_id: Option<ProjectId>,
     assigned_task_id: Option<TaskId>,
     active_focus_task_id: Option<TaskId>,
     task_input: Option<TaskInputState>,
     task_editor: Option<TaskEditorState>,
+    project_editor: Option<ProjectEditorState>,
     task_search: Option<TaskSearchState>,
     task_sort_popup: Option<TaskSortPopupState>,
     delete_confirmation: Option<TaskId>,
+    project_delete_confirmation: Option<ProjectId>,
     help_open: bool,
     help_scroll: usize,
     help_viewport_lines: usize,
@@ -824,6 +1002,17 @@ pub struct App {
 }
 
 impl App {
+    fn task_input_parse(&self, raw: &str, fallback_project_id: ProjectId) -> ParsedTaskDraft {
+        let (without_project_tokens, project_id) =
+            self.extract_project_reference(raw, fallback_project_id);
+        let parsed = parse_task_input(without_project_tokens.as_str(), self.today());
+        ParsedTaskDraft {
+            cleaned_title: parsed.cleaned_title,
+            due: parsed.due,
+            project_id,
+        }
+    }
+
     pub fn new(
         screen_data: ScreenData,
         config: AppConfig,
@@ -841,6 +1030,7 @@ impl App {
             timer_settings,
             active_right_panel_tab: RightPanelTab::Tasks,
             active_history_panel_tab: HistoryPanelTab::Today,
+            active_sidebar_tab: SidebarTab::Navigation,
             active_task_view: TaskView::All,
             focused_panel: PanelFocus::Timer,
             glyph_mode,
@@ -848,13 +1038,16 @@ impl App {
             timer: TimerState::new(long_break_interval),
             history_scroll: 0,
             selected_task_id: None,
+            selected_project_id: None,
             assigned_task_id: None,
             active_focus_task_id: None,
             task_input: None,
             task_editor: None,
+            project_editor: None,
             task_search: None,
             task_sort_popup: None,
             delete_confirmation: None,
+            project_delete_confirmation: None,
             help_open: false,
             help_scroll: 0,
             help_viewport_lines: 0,
@@ -871,6 +1064,10 @@ impl App {
 
     pub fn active_history_panel_tab(&self) -> HistoryPanelTab {
         self.active_history_panel_tab
+    }
+
+    pub fn active_sidebar_tab(&self) -> SidebarTab {
+        self.active_sidebar_tab
     }
 
     pub fn focused_panel(&self) -> PanelFocus {
@@ -935,7 +1132,8 @@ impl App {
 
     pub fn task_input_view(&self) -> Option<TaskInputView> {
         self.task_input.as_ref().map(|input| {
-            let due_preview = parse_task_input(input.value.as_str(), self.today())
+            let due_preview = self
+                .task_input_parse(input.value.as_str(), input.project_id)
                 .due
                 .map(|due| TaskDuePreviewView {
                     date: due.date,
@@ -948,6 +1146,17 @@ impl App {
                 title: "New Task",
                 value: input.value.clone(),
                 cursor: input.cursor,
+                project_name: self.project_name(input.project_id).unwrap_or("Inbox").to_string(),
+                project_suggestions: self
+                    .active_project_query(input.value.as_str(), input.cursor)
+                    .map(|(_, _, query)| {
+                        self.project_suggestions(query.as_str())
+                            .into_iter()
+                            .take(3)
+                            .map(|project| project.name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 due_preview,
             }
         })
@@ -958,8 +1167,11 @@ impl App {
             title: "Edit Task",
             title_value: editor.title_input.clone(),
             title_cursor: editor.title_cursor,
-            description_value: editor.description_input.clone(),
-            description_cursor: editor.description_cursor,
+            project_value: self
+                .project_name(editor.project_id)
+                .unwrap_or("Inbox")
+                .to_string(),
+            project_cursor: editor.project_cursor,
             due_date_value: editor.due_date_input.clone(),
             due_date_cursor: editor.due_date_cursor,
             due_time_value: editor.due_time_input.clone(),
@@ -968,7 +1180,7 @@ impl App {
             recurrence_cursor: editor.recurrence_cursor,
             focus: TaskEditorFocusView {
                 title: editor.focused_field == TaskEditorField::Title,
-                description: editor.focused_field == TaskEditorField::Description,
+                project: editor.focused_field == TaskEditorField::Project,
                 due_date: editor.focused_field == TaskEditorField::DueDate,
                 due_time: editor.focused_field == TaskEditorField::DueTime,
                 recurrence: editor.focused_field == TaskEditorField::Recurrence,
@@ -978,6 +1190,53 @@ impl App {
                 display_date: calendar.display_date,
                 selected_date: calendar.selected_date,
             }),
+        })
+    }
+
+    pub fn project_editor_view(&self) -> Option<ProjectEditorView> {
+        let editor = self.project_editor.as_ref()?;
+        let inline_parent_query = self
+            .active_project_query(editor.name_input.as_str(), editor.name_cursor)
+            .map(|(_, _, query)| query)
+            .unwrap_or_default();
+        let resolved_parent_id = self.resolve_parent_project_input(
+            inline_parent_query.as_str(),
+            editor.project_id,
+        );
+        let parent_label = resolved_parent_id
+            .and_then(|project_id| self.project_name(project_id))
+            .unwrap_or("No Parent")
+            .to_string();
+        let color = ProjectColor::all()
+            .get(editor.color_index)
+            .copied()
+            .unwrap_or(ProjectColor::Charcoal);
+
+        Some(ProjectEditorView {
+            title: if editor.project_id.is_some() {
+                "Edit Project"
+            } else {
+                "New Project"
+            },
+            name_value: editor.name_input.clone(),
+            name_cursor: editor.name_cursor,
+            parent_label,
+            parent_suggestions: self
+                .project_parent_suggestions(inline_parent_query.as_str(), editor.project_id)
+                .into_iter()
+                .take(3)
+                .map(|project| project.name.clone())
+                .collect(),
+            selected_parent_suggestion: editor.suggestion_index,
+            color_label: color.label().to_string(),
+            color_value: color,
+            is_favorite: editor.is_favorite,
+            focus: ProjectEditorFocusView {
+                name: editor.focused_field == ProjectEditorField::Name,
+                parent: editor.focused_field == ProjectEditorField::Parent,
+                color: editor.focused_field == ProjectEditorField::Color,
+                favorite: editor.focused_field == ProjectEditorField::Favorite,
+            },
         })
     }
 
@@ -991,6 +1250,19 @@ impl App {
         Some(DeleteConfirmationView {
             task_id,
             task_title: task.title.clone(),
+        })
+    }
+
+    pub fn project_delete_confirmation_view(&self) -> Option<ProjectDeleteConfirmationView> {
+        let project_id = self.project_delete_confirmation?;
+        let project = self
+            .screen_data
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)?;
+        Some(ProjectDeleteConfirmationView {
+            project_id,
+            project_name: project.name.clone(),
         })
     }
 
@@ -1045,6 +1317,28 @@ impl App {
         &self.screen_data
     }
 
+    pub fn project_tree_rows(&self) -> Vec<ProjectTreeRowView> {
+        let mut rows = vec![ProjectTreeRowView {
+            project_id: None,
+            name: "All Projects".to_string(),
+            depth: 0,
+            is_favorite: false,
+            color: None,
+            task_count: self.tasks_for_project_filter(None),
+            is_selected: self.selected_project_id.is_none(),
+        }];
+        self.append_project_tree_rows(&mut rows, None, 0);
+        rows
+    }
+
+    pub fn task_count_for_view(&self, view: TaskView) -> usize {
+        self.screen_data
+            .tasks
+            .iter()
+            .filter(|task| self.task_is_counted_for_view(task, view))
+            .count()
+    }
+
     pub fn timer_settings(&self) -> &TimerSettings {
         &self.timer_settings
     }
@@ -1084,13 +1378,23 @@ impl App {
         if self.task_editor.is_some() {
             return EDITOR_POPUP_SHORTCUTS;
         }
+        if self.project_editor.is_some() {
+            return PROJECT_EDITOR_SHORTCUTS;
+        }
         if self.task_input.is_some() {
             return INPUT_POPUP_SHORTCUTS;
+        }
+        if self.project_delete_confirmation.is_some() {
+            return PROJECT_DELETE_CONFIRMATION_SHORTCUTS;
         }
         match self.focused_panel {
             PanelFocus::Timer => TIMER_SHORTCUTS,
             PanelFocus::History => HISTORY_SHORTCUTS,
-            PanelFocus::Navigation => NAVIGATION_SHORTCUTS,
+            PanelFocus::Navigation => match self.active_sidebar_tab {
+                SidebarTab::Navigation => NAVIGATION_SHORTCUTS,
+                SidebarTab::FiltersTags => FILTERS_TAGS_SHORTCUTS,
+                SidebarTab::Projects => PROJECTS_SHORTCUTS,
+            },
             PanelFocus::Favorites => FAVORITES_SHORTCUTS,
             PanelFocus::RightPane => match self.active_right_panel_tab {
                 RightPanelTab::Tasks => TASKS_SHORTCUTS,
@@ -1118,6 +1422,14 @@ impl App {
                 tips: NAVIGATION_SHORTCUTS,
             },
             ShortcutSection {
+                title: "Filters & Tags",
+                tips: FILTERS_TAGS_SHORTCUTS,
+            },
+            ShortcutSection {
+                title: "Projects",
+                tips: PROJECTS_SHORTCUTS,
+            },
+            ShortcutSection {
                 title: "Favorites",
                 tips: FAVORITES_SHORTCUTS,
             },
@@ -1143,6 +1455,12 @@ impl App {
                 tips: EDITOR_POPUP_SHORTCUTS,
             });
         }
+        if self.project_editor.is_some() {
+            sections.push(ShortcutSection {
+                title: "Project Editor",
+                tips: PROJECT_EDITOR_SHORTCUTS,
+            });
+        }
         if self.task_search.is_some() {
             sections.push(ShortcutSection {
                 title: "Task Search Popup",
@@ -1159,6 +1477,12 @@ impl App {
             sections.push(ShortcutSection {
                 title: "Delete Confirmation",
                 tips: DELETE_CONFIRMATION_SHORTCUTS,
+            });
+        }
+        if self.project_delete_confirmation.is_some() {
+            sections.push(ShortcutSection {
+                title: "Project Delete Confirmation",
+                tips: PROJECT_DELETE_CONFIRMATION_SHORTCUTS,
             });
         }
 
@@ -1312,14 +1636,37 @@ impl App {
     }
 
     fn task_matches_active_view(&self, task: &Task) -> bool {
-        match self.active_task_view {
+        self.task_matches_view(task, self.active_task_view)
+    }
+
+    fn task_is_active(&self, task: &Task) -> bool {
+        task.deleted_at.is_none()
+            && self
+                .project_by_id(task.project_id)
+                .map(|project| project.deleted_at.is_none())
+                .unwrap_or(false)
+    }
+
+    fn task_is_visible(&self, task: &Task) -> bool {
+        self.task_is_active(task)
+            && self.task_matches_active_view(task)
+            && self.task_matches_selected_project(task)
+            && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
+    }
+
+    fn task_matches_selected_project(&self, task: &Task) -> bool {
+        self.selected_project_id
+            .map(|project_id| self.project_is_in_subtree(task.project_id, project_id))
+            .unwrap_or(true)
+    }
+
+    fn task_matches_view(&self, task: &Task, view: TaskView) -> bool {
+        match view {
             TaskView::All => true,
-            // Projects are not implemented yet, so every active task is
-            // currently unassigned and therefore belongs to Inbox.
-            TaskView::Inbox => {
-                let _ = task;
-                true
-            }
+            TaskView::Inbox => self
+                .project_by_id(task.project_id)
+                .map(|project| project.is_inbox)
+                .unwrap_or(false),
             TaskView::Today => task.due.as_ref().map(|due| due.date) == Some(self.today()),
             TaskView::Soon => task
                 .due
@@ -1329,14 +1676,275 @@ impl App {
         }
     }
 
-    fn task_is_active(&self, task: &Task) -> bool {
-        task.deleted_at.is_none()
+    fn task_is_counted_for_view(&self, task: &Task, view: TaskView) -> bool {
+        self.task_is_active(task)
+            && self.task_matches_view(task, view)
+            && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
     }
 
-    fn task_is_visible(&self, task: &Task) -> bool {
-        self.task_is_active(task)
-            && self.task_matches_active_view(task)
-            && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
+    fn tasks_for_project_filter(&self, project_id: Option<ProjectId>) -> usize {
+        self.screen_data
+            .tasks
+            .iter()
+            .filter(|task| {
+                self.task_is_active(task)
+                    && self.task_matches_view(task, self.active_task_view)
+                    && project_id
+                        .map(|selected| self.project_is_in_subtree(task.project_id, selected))
+                        .unwrap_or(true)
+                    && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
+            })
+            .count()
+    }
+
+    fn project_by_id(&self, project_id: ProjectId) -> Option<&Project> {
+        self.screen_data
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+    }
+
+    fn project_name(&self, project_id: ProjectId) -> Option<&str> {
+        self.project_by_id(project_id).map(|project| project.name.as_str())
+    }
+
+    fn resolve_project_input(
+        &self,
+        query: &str,
+        fallback_project_id: Option<ProjectId>,
+    ) -> ProjectId {
+        let normalized = query.trim().to_lowercase();
+        if normalized.is_empty() {
+            return fallback_project_id.unwrap_or_else(|| self.inbox_project_id());
+        }
+
+        self.screen_data
+            .projects
+            .iter()
+            .filter(|project| project.deleted_at.is_none())
+            .find(|project| project.name.to_lowercase() == normalized)
+            .map(|project| project.id)
+            .or_else(|| {
+                self.screen_data
+                    .projects
+                    .iter()
+                    .filter(|project| project.deleted_at.is_none())
+                    .find(|project| fuzzy_matches(normalized.as_str(), project.name.as_str()))
+                    .map(|project| project.id)
+            })
+            .unwrap_or_else(|| fallback_project_id.unwrap_or_else(|| self.inbox_project_id()))
+    }
+
+    fn matched_project_prefix(
+        &self,
+        query: &str,
+        excluded_project_id: Option<ProjectId>,
+    ) -> Option<(&Project, usize)> {
+        let normalized_query = query.trim_start();
+        self.screen_data
+            .projects
+            .iter()
+            .filter(|project| project.deleted_at.is_none() && Some(project.id) != excluded_project_id)
+            .filter_map(|project| {
+                let name = project.name.as_str();
+                let query_prefix = normalized_query.get(..name.len())?;
+                if !query_prefix.eq_ignore_ascii_case(name) {
+                    return None;
+                }
+                let next = normalized_query[name.len()..].chars().next();
+                if next.is_some_and(|character| !character.is_whitespace()) {
+                    return None;
+                }
+                Some((project, name.len()))
+            })
+            .max_by_key(|(_, length)| *length)
+    }
+
+    fn extract_project_reference(
+        &self,
+        raw: &str,
+        fallback_project_id: ProjectId,
+    ) -> (String, ProjectId) {
+        let Some(start) = raw.rfind('#') else {
+            return (raw.trim().to_string(), fallback_project_id);
+        };
+        if start > 0
+            && !raw[..start]
+                .chars()
+                .last()
+                .is_some_and(char::is_whitespace)
+        {
+            return (raw.trim().to_string(), fallback_project_id);
+        }
+        let query = raw[start + 1..].trim();
+        if query.is_empty() {
+            return (raw.trim().to_string(), fallback_project_id);
+        }
+        if let Some((project, matched_length)) = self.matched_project_prefix(query, None) {
+            let remainder = query[matched_length..].trim_start();
+            let cleaned = if raw[..start].trim().is_empty() {
+                remainder.to_string()
+            } else if remainder.is_empty() {
+                raw[..start].trim_end().to_string()
+            } else {
+                format!("{} {}", raw[..start].trim_end(), remainder)
+            };
+            return (cleaned.trim().to_string(), project.id);
+        }
+        let project_id = self.resolve_project_input(query, Some(fallback_project_id));
+        let cleaned = raw[..start].trim_end().to_string();
+        (cleaned, project_id)
+    }
+
+    fn inbox_project_id(&self) -> ProjectId {
+        self.screen_data
+            .projects
+            .iter()
+            .find(|project| project.is_inbox)
+            .map(|project| project.id)
+            .expect("inbox project should exist")
+    }
+
+    fn project_is_in_subtree(&self, project_id: ProjectId, root_project_id: ProjectId) -> bool {
+        let mut current = Some(project_id);
+        while let Some(candidate) = current {
+            if candidate == root_project_id {
+                return true;
+            }
+            current = self.project_by_id(candidate).and_then(|project| project.parent_project_id);
+        }
+        false
+    }
+
+    fn project_children(&self, parent_project_id: Option<ProjectId>) -> Vec<&Project> {
+        let mut projects = self
+            .screen_data
+            .projects
+            .iter()
+            .filter(|project| {
+                project.deleted_at.is_none()
+                    && project.parent_project_id == parent_project_id
+                    && !project.is_inbox
+            })
+            .collect::<Vec<_>>();
+        projects.sort_by(|left, right| {
+            left.child_order
+                .cmp(&right.child_order)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+                .then_with(|| left.id.0.cmp(&right.id.0))
+        });
+        projects
+    }
+
+    fn append_project_tree_rows(
+        &self,
+        rows: &mut Vec<ProjectTreeRowView>,
+        parent_project_id: Option<ProjectId>,
+        depth: usize,
+    ) {
+        let mut children = self.project_children(parent_project_id);
+        if parent_project_id.is_none() {
+            if let Some(inbox) = self
+                .screen_data
+                .projects
+                .iter()
+                .find(|project| project.is_inbox && project.deleted_at.is_none())
+            {
+                children.insert(0, inbox);
+            }
+        }
+
+        for project in children {
+            rows.push(ProjectTreeRowView {
+                project_id: Some(project.id),
+                name: project.name.clone(),
+                depth,
+                is_favorite: project.is_favorite,
+                color: Some(project.color),
+                task_count: self.tasks_for_project_filter(Some(project.id)),
+                is_selected: self.selected_project_id == Some(project.id),
+            });
+            self.append_project_tree_rows(rows, Some(project.id), depth + 1);
+        }
+    }
+
+    fn active_project_ids(&self) -> Vec<ProjectId> {
+        self.screen_data
+            .projects
+            .iter()
+            .filter(|project| project.deleted_at.is_none())
+            .map(|project| project.id)
+            .collect()
+    }
+
+    fn project_suggestions(&self, query: &str) -> Vec<&Project> {
+        let normalized = query.trim();
+        if normalized.is_empty() {
+            return Vec::new();
+        }
+
+        let mut matches = self
+            .screen_data
+            .projects
+            .iter()
+            .filter(|project| project.deleted_at.is_none())
+            .filter(|project| fuzzy_matches(normalized, project.name.as_str()))
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| {
+            let left_name = left.name.to_lowercase();
+            let right_name = right.name.to_lowercase();
+            left_name
+                .starts_with(&normalized.to_lowercase())
+                .cmp(&right_name.starts_with(&normalized.to_lowercase()))
+                .reverse()
+                .then_with(|| left_name.cmp(&right_name))
+        });
+        matches
+    }
+
+    fn active_project_query(&self, value: &str, cursor: usize) -> Option<(usize, usize, String)> {
+        let safe_cursor = cursor.min(value.len());
+        let before_cursor = &value[..safe_cursor];
+        let token_start = before_cursor.rfind('#')?;
+        if token_start > 0
+            && !value[..token_start]
+                .chars()
+                .last()
+                .is_some_and(char::is_whitespace)
+        {
+            return None;
+        }
+        let query = value[token_start + 1..safe_cursor].trim_start();
+        if query.is_empty() || query.contains('\n') {
+            return None;
+        }
+        if let Some((_, matched_length)) = self.matched_project_prefix(query, None) {
+            let remainder = query[matched_length..].trim_start();
+            if remainder.is_empty() {
+                return None;
+            }
+        }
+        Some((token_start, safe_cursor, query.to_string()))
+    }
+
+    fn accept_task_input_project_suggestion(&self, input: &mut TaskInputState) -> bool {
+        let Some((start, end, query)) = self.active_project_query(input.value.as_str(), input.cursor)
+        else {
+            return false;
+        };
+        let Some(project) = self.project_suggestions(query.as_str()).into_iter().next() else {
+            return false;
+        };
+
+        input.project_id = project.id;
+        input
+            .value
+            .replace_range(start..end, format!("#{} ", project.name).as_str());
+        input.cursor = (start + project.name.len() + 2).min(input.value.len());
+        while input.cursor < input.value.len() && input.value[input.cursor..].starts_with(' ') {
+            input.value.remove(input.cursor);
+        }
+        true
     }
 
     fn compare_tasks(&self, left: &Task, right: &Task) -> std::cmp::Ordering {
@@ -1427,8 +2035,23 @@ impl App {
         };
     }
 
+    fn sync_project_selection(&mut self) {
+        if let Some(project_id) = self.selected_project_id {
+            if self
+                .screen_data
+                .projects
+                .iter()
+                .any(|project| project.id == project_id && project.deleted_at.is_none())
+            {
+                return;
+            }
+            self.selected_project_id = None;
+        }
+    }
+
     fn refresh_tasks(&mut self) -> Result<()> {
         self.screen_data.tasks = self.database.task_repository().list_all()?;
+        self.screen_data.projects = self.database.project_repository().list_all()?;
         if let Some(task_id) = self.assigned_task_id {
             if !self
                 .screen_data
@@ -1444,6 +2067,7 @@ impl App {
                 self.active_focus_task_id = None;
             }
         }
+        self.sync_project_selection();
         self.sync_task_selection();
         Ok(())
     }
@@ -1523,6 +2147,7 @@ impl App {
         self.task_input = Some(TaskInputState {
             value: String::new(),
             cursor: 0,
+            project_id: self.selected_project_id.unwrap_or_else(|| self.inbox_project_id()),
         });
     }
 
@@ -1557,8 +2182,9 @@ impl App {
             task_id: task.id,
             title_cursor: task.title.len(),
             title_input: task.title,
-            description_input: String::new(),
-            description_cursor: 0,
+            project_input: self.project_name(task.project_id).unwrap_or("Inbox").to_string(),
+            project_cursor: self.project_name(task.project_id).unwrap_or("Inbox").len(),
+            project_id: task.project_id,
             due_date_input,
             due_date_cursor,
             due_time_input,
@@ -1602,10 +2228,7 @@ impl App {
     fn editor_value_mut(editor: &mut TaskEditorState) -> (&mut String, &mut usize) {
         match editor.focused_field {
             TaskEditorField::Title => (&mut editor.title_input, &mut editor.title_cursor),
-            TaskEditorField::Description => (
-                &mut editor.description_input,
-                &mut editor.description_cursor,
-            ),
+            TaskEditorField::Project => (&mut editor.project_input, &mut editor.project_cursor),
             TaskEditorField::DueDate => (&mut editor.due_date_input, &mut editor.due_date_cursor),
             TaskEditorField::DueTime => (&mut editor.due_time_input, &mut editor.due_time_cursor),
             TaskEditorField::Recurrence => {
@@ -1654,6 +2277,7 @@ impl App {
     fn after_editor_text_change(editor: &mut TaskEditorState, reference_date: NaiveDate) {
         match editor.focused_field {
             TaskEditorField::Title => Self::sync_editor_due_from_title(editor, reference_date),
+            TaskEditorField::Project => {}
             TaskEditorField::DueDate | TaskEditorField::DueTime => {
                 editor.due_from_title = false;
                 if !editor.recurrence_input.trim().is_empty() {
@@ -1666,7 +2290,6 @@ impl App {
                 editor.due_from_title = false;
                 Self::sync_editor_due_from_recurrence(editor, reference_date);
             }
-            TaskEditorField::Description => {}
         }
     }
 
@@ -1780,7 +2403,9 @@ impl App {
         editor: TaskEditorState,
         now: DateTime<Local>,
     ) -> Result<bool> {
-        let parsed = parse_task_input(editor.title_input.as_str(), now.date_naive());
+        let project_from_field =
+            self.resolve_project_input(editor.project_input.as_str(), Some(editor.project_id));
+        let parsed = self.task_input_parse(editor.title_input.as_str(), project_from_field);
         if parsed.cleaned_title.is_empty() {
             self.task_editor = Some(editor);
             return Ok(true);
@@ -1798,6 +2423,7 @@ impl App {
             editor.task_id,
             &TaskUpdate {
                 title: parsed.cleaned_title,
+                project_id: parsed.project_id,
                 due,
             },
         )?;
@@ -1812,6 +2438,200 @@ impl App {
         };
 
         self.delete_confirmation = Some(task_id);
+    }
+
+    fn project_parent_suggestions(
+        &self,
+        query: &str,
+        project_id: Option<ProjectId>,
+    ) -> Vec<&Project> {
+        let normalized = query.trim().trim_start_matches('#');
+        if normalized.is_empty() {
+            return Vec::new();
+        }
+
+        let mut matches = self
+            .screen_data
+            .projects
+            .iter()
+            .filter(|project| project.deleted_at.is_none() && !project.is_inbox)
+            .filter(|project| Some(project.id) != project_id)
+            .filter(|project| fuzzy_matches(normalized, project.name.as_str()))
+            .collect::<Vec<_>>();
+        let normalized_lower = normalized.to_lowercase();
+        matches.sort_by(|left, right| {
+            let left_lower = left.name.to_lowercase();
+            let right_lower = right.name.to_lowercase();
+            left_lower
+                .starts_with(normalized_lower.as_str())
+                .cmp(&right_lower.starts_with(normalized_lower.as_str()))
+                .reverse()
+                .then_with(|| left_lower.cmp(&right_lower))
+        });
+        matches
+    }
+
+    fn resolve_parent_project_input(
+        &self,
+        query: &str,
+        project_id: Option<ProjectId>,
+    ) -> Option<ProjectId> {
+        let normalized = query.trim();
+        if normalized.is_empty() {
+            return None;
+        }
+
+        self.project_parent_suggestions(normalized, project_id)
+            .into_iter()
+            .next()
+            .map(|project| project.id)
+    }
+
+    fn open_create_project_popup(&mut self) {
+        self.project_editor = Some(ProjectEditorState {
+            project_id: None,
+            name_input: self
+                .selected_project_id
+                .and_then(|selected| self.project_name(selected))
+                .map(|name| format!("#{name} "))
+                .unwrap_or_default(),
+            name_cursor: self
+                .selected_project_id
+                .and_then(|selected| self.project_name(selected))
+                .map(|name| name.len() + 2)
+                .unwrap_or(0),
+            color_index: ProjectColor::all()
+                .iter()
+                .position(|color| *color == ProjectColor::Charcoal)
+                .unwrap_or(0),
+            is_favorite: false,
+            suggestion_index: 0,
+            focused_field: ProjectEditorField::Name,
+        });
+    }
+
+    fn open_edit_project_popup(&mut self) {
+        let Some(project_id) = self.selected_project_id else {
+            return;
+        };
+        let Some(project) = self.project_by_id(project_id).cloned() else {
+            return;
+        };
+        let color_index = ProjectColor::all()
+            .iter()
+            .position(|color| *color == project.color)
+            .unwrap_or(0);
+        self.project_editor = Some(ProjectEditorState {
+            project_id: Some(project.id),
+            name_input: project
+                .parent_project_id
+                .and_then(|parent_id| self.project_name(parent_id))
+                .map(|name| format!("#{} {}", name, project.name))
+                .unwrap_or_else(|| project.name.clone()),
+            name_cursor: project
+                .parent_project_id
+                .and_then(|parent_id| self.project_name(parent_id))
+                .map(|name| name.len() + project.name.len() + 2)
+                .unwrap_or(project.name.len()),
+            color_index,
+            is_favorite: project.is_favorite,
+            suggestion_index: 0,
+            focused_field: ProjectEditorField::Name,
+        });
+    }
+
+    fn open_project_delete_confirmation(&mut self) {
+        let Some(project_id) = self.selected_project_id else {
+            return;
+        };
+        if self
+            .project_by_id(project_id)
+            .is_some_and(|project| !project.is_inbox)
+        {
+            self.project_delete_confirmation = Some(project_id);
+        }
+    }
+
+    fn move_project_selection(&mut self, offset: isize) {
+        let rows = self.project_tree_rows();
+        if rows.is_empty() {
+            self.selected_project_id = None;
+            return;
+        }
+        let current_index = rows
+            .iter()
+            .position(|row| row.project_id == self.selected_project_id)
+            .unwrap_or(0);
+        let next_index = (current_index as isize + offset)
+            .clamp(0, rows.len().saturating_sub(1) as isize) as usize;
+        self.selected_project_id = rows[next_index].project_id;
+    }
+
+    fn toggle_selected_project_favorite(&mut self) -> Result<()> {
+        let Some(project_id) = self.selected_project_id else {
+            return Ok(());
+        };
+        let Some(project) = self.project_by_id(project_id).cloned() else {
+            return Ok(());
+        };
+        if project.is_inbox {
+            return Ok(());
+        }
+        self.database.project_repository().update(
+            project_id,
+            &ProjectUpdate {
+                name: project.name,
+                parent_project_id: project.parent_project_id,
+                color: project.color,
+                is_favorite: !project.is_favorite,
+            },
+        )?;
+        self.refresh_tasks()?;
+        Ok(())
+    }
+
+    fn submit_project_editor(&mut self, editor: ProjectEditorState, now: DateTime<Local>) -> Result<()> {
+        let (clean_name, parent_project_id) = self.extract_project_reference(
+            editor.name_input.as_str(),
+            ProjectId(0),
+        );
+        let name = clean_name.trim();
+        if name.is_empty() {
+            self.project_editor = Some(editor);
+            return Ok(());
+        }
+        let parent_project_id = if parent_project_id == ProjectId(0) {
+            None
+        } else {
+            Some(parent_project_id)
+        };
+        let color = ProjectColor::all()
+            .get(editor.color_index)
+            .copied()
+            .unwrap_or(ProjectColor::Charcoal);
+        if let Some(project_id) = editor.project_id {
+            self.database.project_repository().update(
+                project_id,
+                &ProjectUpdate {
+                    name: name.to_string(),
+                    parent_project_id,
+                    color,
+                    is_favorite: editor.is_favorite,
+                },
+            )?;
+            self.selected_project_id = Some(project_id);
+        } else {
+            let project = self.database.project_repository().create(
+                name,
+                parent_project_id,
+                color,
+                editor.is_favorite,
+                now,
+            )?;
+            self.selected_project_id = Some(project.id);
+        }
+        self.refresh_tasks()?;
+        Ok(())
     }
 
     fn open_timer_task_search(&mut self) {
@@ -1875,6 +2695,7 @@ impl App {
                         } else {
                             let next_task = self.database.task_repository().create(
                                 task.title.as_str(),
+                                task.project_id,
                                 Some(&next_due),
                                 now,
                             )?;
@@ -2085,6 +2906,159 @@ impl App {
             return Ok(true);
         }
 
+        if let Some(project_id) = self.project_delete_confirmation {
+            match code {
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    self.database
+                        .project_repository()
+                        .delete(project_id, now)?;
+                    self.project_delete_confirmation = None;
+                    self.refresh_tasks()?;
+                }
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    self.project_delete_confirmation = None;
+                }
+                _ => {}
+            }
+            return Ok(true);
+        }
+
+        if let Some(mut editor) = self.project_editor.take() {
+            match code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => {
+                    if editor.focused_field == ProjectEditorField::Name {
+                        if let Some((start, end, query)) = self
+                            .active_project_query(editor.name_input.as_str(), editor.name_cursor)
+                        {
+                            let suggestions =
+                                self.project_parent_suggestions(query.as_str(), editor.project_id);
+                            if let Some(project) = suggestions
+                                .get(editor.suggestion_index.min(suggestions.len().saturating_sub(1)))
+                            {
+                                editor.name_input.replace_range(
+                                    start..end,
+                                    format!("#{} ", project.name).as_str(),
+                                );
+                                editor.name_cursor =
+                                    (start + project.name.len() + 2).min(editor.name_input.len());
+                                editor.suggestion_index = 0;
+                                self.project_editor = Some(editor);
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    self.submit_project_editor(editor, now)?;
+                }
+                KeyCode::Tab => {
+                    if editor.focused_field == ProjectEditorField::Name {
+                        if let Some((start, end, query)) = self
+                            .active_project_query(editor.name_input.as_str(), editor.name_cursor)
+                        {
+                            let suggestions =
+                                self.project_parent_suggestions(query.as_str(), editor.project_id);
+                            if let Some(project) = suggestions
+                                .get(editor.suggestion_index.min(suggestions.len().saturating_sub(1)))
+                            {
+                                editor
+                                    .name_input
+                                    .replace_range(start..end, format!("#{} ", project.name).as_str());
+                                editor.name_cursor = (start + project.name.len() + 2)
+                                    .min(editor.name_input.len());
+                                editor.suggestion_index = 0;
+                                self.project_editor = Some(editor);
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    editor.focused_field = editor.focused_field.next();
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::BackTab => {
+                    editor.focused_field = editor.focused_field.previous();
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::Backspace if editor.focused_field == ProjectEditorField::Name => {
+                    if editor.name_cursor > 0 {
+                        let previous_index = editor.name_input[..editor.name_cursor]
+                            .char_indices()
+                            .last()
+                            .map(|(index, _)| index)
+                            .unwrap_or(0);
+                        editor.name_input.drain(previous_index..editor.name_cursor);
+                        editor.name_cursor = previous_index;
+                    }
+                    editor.suggestion_index = 0;
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::Home if editor.focused_field == ProjectEditorField::Name => {
+                    editor.name_cursor = 0;
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::End if editor.focused_field == ProjectEditorField::Name => {
+                    editor.name_cursor = editor.name_input.len();
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::Left | KeyCode::Char('h') | KeyCode::Up | KeyCode::Char('k')
+                    if editor.focused_field != ProjectEditorField::Name
+                        && editor.focused_field != ProjectEditorField::Parent =>
+                {
+                    match editor.focused_field {
+                        ProjectEditorField::Color => {
+                            editor.color_index = editor.color_index.saturating_sub(1);
+                        }
+                        ProjectEditorField::Favorite => {
+                            editor.is_favorite = !editor.is_favorite;
+                        }
+                        ProjectEditorField::Name | ProjectEditorField::Parent => {}
+                    }
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Down | KeyCode::Char('j')
+                    if editor.focused_field != ProjectEditorField::Name
+                        && editor.focused_field != ProjectEditorField::Parent =>
+                {
+                    match editor.focused_field {
+                        ProjectEditorField::Color => {
+                            editor.color_index = (editor.color_index + 1)
+                                .min(ProjectColor::all().len().saturating_sub(1));
+                        }
+                        ProjectEditorField::Favorite => {
+                            editor.is_favorite = !editor.is_favorite;
+                        }
+                        ProjectEditorField::Name | ProjectEditorField::Parent => {}
+                    }
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::Char(character) if editor.focused_field == ProjectEditorField::Name => {
+                    editor.name_input.insert(editor.name_cursor, character);
+                    editor.name_cursor += character.len_utf8();
+                    editor.suggestion_index = 0;
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::Down if editor.focused_field == ProjectEditorField::Name => {
+                    if let Some((_, _, query)) =
+                        self.active_project_query(editor.name_input.as_str(), editor.name_cursor)
+                    {
+                        let last_index = self
+                            .project_parent_suggestions(query.as_str(), editor.project_id)
+                            .len()
+                            .saturating_sub(1);
+                        editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
+                    }
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::Up if editor.focused_field == ProjectEditorField::Name => {
+                    editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
+                    self.project_editor = Some(editor);
+                }
+                _ => {
+                    self.project_editor = Some(editor);
+                }
+            }
+            return Ok(true);
+        }
+
         if let Some(mut editor) = self.task_editor.take() {
             if editor.calendar.is_some() {
                 match code {
@@ -2136,7 +3110,7 @@ impl App {
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(2) => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::Description);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Project);
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(3) => {
@@ -2153,6 +3127,32 @@ impl App {
                 }
                 KeyCode::F(7) => {
                     Self::clear_editor_due(&mut editor);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Left | KeyCode::Char('h')
+                    if editor.focused_field == TaskEditorField::Project =>
+                {
+                    let project_ids = self.active_project_ids();
+                    if let Some(index) = project_ids.iter().position(|project_id| *project_id == editor.project_id) {
+                        let next_index = index.saturating_sub(1);
+                        editor.project_id = project_ids[next_index];
+                        editor.project_input =
+                            self.project_name(editor.project_id).unwrap_or("Inbox").to_string();
+                        editor.project_cursor = editor.project_input.len();
+                    }
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Right | KeyCode::Char('l')
+                    if editor.focused_field == TaskEditorField::Project =>
+                {
+                    let project_ids = self.active_project_ids();
+                    if let Some(index) = project_ids.iter().position(|project_id| *project_id == editor.project_id) {
+                        let next_index = (index + 1).min(project_ids.len().saturating_sub(1));
+                        editor.project_id = project_ids[next_index];
+                        editor.project_input =
+                            self.project_name(editor.project_id).unwrap_or("Inbox").to_string();
+                        editor.project_cursor = editor.project_input.len();
+                    }
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(6) if editor.focused_field == TaskEditorField::DueDate => {
@@ -2188,8 +3188,12 @@ impl App {
 
         match code {
             KeyCode::Esc => {}
+            KeyCode::Tab => {
+                let _ = self.accept_task_input_project_suggestion(&mut input);
+                self.task_input = Some(input);
+            }
             KeyCode::Enter => {
-                let parsed = parse_task_input(input.value.as_str(), now.date_naive());
+                let parsed = self.task_input_parse(input.value.as_str(), input.project_id);
                 if parsed.cleaned_title.is_empty() {
                     self.task_input = Some(input);
                     return Ok(true);
@@ -2197,6 +3201,7 @@ impl App {
 
                 let task = self.database.task_repository().create(
                     parsed.cleaned_title.as_str(),
+                    parsed.project_id,
                     parsed.due.as_ref(),
                     now,
                 )?;
@@ -2303,6 +3308,18 @@ impl App {
                 self.help_open = true;
                 self.help_scroll = 0;
             }
+            KeyCode::Char('3') => {
+                self.focused_panel = PanelFocus::Navigation;
+                self.active_sidebar_tab = SidebarTab::Navigation;
+            }
+            KeyCode::Char('4') => {
+                self.focused_panel = PanelFocus::Navigation;
+                self.active_sidebar_tab = SidebarTab::FiltersTags;
+            }
+            KeyCode::Char('5') => {
+                self.focused_panel = PanelFocus::Navigation;
+                self.active_sidebar_tab = SidebarTab::Projects;
+            }
             KeyCode::Char('c') => {
                 self.open_create_task_popup();
             }
@@ -2366,16 +3383,58 @@ impl App {
                 }
             }
             KeyCode::Char('j') | KeyCode::Down if self.focused_panel == PanelFocus::Navigation => {
-                self.select_next_task_view();
+                match self.active_sidebar_tab {
+                    SidebarTab::Navigation => self.select_next_task_view(),
+                    SidebarTab::FiltersTags => {}
+                    SidebarTab::Projects => self.move_project_selection(1),
+                }
             }
             KeyCode::Char('k') | KeyCode::Up if self.focused_panel == PanelFocus::Navigation => {
-                self.select_previous_task_view();
+                match self.active_sidebar_tab {
+                    SidebarTab::Navigation => self.select_previous_task_view(),
+                    SidebarTab::FiltersTags => {}
+                    SidebarTab::Projects => self.move_project_selection(-1),
+                }
             }
             KeyCode::Home if self.focused_panel == PanelFocus::Navigation => {
-                self.set_active_task_view(TaskView::All);
+                match self.active_sidebar_tab {
+                    SidebarTab::Navigation => self.set_active_task_view(TaskView::All),
+                    SidebarTab::FiltersTags => {}
+                    SidebarTab::Projects => self.selected_project_id = None,
+                }
             }
             KeyCode::End if self.focused_panel == PanelFocus::Navigation => {
-                self.set_active_task_view(TaskView::Soon);
+                match self.active_sidebar_tab {
+                    SidebarTab::Navigation => self.set_active_task_view(TaskView::Soon),
+                    SidebarTab::FiltersTags => {}
+                    SidebarTab::Projects => {
+                        self.selected_project_id = self.project_tree_rows().last().and_then(|row| row.project_id)
+                    }
+                }
+            }
+            KeyCode::Char('C')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::Projects =>
+            {
+                self.open_create_project_popup();
+            }
+            KeyCode::Char('e')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::Projects =>
+            {
+                self.open_edit_project_popup();
+            }
+            KeyCode::Char('d')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::Projects =>
+            {
+                self.open_project_delete_confirmation();
+            }
+            KeyCode::Char('f')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::Projects =>
+            {
+                self.toggle_selected_project_favorite()?;
             }
             KeyCode::Char('j') | KeyCode::Down
                 if self.focused_panel == PanelFocus::RightPane
@@ -2659,6 +3718,7 @@ pub fn run(options: RunOptions) -> Result<()> {
     let (weekly_started_at, weekly_ended_at) = last_7_days_bounds(now);
     let screen_data = ScreenData {
         tasks: database.task_repository().list_all()?,
+        projects: database.project_repository().list_all()?,
         history_entries: database
             .pomodoro_repository()
             .list_day(started_at, ended_at)?,
@@ -2819,8 +3879,8 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 
     use crate::config::{AppConfig, GlyphMode, TaskSortOrder, TimerSettings};
-    use crate::domain::{TaskDue, TaskId, TaskStatus};
-    use crate::storage::{Database, TaskRepository};
+    use crate::domain::{ProjectColor, ProjectId, TaskDue, TaskId, TaskStatus};
+    use crate::storage::{Database, ProjectRepository, TaskRepository};
     use crate::task_nlp::parse_task_input;
     use crate::theme::ThemePalette;
 
@@ -2832,8 +3892,19 @@ mod tests {
 
     fn test_app() -> App {
         let config = AppConfig::default();
+        let database = Database::open_in_memory().expect("in-memory database should open");
         App::new(
-            ScreenData::default(),
+            ScreenData {
+                tasks: database
+                    .task_repository()
+                    .list_all()
+                    .expect("tasks should load"),
+                projects: database
+                    .project_repository()
+                    .list_all()
+                    .expect("projects should load"),
+                ..ScreenData::default()
+            },
             config,
             None,
             ThemePalette::load(
@@ -2842,7 +3913,7 @@ mod tests {
                 "catppuccin-mocha",
             )
             .expect("built-in theme should load"),
-            Database::open_in_memory().expect("in-memory database should open"),
+            database,
         )
     }
 
@@ -2881,7 +3952,7 @@ mod tests {
     #[test]
     fn app_switches_right_panel_tabs() {
         let mut app = test_app();
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
 
         app.handle_key(crossterm::event::KeyCode::Right)
@@ -2926,7 +3997,7 @@ mod tests {
     #[test]
     fn app_creates_and_edits_task_title_through_form_flow() {
         let mut app = test_app();
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -2965,7 +4036,7 @@ mod tests {
         let mut app = test_app();
         let tomorrow = app.today() + chrono::Days::new(1);
 
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3011,7 +4082,7 @@ mod tests {
     fn task_editor_can_clear_due() {
         let mut app = test_app();
 
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3043,7 +4114,7 @@ mod tests {
         let mut app = test_app();
         let today = app.today();
 
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3094,7 +4165,7 @@ mod tests {
             .due
             .expect("recurrence should parse");
 
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3128,8 +4199,9 @@ mod tests {
             task_id: TaskId(1),
             title_input: "Write tests".to_string(),
             title_cursor: "Write tests".len(),
-            description_input: String::new(),
-            description_cursor: 0,
+            project_input: "Inbox".to_string(),
+            project_cursor: "Inbox".len(),
+            project_id: ProjectId(1),
             due_date_input: "2026-04-13".to_string(),
             due_date_cursor: "2026-04-13".len(),
             due_time_input: "09:00".to_string(),
@@ -3157,7 +4229,7 @@ mod tests {
         let mut app = test_app();
         let expected_date = app.today() + chrono::Days::new(1);
 
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3300,13 +4372,15 @@ mod tests {
         let mut app = test_app();
         let today = app.today();
         let repository = app.database.task_repository();
+        let inbox_project_id = app.inbox_project_id();
 
         repository
-            .create("Inbox task", None, Local::now())
+            .create("Inbox task", inbox_project_id, None, Local::now())
             .expect("inbox task should create");
         repository
             .create(
                 "Today task",
+                inbox_project_id,
                 Some(&TaskDue {
                     date: today,
                     datetime: None,
@@ -3319,6 +4393,7 @@ mod tests {
         repository
             .create(
                 "Soon task",
+                inbox_project_id,
                 Some(&TaskDue {
                     date: today + chrono::Days::new(2),
                     datetime: None,
@@ -3360,18 +4435,61 @@ mod tests {
     }
 
     #[test]
+    fn selected_project_filters_visible_tasks_by_subtree() {
+        let mut app = test_app();
+        let parent = app
+            .database
+            .project_repository()
+            .create("Work", None, ProjectColor::Blue, false, Local::now())
+            .expect("parent project should create");
+        let child = app
+            .database
+            .project_repository()
+            .create(
+                "Client",
+                Some(parent.id),
+                ProjectColor::Teal,
+                false,
+                Local::now(),
+            )
+            .expect("child project should create");
+        let inbox_project_id = app.inbox_project_id();
+        let repository = app.database.task_repository();
+        repository
+            .create("Inbox task", inbox_project_id, None, Local::now())
+            .expect("inbox task should create");
+        repository
+            .create("Parent task", parent.id, None, Local::now())
+            .expect("parent task should create");
+        repository
+            .create("Child task", child.id, None, Local::now())
+            .expect("child task should create");
+
+        app.refresh_tasks().expect("tasks should refresh");
+        app.selected_project_id = Some(parent.id);
+
+        let titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["Child task", "Parent task"]);
+    }
+
+    #[test]
     fn task_list_hides_completed_tasks_by_default_and_can_toggle_them() {
         let mut app = test_app();
         let repository = app.database.task_repository();
+        let inbox_project_id = app.inbox_project_id();
         let now = Local::now();
         let created = repository
-            .create("Completed task", None, now)
+            .create("Completed task", inbox_project_id, None, now)
             .expect("task should create");
         repository
             .update_status(created.id, TaskStatus::Done, Some(now))
             .expect("status should update");
         app.refresh_tasks().expect("tasks should refresh");
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
 
         assert!(app.visible_tasks().is_empty());
@@ -3391,12 +4509,14 @@ mod tests {
     fn task_list_sorts_by_due_then_title_by_default() {
         let mut app = test_app();
         let repository = app.database.task_repository();
+        let inbox_project_id = app.inbox_project_id();
         let now = Local::now();
         let today = app.today();
 
         repository
             .create(
                 "Zulu",
+                inbox_project_id,
                 Some(&TaskDue {
                     date: today,
                     datetime: None,
@@ -3409,6 +4529,7 @@ mod tests {
         repository
             .create(
                 "Alpha",
+                inbox_project_id,
                 Some(&TaskDue {
                     date: today,
                     datetime: None,
@@ -3419,7 +4540,7 @@ mod tests {
             )
             .expect("task should create");
         repository
-            .create("Inbox", None, now)
+            .create("Inbox", inbox_project_id, None, now)
             .expect("task should create");
 
         app.refresh_tasks().expect("tasks should refresh");
@@ -3436,16 +4557,17 @@ mod tests {
     fn task_sort_popup_applies_selected_sort() {
         let mut app = test_app();
         let repository = app.database.task_repository();
+        let inbox_project_id = app.inbox_project_id();
         let now = Local::now();
 
         repository
-            .create("Bravo", None, now)
+            .create("Bravo", inbox_project_id, None, now)
             .expect("task should create");
         repository
-            .create("Alpha", None, now)
+            .create("Alpha", inbox_project_id, None, now)
             .expect("task should create");
         app.refresh_tasks().expect("tasks should refresh");
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
 
         app.handle_key(crossterm::event::KeyCode::Char('o'))
@@ -3469,7 +4591,7 @@ mod tests {
     #[test]
     fn app_requires_delete_confirmation() {
         let mut app = test_app();
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3499,7 +4621,7 @@ mod tests {
     fn deleted_task_stays_available_for_history_resolution() {
         let mut app = test_app();
         let now = Local::now();
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3522,7 +4644,7 @@ mod tests {
         )
         .expect("focus should void");
 
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('d'))
             .expect("delete dialog should open");
@@ -3540,7 +4662,7 @@ mod tests {
     fn app_toggles_selected_task_status() {
         let mut app = test_app();
         let now = Local::now();
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3568,7 +4690,7 @@ mod tests {
         let mut app = test_app();
         let now = Local::now();
 
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3617,7 +4739,7 @@ mod tests {
         let mut app = test_app();
         let now = Local::now();
 
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3655,7 +4777,7 @@ mod tests {
         let mut app = test_app();
         let now = Local::now();
 
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3696,7 +4818,7 @@ mod tests {
     #[test]
     fn app_toggles_selected_task_as_pomodoro_assignment() {
         let mut app = test_app();
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3722,7 +4844,7 @@ mod tests {
     #[test]
     fn task_details_follow_focused_panel_source() {
         let mut app = test_app();
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3744,7 +4866,7 @@ mod tests {
             .expect("focus should switch");
         assert!(app.task_details_task().is_none());
 
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('a'))
             .expect("assignment should toggle");
@@ -3764,7 +4886,7 @@ mod tests {
         let mut app = test_app();
         let now = Local::now();
 
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");
@@ -3800,7 +4922,7 @@ mod tests {
     fn assigned_task_is_recorded_with_focus_session() {
         let mut app = test_app();
         let now = Local::now();
-        app.handle_key(crossterm::event::KeyCode::Char('5'))
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
             .expect("focus should switch");
         app.handle_key(crossterm::event::KeyCode::Char('c'))
             .expect("popup should open");

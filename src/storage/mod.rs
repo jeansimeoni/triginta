@@ -1,20 +1,34 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
-    DayHistorySummary, HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task, TaskDue,
-    TaskId, TaskStatus, TaskUpdate,
+    DayHistorySummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate,
+    SessionEntry, SessionKind, SessionOutcome, Task, TaskDue, TaskId, TaskStatus, TaskUpdate,
 };
 
 // Keeping the schema as a string literal makes bootstrap simple for this early
 // vertical slice. `execute_batch` sends the whole script to SQLite at once,
 // which is similar to feeding a schema file to sqlite3 in a C program.
 const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    parent_project_id INTEGER,
+    color TEXT NOT NULL DEFAULT 'charcoal',
+    is_favorite INTEGER NOT NULL DEFAULT 0,
+    is_inbox INTEGER NOT NULL DEFAULT 0,
+    child_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    deleted_at TEXT,
+    FOREIGN KEY(parent_project_id) REFERENCES projects(id)
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER,
     title TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'todo',
     created_at TEXT NOT NULL,
@@ -23,7 +37,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     due_date TEXT,
     due_datetime TEXT,
     due_string TEXT,
-    due_is_recurring INTEGER NOT NULL DEFAULT 0
+    due_is_recurring INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(project_id) REFERENCES projects(id)
 );
 
 CREATE TABLE IF NOT EXISTS pomodoros (
@@ -58,7 +73,13 @@ CREATE TABLE IF NOT EXISTS app_metadata (
 // terms (`Task`, `PomodoroSession`) instead of raw SQL concepts.
 pub trait TaskRepository {
     fn list_all(&self) -> Result<Vec<Task>>;
-    fn create(&self, title: &str, due: Option<&TaskDue>, now: DateTime<Local>) -> Result<Task>;
+    fn create(
+        &self,
+        title: &str,
+        project_id: ProjectId,
+        due: Option<&TaskDue>,
+        now: DateTime<Local>,
+    ) -> Result<Task>;
     fn update(&self, task_id: TaskId, update: &TaskUpdate) -> Result<Task>;
     fn update_status(
         &self,
@@ -67,6 +88,21 @@ pub trait TaskRepository {
         completed_at: Option<DateTime<Local>>,
     ) -> Result<Task>;
     fn delete(&self, task_id: TaskId) -> Result<()>;
+}
+
+pub trait ProjectRepository {
+    fn list_all(&self) -> Result<Vec<Project>>;
+    fn inbox_project_id(&self) -> Result<ProjectId>;
+    fn create(
+        &self,
+        name: &str,
+        parent_project_id: Option<ProjectId>,
+        color: ProjectColor,
+        is_favorite: bool,
+        now: DateTime<Local>,
+    ) -> Result<Project>;
+    fn update(&self, project_id: ProjectId, update: &ProjectUpdate) -> Result<Project>;
+    fn delete(&self, project_id: ProjectId, now: DateTime<Local>) -> Result<()>;
 }
 
 pub trait PomodoroRepository {
@@ -138,6 +174,7 @@ impl Database {
             .execute_batch(SCHEMA)
             .context("failed to initialize database schema")?;
         self.ensure_tasks_column("deleted_at", "ALTER TABLE tasks ADD COLUMN deleted_at TEXT")?;
+        self.ensure_tasks_column("project_id", "ALTER TABLE tasks ADD COLUMN project_id INTEGER")?;
         self.ensure_tasks_column("due_date", "ALTER TABLE tasks ADD COLUMN due_date TEXT")?;
         self.ensure_tasks_column(
             "due_datetime",
@@ -154,6 +191,8 @@ impl Database {
                 params!["schema_version", "1"],
             )
             .context("failed to initialize app metadata")?;
+        let inbox_project_id = self.ensure_inbox_project()?;
+        self.assign_tasks_to_inbox(inbox_project_id)?;
         Ok(())
     }
 
@@ -191,6 +230,46 @@ impl Database {
             connection: &self.connection,
         }
     }
+
+    pub fn project_repository(&self) -> SqliteProjectRepository<'_> {
+        SqliteProjectRepository {
+            connection: &self.connection,
+        }
+    }
+
+    fn ensure_inbox_project(&self) -> Result<ProjectId> {
+        if let Some(project_id) = self
+            .connection
+            .query_row(
+                "SELECT id FROM projects WHERE is_inbox = 1 ORDER BY id LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("failed to load inbox project")?
+        {
+            return Ok(ProjectId(project_id));
+        }
+
+        self.connection
+            .execute(
+                "INSERT INTO projects(name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, deleted_at)
+                 VALUES (?1, NULL, ?2, 0, 1, 0, ?3, NULL)",
+                params!["Inbox", ProjectColor::Charcoal.as_str(), Local::now()],
+            )
+            .context("failed to create inbox project")?;
+        Ok(ProjectId(self.connection.last_insert_rowid()))
+    }
+
+    fn assign_tasks_to_inbox(&self, inbox_project_id: ProjectId) -> Result<()> {
+        self.connection
+            .execute(
+                "UPDATE tasks SET project_id = ?1 WHERE project_id IS NULL",
+                params![inbox_project_id.0],
+            )
+            .context("failed to assign tasks to inbox project")?;
+        Ok(())
+    }
 }
 
 pub struct SqliteTaskRepository<'a> {
@@ -203,7 +282,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         // closure. The closure is conceptually similar to a row-to-struct
         // callback in C, but its return type is checked by the compiler.
         let mut statement = self.connection.prepare(
-            "SELECT id, title, status, created_at, completed_at, deleted_at, due_date, due_datetime, due_string, due_is_recurring
+            "SELECT id, project_id, title, status, created_at, completed_at, deleted_at, due_date, due_datetime, due_string, due_is_recurring
              FROM tasks
              ORDER BY created_at DESC, id DESC",
         )?;
@@ -211,16 +290,17 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         let rows = statement.query_map([], |row| {
             Ok(Task {
                 id: TaskId(row.get(0)?),
-                title: row.get(1)?,
-                status: TaskStatus::from_db(row.get::<_, String>(2)?.as_str()),
-                created_at: row.get(3)?,
-                completed_at: row.get(4)?,
-                deleted_at: row.get(5)?,
+                project_id: ProjectId(row.get(1)?),
+                title: row.get(2)?,
+                status: TaskStatus::from_db(row.get::<_, String>(3)?.as_str()),
+                created_at: row.get(4)?,
+                completed_at: row.get(5)?,
+                deleted_at: row.get(6)?,
                 due: match (
-                    row.get::<_, Option<chrono::NaiveDate>>(6)?,
-                    row.get::<_, Option<chrono::NaiveDateTime>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<chrono::NaiveDate>>(7)?,
+                    row.get::<_, Option<chrono::NaiveDateTime>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, i64>(10)?,
                 ) {
                     (Some(date), datetime, Some(string), is_recurring) => Some(TaskDue {
                         date,
@@ -239,12 +319,19 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             .context("failed to load tasks")
     }
 
-    fn create(&self, title: &str, due: Option<&TaskDue>, now: DateTime<Local>) -> Result<Task> {
+    fn create(
+        &self,
+        title: &str,
+        project_id: ProjectId,
+        due: Option<&TaskDue>,
+        now: DateTime<Local>,
+    ) -> Result<Task> {
         self.connection
             .execute(
-                "INSERT INTO tasks(title, status, created_at, completed_at, due_date, due_datetime, due_string, due_is_recurring)
-                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7)",
+                "INSERT INTO tasks(project_id, title, status, created_at, completed_at, due_date, due_datetime, due_string, due_is_recurring)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8)",
                 params![
+                    project_id.0,
                     title,
                     TaskStatus::Todo.as_str(),
                     now,
@@ -266,10 +353,11 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         self.connection
             .execute(
                 "UPDATE tasks
-                 SET title = ?1, due_date = ?2, due_datetime = ?3, due_string = ?4, due_is_recurring = ?5
-                 WHERE id = ?6",
+                 SET title = ?1, project_id = ?2, due_date = ?3, due_datetime = ?4, due_string = ?5, due_is_recurring = ?6
+                 WHERE id = ?7",
                 params![
                     update.title,
+                    update.project_id.0,
                     update.due.as_ref().map(|due| due.date),
                     update.due.as_ref().and_then(|due| due.datetime),
                     update.due.as_ref().map(|due| due.string.clone()),
@@ -321,7 +409,7 @@ impl SqliteTaskRepository<'_> {
     fn load_task(&self, task_id: TaskId) -> Result<Option<Task>> {
         self.connection
             .query_row(
-                "SELECT id, title, status, created_at, completed_at
+                "SELECT id, project_id, title, status, created_at, completed_at
                  , deleted_at, due_date, due_datetime, due_string, due_is_recurring
                  FROM tasks
                  WHERE id = ?1",
@@ -329,16 +417,17 @@ impl SqliteTaskRepository<'_> {
                 |row| {
                     Ok(Task {
                         id: TaskId(row.get(0)?),
-                        title: row.get(1)?,
-                        status: TaskStatus::from_db(row.get::<_, String>(2)?.as_str()),
-                        created_at: row.get(3)?,
-                        completed_at: row.get(4)?,
-                        deleted_at: row.get(5)?,
+                        project_id: ProjectId(row.get(1)?),
+                        title: row.get(2)?,
+                        status: TaskStatus::from_db(row.get::<_, String>(3)?.as_str()),
+                        created_at: row.get(4)?,
+                        completed_at: row.get(5)?,
+                        deleted_at: row.get(6)?,
                         due: match (
-                            row.get::<_, Option<chrono::NaiveDate>>(6)?,
-                            row.get::<_, Option<chrono::NaiveDateTime>>(7)?,
-                            row.get::<_, Option<String>>(8)?,
-                            row.get::<_, i64>(9)?,
+                            row.get::<_, Option<chrono::NaiveDate>>(7)?,
+                            row.get::<_, Option<chrono::NaiveDateTime>>(8)?,
+                            row.get::<_, Option<String>>(9)?,
+                            row.get::<_, i64>(10)?,
                         ) {
                             (Some(date), datetime, Some(string), is_recurring) => Some(TaskDue {
                                 date,
@@ -353,6 +442,246 @@ impl SqliteTaskRepository<'_> {
             )
             .optional()
             .context("failed to load task")
+    }
+}
+
+pub struct SqliteProjectRepository<'a> {
+    connection: &'a Connection,
+}
+
+impl ProjectRepository for SqliteProjectRepository<'_> {
+    fn list_all(&self) -> Result<Vec<Project>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, deleted_at
+             FROM projects
+             ORDER BY is_inbox DESC, child_order ASC, created_at ASC, id ASC",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(Project {
+                id: ProjectId(row.get(0)?),
+                name: row.get(1)?,
+                parent_project_id: row.get::<_, Option<i64>>(2)?.map(ProjectId),
+                color: ProjectColor::from_db(row.get::<_, String>(3)?.as_str()),
+                is_favorite: row.get::<_, i64>(4)? != 0,
+                is_inbox: row.get::<_, i64>(5)? != 0,
+                child_order: row.get(6)?,
+                created_at: row.get(7)?,
+                deleted_at: row.get(8)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load projects")
+    }
+
+    fn inbox_project_id(&self) -> Result<ProjectId> {
+        let project_id = self
+            .connection
+            .query_row(
+                "SELECT id FROM projects WHERE is_inbox = 1 ORDER BY id LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("failed to load inbox project")?
+            .map(ProjectId)
+            .context("inbox project is missing")?;
+        Ok(project_id)
+    }
+
+    fn create(
+        &self,
+        name: &str,
+        parent_project_id: Option<ProjectId>,
+        color: ProjectColor,
+        is_favorite: bool,
+        now: DateTime<Local>,
+    ) -> Result<Project> {
+        self.validate_parent(None, parent_project_id)?;
+        let child_order = self.next_child_order(parent_project_id)?;
+        self.connection
+            .execute(
+                "INSERT INTO projects(name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, NULL)",
+                params![
+                    name,
+                    parent_project_id.map(|id| id.0),
+                    color.as_str(),
+                    if is_favorite { 1_i64 } else { 0_i64 },
+                    child_order,
+                    now,
+                ],
+            )
+            .context("failed to create project")?;
+        self.load_project(ProjectId(self.connection.last_insert_rowid()))?
+            .context("created project could not be reloaded")
+    }
+
+    fn update(&self, project_id: ProjectId, update: &ProjectUpdate) -> Result<Project> {
+        let current = self
+            .load_project(project_id)?
+            .context("project to update does not exist")?;
+        if current.is_inbox && update.parent_project_id.is_some() {
+            bail!("inbox project cannot have a parent");
+        }
+        self.validate_parent(Some(project_id), update.parent_project_id)?;
+        let child_order = if current.parent_project_id == update.parent_project_id {
+            current.child_order
+        } else {
+            self.next_child_order(update.parent_project_id)?
+        };
+
+        self.connection
+            .execute(
+                "UPDATE projects
+                 SET name = ?1, parent_project_id = ?2, color = ?3, is_favorite = ?4, child_order = ?5
+                 WHERE id = ?6",
+                params![
+                    update.name,
+                    update.parent_project_id.map(|id| id.0),
+                    update.color.as_str(),
+                    if update.is_favorite { 1_i64 } else { 0_i64 },
+                    child_order,
+                    project_id.0,
+                ],
+            )
+            .with_context(|| format!("failed to update project {}", project_id.0))?;
+
+        self.load_project(project_id)?
+            .context("updated project could not be reloaded")
+    }
+
+    fn delete(&self, project_id: ProjectId, now: DateTime<Local>) -> Result<()> {
+        let project = self
+            .load_project(project_id)?
+            .context("project to delete does not exist")?;
+        if project.is_inbox {
+            bail!("inbox project cannot be deleted");
+        }
+
+        self.connection
+            .execute(
+                "WITH RECURSIVE project_tree(id) AS (
+                     SELECT id FROM projects WHERE id = ?1
+                     UNION ALL
+                     SELECT projects.id
+                     FROM projects
+                     INNER JOIN project_tree ON projects.parent_project_id = project_tree.id
+                 )
+                 UPDATE projects
+                 SET deleted_at = ?2
+                 WHERE id IN (SELECT id FROM project_tree)",
+                params![project_id.0, now],
+            )
+            .with_context(|| format!("failed to soft-delete project {}", project_id.0))?;
+        self.connection
+            .execute(
+                "WITH RECURSIVE project_tree(id) AS (
+                     SELECT id FROM projects WHERE id = ?1
+                     UNION ALL
+                     SELECT projects.id
+                     FROM projects
+                     INNER JOIN project_tree ON projects.parent_project_id = project_tree.id
+                 )
+                 UPDATE tasks
+                 SET deleted_at = COALESCE(deleted_at, ?2)
+                 WHERE project_id IN (SELECT id FROM project_tree)",
+                params![project_id.0, now],
+            )
+            .with_context(|| format!("failed to soft-delete tasks for project {}", project_id.0))?;
+        Ok(())
+    }
+}
+
+impl SqliteProjectRepository<'_> {
+    fn load_project(&self, project_id: ProjectId) -> Result<Option<Project>> {
+        self.connection
+            .query_row(
+                "SELECT id, name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, deleted_at
+                 FROM projects
+                 WHERE id = ?1",
+                params![project_id.0],
+                |row| {
+                    Ok(Project {
+                        id: ProjectId(row.get(0)?),
+                        name: row.get(1)?,
+                        parent_project_id: row.get::<_, Option<i64>>(2)?.map(ProjectId),
+                        color: ProjectColor::from_db(row.get::<_, String>(3)?.as_str()),
+                        is_favorite: row.get::<_, i64>(4)? != 0,
+                        is_inbox: row.get::<_, i64>(5)? != 0,
+                        child_order: row.get(6)?,
+                        created_at: row.get(7)?,
+                        deleted_at: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load project")
+    }
+
+    fn next_child_order(&self, parent_project_id: Option<ProjectId>) -> Result<i64> {
+        let next = self
+            .connection
+            .query_row(
+                "SELECT COALESCE(MAX(child_order), -1) + 1
+                 FROM projects
+                 WHERE parent_project_id IS ?1 AND deleted_at IS NULL",
+                params![parent_project_id.map(|id| id.0)],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to calculate next project order")?;
+        Ok(next)
+    }
+
+    fn validate_parent(
+        &self,
+        project_id: Option<ProjectId>,
+        parent_project_id: Option<ProjectId>,
+    ) -> Result<()> {
+        let Some(parent_project_id) = parent_project_id else {
+            return Ok(());
+        };
+
+        let parent = self
+            .load_project(parent_project_id)?
+            .context("parent project does not exist")?;
+        if parent.deleted_at.is_some() {
+            bail!("parent project is deleted");
+        }
+        if parent.is_inbox {
+            bail!("inbox project cannot be nested");
+        }
+
+        if Some(parent_project_id) == project_id {
+            bail!("project cannot be its own parent");
+        }
+
+        let Some(project_id) = project_id else {
+            return Ok(());
+        };
+
+        let cycle = self
+            .connection
+            .query_row(
+                "WITH RECURSIVE ancestors(id) AS (
+                     SELECT id FROM projects WHERE id = ?1
+                     UNION ALL
+                     SELECT projects.parent_project_id
+                     FROM projects
+                     INNER JOIN ancestors ON projects.id = ancestors.id
+                     WHERE projects.parent_project_id IS NOT NULL
+                 )
+                 SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = ?2)",
+                params![parent_project_id.0, project_id.0],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to validate project ancestry")?;
+        if cycle != 0 {
+            bail!("project parent assignment creates a cycle");
+        }
+
+        Ok(())
     }
 }
 
@@ -562,9 +891,9 @@ mod tests {
     use anyhow::Result;
     use chrono::{Local, NaiveDate};
 
-    use crate::domain::{TaskDue, TaskStatus, TaskUpdate};
+    use crate::domain::{ProjectColor, ProjectUpdate, TaskDue, TaskStatus, TaskUpdate};
 
-    use super::{Database, PomodoroRepository, TaskRepository};
+    use super::{Database, PomodoroRepository, ProjectRepository, TaskRepository};
 
     #[test]
     fn in_memory_database_bootstraps_empty_state() -> Result<()> {
@@ -573,6 +902,7 @@ mod tests {
         // without the boilerplate of creating and deleting files yourself.
         let database = Database::open_in_memory()?;
         let tasks = database.task_repository().list_all()?;
+        let projects = database.project_repository().list_all()?;
         let now = Local::now();
         let sessions = database.pomodoro_repository().list_day(
             now - chrono::Duration::hours(1),
@@ -584,6 +914,8 @@ mod tests {
         )?;
 
         assert!(tasks.is_empty());
+        assert_eq!(projects.len(), 1);
+        assert!(projects[0].is_inbox);
         assert!(sessions.is_empty());
         assert_eq!(stats.total_sessions, 0);
         assert_eq!(stats.total_minutes, 0);
@@ -598,7 +930,8 @@ mod tests {
     fn task_repository_supports_basic_crud() -> Result<()> {
         let database = Database::open_in_memory()?;
         let repository = database.task_repository();
-        let created = repository.create("Write release notes", None, Local::now())?;
+        let inbox_project_id = database.project_repository().inbox_project_id()?;
+        let created = repository.create("Write release notes", inbox_project_id, None, Local::now())?;
 
         assert_eq!(created.title, "Write release notes");
         assert_eq!(created.status, TaskStatus::Todo);
@@ -610,6 +943,7 @@ mod tests {
             created.id,
             &TaskUpdate {
                 title: "Ship release notes".to_string(),
+                project_id: inbox_project_id,
                 due: None,
             },
         )?;
@@ -640,8 +974,10 @@ mod tests {
     fn task_repository_persists_due_fields() -> Result<()> {
         let database = Database::open_in_memory()?;
         let repository = database.task_repository();
+        let inbox_project_id = database.project_repository().inbox_project_id()?;
         let created = repository.create(
             "Ship release notes",
+            inbox_project_id,
             Some(&TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
                 datetime: None,
@@ -672,10 +1008,12 @@ mod tests {
     fn task_repository_persists_due_datetime() -> Result<()> {
         let database = Database::open_in_memory()?;
         let repository = database.task_repository();
+        let inbox_project_id = database.project_repository().inbox_project_id()?;
         let due_date = NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date");
         let due_datetime = due_date.and_hms_opt(15, 0, 0).expect("valid time");
         let created = repository.create(
             "Ship release notes",
+            inbox_project_id,
             Some(&TaskDue {
                 date: due_date,
                 datetime: Some(due_datetime),
@@ -702,7 +1040,8 @@ mod tests {
     fn task_repository_updates_due_fields_atomically() -> Result<()> {
         let database = Database::open_in_memory()?;
         let repository = database.task_repository();
-        let created = repository.create("Draft roadmap", None, Local::now())?;
+        let inbox_project_id = database.project_repository().inbox_project_id()?;
+        let created = repository.create("Draft roadmap", inbox_project_id, None, Local::now())?;
         let due_date = NaiveDate::from_ymd_opt(2026, 4, 15).expect("valid date");
         let due_datetime = due_date.and_hms_opt(9, 30, 0).expect("valid time");
 
@@ -710,6 +1049,7 @@ mod tests {
             created.id,
             &TaskUpdate {
                 title: "Draft quarterly roadmap".to_string(),
+                project_id: inbox_project_id,
                 due: Some(TaskDue {
                     date: due_date,
                     datetime: Some(due_datetime),
@@ -734,6 +1074,7 @@ mod tests {
             created.id,
             &TaskUpdate {
                 title: "Draft quarterly roadmap".to_string(),
+                project_id: inbox_project_id,
                 due: None,
             },
         )?;
@@ -741,6 +1082,64 @@ mod tests {
         assert_eq!(cleared.due, None);
         assert_eq!(cleared.status, TaskStatus::Todo);
         assert_eq!(cleared.completed_at, None);
+        Ok(())
+    }
+
+    #[test]
+    fn project_repository_supports_crud_and_subtree_delete() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let projects = database.project_repository();
+        let tasks = database.task_repository();
+
+        let parent = projects.create(
+            "Work",
+            None,
+            ProjectColor::Blue,
+            true,
+            Local::now(),
+        )?;
+        let child = projects.create(
+            "Client A",
+            Some(parent.id),
+            ProjectColor::Teal,
+            false,
+            Local::now(),
+        )?;
+        let task = tasks.create("Review brief", child.id, None, Local::now())?;
+
+        let updated = projects.update(
+            child.id,
+            &ProjectUpdate {
+                name: "Client Alpha".to_string(),
+                parent_project_id: Some(parent.id),
+                color: ProjectColor::Grape,
+                is_favorite: true,
+            },
+        )?;
+        assert_eq!(updated.name, "Client Alpha");
+        assert_eq!(updated.color, ProjectColor::Grape);
+        assert!(updated.is_favorite);
+
+        projects.delete(parent.id, Local::now())?;
+
+        let all_projects = projects.list_all()?;
+        let stored_parent = all_projects
+            .iter()
+            .find(|project| project.id == parent.id)
+            .expect("parent project should remain stored");
+        let stored_child = all_projects
+            .iter()
+            .find(|project| project.id == child.id)
+            .expect("child project should remain stored");
+        assert!(stored_parent.deleted_at.is_some());
+        assert!(stored_child.deleted_at.is_some());
+
+        let all_tasks = tasks.list_all()?;
+        let stored_task = all_tasks
+            .iter()
+            .find(|candidate| candidate.id == task.id)
+            .expect("task should remain stored");
+        assert!(stored_task.deleted_at.is_some());
         Ok(())
     }
 }
