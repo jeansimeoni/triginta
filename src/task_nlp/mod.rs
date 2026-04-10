@@ -1,4 +1,6 @@
-use chrono::{Datelike, Days, Months, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
+use chrono::{
+    DateTime, Datelike, Days, Local, Months, NaiveDate, NaiveDateTime, NaiveTime, Weekday,
+};
 
 use crate::domain::TaskDue;
 
@@ -32,9 +34,51 @@ pub fn parse_due_time_input(input: &str) -> Option<NaiveTime> {
     parse_time_token(input.trim())
 }
 
+pub fn next_recurring_due(current_due: &TaskDue, completed_at: DateTime<Local>) -> Option<TaskDue> {
+    if !current_due.is_recurring {
+        return None;
+    }
+
+    let current_instant = current_due.datetime.unwrap_or_else(|| {
+        current_due
+            .date
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight is valid")
+    });
+    let floor = current_instant.max(completed_at.naive_local());
+    let mut reference_date = current_due.date.checked_add_days(Days::new(1))?;
+
+    for _ in 0..366 {
+        let next_due = parse_due_input(current_due.string.as_str(), reference_date)?;
+        if !next_due.is_recurring {
+            return None;
+        }
+
+        let next_instant = next_due.datetime.unwrap_or_else(|| {
+            next_due
+                .date
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is valid")
+        });
+        if next_instant > floor {
+            return Some(next_due);
+        }
+
+        reference_date = next_due.date.checked_add_days(Days::new(1))?;
+    }
+
+    None
+}
+
 fn extract_due(input: &str, reference_date: NaiveDate) -> Option<((usize, usize), TaskDue)> {
     let lower = input.to_ascii_lowercase();
     let mut best: Option<((usize, usize), TaskDue)> = None;
+
+    for candidate in recurring_pattern_candidates(input, reference_date, lower.as_str()) {
+        if is_better_match(best.as_ref(), &candidate) {
+            best = Some(candidate);
+        }
+    }
 
     for candidate in phrase_candidates(reference_date) {
         update_best_match(input, lower.as_str(), &candidate, &mut best);
@@ -59,6 +103,22 @@ fn extract_due(input: &str, reference_date: NaiveDate) -> Option<((usize, usize)
     }
 
     best
+}
+
+fn recurring_pattern_candidates(
+    input: &str,
+    reference_date: NaiveDate,
+    lower: &str,
+) -> Vec<((usize, usize), TaskDue)> {
+    let mut matches = Vec::new();
+    matches.extend(weekday_range_candidates(input, reference_date, lower));
+    matches.extend(weekday_list_candidates(input, reference_date, lower));
+    matches.extend(monthly_ordinal_weekday_candidates(
+        input,
+        reference_date,
+        lower,
+    ));
+    matches
 }
 
 fn update_best_match(
@@ -121,15 +181,48 @@ fn phrase_candidates(reference_date: NaiveDate) -> Vec<(String, TaskDue)> {
             false,
         ),
         simple_due("every day", reference_date, true),
+        simple_due(
+            "every other day",
+            reference_date
+                .checked_add_days(Days::new(2))
+                .unwrap_or(reference_date),
+            true,
+        ),
         simple_due("daily", reference_date, true),
         simple_due("every week", reference_date, true),
+        simple_due(
+            "every other week",
+            reference_date
+                .checked_add_days(Days::new(14))
+                .unwrap_or(reference_date),
+            true,
+        ),
         simple_due("weekly", reference_date, true),
         simple_due("every month", reference_date, true),
+        simple_due(
+            "every other month",
+            reference_date
+                .checked_add_months(Months::new(2))
+                .unwrap_or(reference_date),
+            true,
+        ),
         simple_due("monthly", reference_date, true),
         simple_due("every year", reference_date, true),
+        simple_due(
+            "every other year",
+            reference_date
+                .checked_add_months(Months::new(24))
+                .unwrap_or(reference_date),
+            true,
+        ),
         simple_due("yearly", reference_date, true),
         simple_due(
             "every weekday",
+            next_weekday_or_same(reference_date, Weekday::Mon),
+            true,
+        ),
+        simple_due(
+            "every week day",
             next_weekday_or_same(reference_date, Weekday::Mon),
             true,
         ),
@@ -187,6 +280,26 @@ fn relative_candidates(
             && let Ok(amount) = words[index + 1].0.parse::<u64>()
             && index + 2 < words.len()
             && let Some(date) = recurring_relative_date(reference_date, amount, words[index + 2].0)
+        {
+            matches.push(with_time_suffix(
+                input,
+                words[index].1,
+                words[index + 2].2,
+                TaskDue {
+                    date,
+                    datetime: None,
+                    string: input[words[index].1..words[index + 2].2].trim().to_string(),
+                    is_recurring: true,
+                },
+            ));
+            index += 3;
+            continue;
+        }
+
+        if words[index].0 == "every"
+            && index + 2 < words.len()
+            && words[index + 1].0 == "other"
+            && let Some(date) = recurring_relative_date(reference_date, 2, words[index + 2].0)
         {
             matches.push(with_time_suffix(
                 input,
@@ -380,6 +493,165 @@ fn parse_meridiem_time(value: &str, is_pm: bool) -> Option<NaiveTime> {
     NaiveTime::from_hms_opt(normalized_hour, minute, 0)
 }
 
+fn weekday_range_candidates(
+    input: &str,
+    reference_date: NaiveDate,
+    lower: &str,
+) -> Vec<((usize, usize), TaskDue)> {
+    let words = words_with_positions(lower);
+    let mut matches = Vec::new();
+
+    for index in 0..words.len().saturating_sub(2) {
+        let mut start_index = index;
+        if words[index].0 == "every" {
+            start_index += 1;
+        }
+        if start_index + 2 >= words.len() {
+            continue;
+        }
+
+        let Some(start_weekday) = parse_weekday_word(words[start_index].0) else {
+            continue;
+        };
+        if !matches!(words[start_index + 1].0, "through" | "thru" | "to") {
+            continue;
+        }
+        let Some(end_weekday) = parse_weekday_word(words[start_index + 2].0) else {
+            continue;
+        };
+
+        let weekdays = weekday_range(start_weekday, end_weekday);
+        let due_date = next_matching_weekday(reference_date, weekdays.as_slice(), true);
+        let start = words[index].1;
+        let end = words[start_index + 2].2;
+        matches.push(with_time_suffix(
+            input,
+            start,
+            end,
+            TaskDue {
+                date: due_date,
+                datetime: None,
+                string: input[start..end].trim().to_string(),
+                is_recurring: true,
+            },
+        ));
+    }
+
+    matches
+}
+
+fn weekday_list_candidates(
+    input: &str,
+    reference_date: NaiveDate,
+    lower: &str,
+) -> Vec<((usize, usize), TaskDue)> {
+    let words = words_with_positions(lower);
+    let mut matches = Vec::new();
+
+    for index in 0..words.len() {
+        if words[index].0 != "every" {
+            continue;
+        }
+
+        let mut weekdays = Vec::new();
+        let mut cursor = index + 1;
+        let mut last_end = None;
+
+        while cursor < words.len() {
+            if let Some(weekday) = parse_weekday_word(words[cursor].0) {
+                if !weekdays.contains(&weekday) {
+                    weekdays.push(weekday);
+                }
+                last_end = Some(words[cursor].2);
+                cursor += 1;
+                continue;
+            }
+
+            if !weekdays.is_empty() && words[cursor].0 == "and" {
+                cursor += 1;
+                continue;
+            }
+
+            break;
+        }
+
+        if weekdays.len() < 2 {
+            continue;
+        }
+
+        let end = last_end.expect("weekday list has at least one weekday");
+        matches.push(with_time_suffix(
+            input,
+            words[index].1,
+            end,
+            TaskDue {
+                date: next_matching_weekday(reference_date, weekdays.as_slice(), true),
+                datetime: None,
+                string: input[words[index].1..end].trim().to_string(),
+                is_recurring: true,
+            },
+        ));
+    }
+
+    matches
+}
+
+fn monthly_ordinal_weekday_candidates(
+    input: &str,
+    reference_date: NaiveDate,
+    lower: &str,
+) -> Vec<((usize, usize), TaskDue)> {
+    let words = words_with_positions(lower);
+    let mut matches = Vec::new();
+
+    for index in 0..words.len() {
+        let start_index = if words[index].0 == "every" {
+            index + 1
+        } else {
+            index
+        };
+        if start_index + 5 >= words.len() {
+            continue;
+        }
+        if words[start_index].0 != "the" {
+            continue;
+        }
+
+        let Some(ordinal) = parse_ordinal_word(words[start_index + 1].0) else {
+            continue;
+        };
+        let Some(weekday) = parse_weekday_word(words[start_index + 2].0) else {
+            continue;
+        };
+        if words[start_index + 3].0 != "of"
+            || words[start_index + 4].0 != "the"
+            || words[start_index + 5].0 != "month"
+        {
+            continue;
+        }
+
+        let Some(due_date) = next_monthly_ordinal_weekday(reference_date, ordinal, weekday) else {
+            continue;
+        };
+
+        let start = words[index].1;
+        let end = words[start_index + 5].2;
+        matches.push(with_time_suffix(
+            input,
+            start,
+            end,
+            TaskDue {
+                date: due_date,
+                datetime: None,
+                string: input[start..end].trim().to_string(),
+                is_recurring: true,
+            },
+        ));
+    }
+
+    matches
+}
+
 fn weekday_candidates() -> [(&'static str, Weekday); 17] {
     [
         ("monday", Weekday::Mon),
@@ -400,6 +672,24 @@ fn weekday_candidates() -> [(&'static str, Weekday); 17] {
         ("sunday", Weekday::Sun),
         ("sun", Weekday::Sun),
     ]
+}
+
+fn parse_weekday_word(word: &str) -> Option<Weekday> {
+    weekday_candidates()
+        .iter()
+        .find(|(name, _)| *name == word)
+        .map(|(_, weekday)| *weekday)
+}
+
+fn parse_ordinal_word(word: &str) -> Option<u8> {
+    match word {
+        "first" => Some(1),
+        "second" => Some(2),
+        "third" => Some(3),
+        "fourth" => Some(4),
+        "fifth" => Some(5),
+        _ => None,
+    }
 }
 
 fn words_with_positions(input: &str) -> Vec<(&str, usize, usize)> {
@@ -503,6 +793,101 @@ fn next_weekday_or_same(reference_date: NaiveDate, weekday: Weekday) -> NaiveDat
         .unwrap_or(reference_date)
 }
 
+fn next_matching_weekday(
+    reference_date: NaiveDate,
+    weekdays: &[Weekday],
+    include_same: bool,
+) -> NaiveDate {
+    let mut best = None;
+
+    for weekday in weekdays {
+        let candidate = if include_same {
+            next_weekday_or_same(reference_date, *weekday)
+        } else {
+            next_weekday(reference_date, *weekday)
+        };
+
+        best = match best {
+            Some(current) if current <= candidate => Some(current),
+            _ => Some(candidate),
+        };
+    }
+
+    best.unwrap_or(reference_date)
+}
+
+fn weekday_range(start: Weekday, end: Weekday) -> Vec<Weekday> {
+    let mut weekdays = Vec::new();
+    let mut current = start.num_days_from_monday();
+    let end = end.num_days_from_monday();
+
+    loop {
+        weekdays.push(weekday_from_monday_index(current));
+        if current == end {
+            break;
+        }
+        current = (current + 1) % 7;
+    }
+
+    weekdays
+}
+
+fn weekday_from_monday_index(index: u32) -> Weekday {
+    match index % 7 {
+        0 => Weekday::Mon,
+        1 => Weekday::Tue,
+        2 => Weekday::Wed,
+        3 => Weekday::Thu,
+        4 => Weekday::Fri,
+        5 => Weekday::Sat,
+        _ => Weekday::Sun,
+    }
+}
+
+fn next_monthly_ordinal_weekday(
+    reference_date: NaiveDate,
+    ordinal: u8,
+    weekday: Weekday,
+) -> Option<NaiveDate> {
+    let this_month = monthly_ordinal_weekday(
+        reference_date.year(),
+        reference_date.month(),
+        ordinal,
+        weekday,
+    );
+    if let Some(this_month) = this_month
+        && this_month >= reference_date
+    {
+        return Some(this_month);
+    }
+
+    let next_month_date = reference_date.checked_add_months(Months::new(1))?;
+    monthly_ordinal_weekday(
+        next_month_date.year(),
+        next_month_date.month(),
+        ordinal,
+        weekday,
+    )
+}
+
+fn monthly_ordinal_weekday(
+    year: i32,
+    month: u32,
+    ordinal: u8,
+    weekday: Weekday,
+) -> Option<NaiveDate> {
+    let first_day = NaiveDate::from_ymd_opt(year, month, 1)?;
+    let offset = (weekday.num_days_from_monday() as i64
+        - first_day.weekday().num_days_from_monday() as i64)
+        .rem_euclid(7) as u64;
+    let first_match = first_day.checked_add_days(Days::new(offset))?;
+    first_match
+        .checked_add_days(Days::new(
+            (ordinal.saturating_sub(1) as u64).saturating_mul(7),
+        ))
+        .filter(|date| date.month() == month)
+}
+
 fn looks_like_iso_date(candidate: &str) -> bool {
     candidate.len() == 10
         && candidate.as_bytes()[4] == b'-'
@@ -601,11 +986,11 @@ fn remove_due_span(input: &str, span: (usize, usize)) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Days, NaiveDate};
+    use chrono::{Days, Local, NaiveDate, TimeZone};
 
     use crate::domain::TaskDue;
 
-    use super::parse_task_input;
+    use super::{next_recurring_due, parse_task_input};
 
     #[test]
     fn parses_tomorrow_due_phrase_and_cleans_title() {
@@ -728,6 +1113,97 @@ mod tests {
                 date: reference_date,
                 datetime: None,
                 string: "every day".to_string(),
+                is_recurring: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_every_other_day_as_recurring() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 9).expect("valid date");
+        let parsed = parse_task_input("Water plants every other day", reference_date);
+
+        assert_eq!(parsed.cleaned_title, "Water plants");
+        assert_eq!(
+            parsed.due,
+            Some(TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 11).expect("valid date"),
+                datetime: None,
+                string: "every other day".to_string(),
+                is_recurring: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_weekday_range_as_recurring() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date");
+        let parsed = parse_task_input("Exercise monday through thursday", reference_date);
+
+        assert_eq!(parsed.cleaned_title, "Exercise");
+        assert_eq!(
+            parsed.due,
+            Some(TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 13).expect("valid date"),
+                datetime: None,
+                string: "monday through thursday".to_string(),
+                is_recurring: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_multi_weekday_list_as_recurring() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 8).expect("valid date");
+        let parsed = parse_task_input(
+            "Office days every monday, tuesday and friday",
+            reference_date,
+        );
+
+        assert_eq!(parsed.cleaned_title, "Office days");
+        assert_eq!(
+            parsed.due,
+            Some(TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
+                datetime: None,
+                string: "every monday, tuesday and friday".to_string(),
+                is_recurring: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_week_day_spelling_as_weekday_recurrence() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 11).expect("valid date");
+        let parsed = parse_task_input("Standup every week day", reference_date);
+
+        assert_eq!(parsed.cleaned_title, "Standup");
+        assert_eq!(
+            parsed.due,
+            Some(TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 13).expect("valid date"),
+                datetime: None,
+                string: "every week day".to_string(),
+                is_recurring: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_monthly_ordinal_weekday_as_recurring() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date");
+        let parsed = parse_task_input(
+            "Review budget the third friday of the month",
+            reference_date,
+        );
+
+        assert_eq!(parsed.cleaned_title, "Review budget");
+        assert_eq!(
+            parsed.due,
+            Some(TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date"),
+                datetime: None,
+                string: "the third friday of the month".to_string(),
                 is_recurring: true,
             })
         );
@@ -903,6 +1379,74 @@ mod tests {
         assert_eq!(
             parsed.due.expect("due should parse").date,
             reference_date + Days::new(1)
+        );
+    }
+
+    #[test]
+    fn next_recurring_due_skips_past_overdue_instances() {
+        let current_due = TaskDue {
+            date: NaiveDate::from_ymd_opt(2026, 4, 1).expect("valid date"),
+            datetime: None,
+            string: "every day".to_string(),
+            is_recurring: true,
+        };
+
+        let next_due = next_recurring_due(
+            &current_due,
+            Local
+                .with_ymd_and_hms(2026, 4, 10, 12, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+        )
+        .expect("next due should resolve");
+
+        assert_eq!(
+            next_due,
+            TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 11).expect("valid date"),
+                datetime: None,
+                string: "every day".to_string(),
+                is_recurring: true,
+            }
+        );
+    }
+
+    #[test]
+    fn next_recurring_due_advances_past_current_instance_when_completed_early() {
+        let current_due = TaskDue {
+            date: NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date"),
+            datetime: Some(
+                NaiveDate::from_ymd_opt(2026, 4, 17)
+                    .expect("valid date")
+                    .and_hms_opt(9, 0, 0)
+                    .expect("valid time"),
+            ),
+            string: "every friday at 9am".to_string(),
+            is_recurring: true,
+        };
+
+        let next_due = next_recurring_due(
+            &current_due,
+            Local
+                .with_ymd_and_hms(2026, 4, 16, 18, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+        )
+        .expect("next due should resolve");
+
+        assert_eq!(
+            next_due,
+            TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 24).expect("valid date"),
+                datetime: Some(
+                    NaiveDate::from_ymd_opt(2026, 4, 24)
+                        .expect("valid date")
+                        .and_hms_opt(9, 0, 0)
+                        .expect("valid time"),
+                ),
+                string: "every friday at 9am".to_string(),
+                is_recurring: true,
+            }
         );
     }
 }
