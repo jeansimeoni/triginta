@@ -2202,6 +2202,29 @@ impl App {
         input.cursor = 0;
     }
 
+    fn move_input_cursor_left(input: &mut TaskInputState) {
+        if input.cursor == 0 {
+            return;
+        }
+        input.cursor = input.value[..input.cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+    }
+
+    fn move_input_cursor_right(input: &mut TaskInputState) {
+        if input.cursor >= input.value.len() {
+            return;
+        }
+        let next = input.value[input.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(offset, _)| input.cursor + offset)
+            .unwrap_or(input.value.len());
+        input.cursor = next;
+    }
+
     fn move_input_cursor_end(input: &mut TaskInputState) {
         input.cursor = input.value.len();
     }
@@ -2240,6 +2263,30 @@ impl App {
     fn move_editor_cursor_home(editor: &mut TaskEditorState) {
         let (_, cursor) = Self::editor_value_mut(editor);
         *cursor = 0;
+    }
+
+    fn move_editor_cursor_left(editor: &mut TaskEditorState) {
+        let (value, cursor) = Self::editor_value_mut(editor);
+        if *cursor == 0 {
+            return;
+        }
+        *cursor = value[..*cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+    }
+
+    fn move_editor_cursor_right(editor: &mut TaskEditorState) {
+        let (value, cursor) = Self::editor_value_mut(editor);
+        if *cursor >= value.len() {
+            return;
+        }
+        *cursor = value[*cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(offset, _)| *cursor + offset)
+            .unwrap_or(value.len());
     }
 
     fn move_editor_cursor_end(editor: &mut TaskEditorState) {
@@ -2875,6 +2922,14 @@ impl App {
                     Self::move_search_cursor_home(&mut search);
                     self.task_search = Some(search);
                 }
+                KeyCode::Left => {
+                    Self::move_search_cursor_left(&mut search);
+                    self.task_search = Some(search);
+                }
+                KeyCode::Right => {
+                    Self::move_search_cursor_right(&mut search);
+                    self.task_search = Some(search);
+                }
                 KeyCode::End => {
                     Self::move_search_cursor_end(&mut search);
                     self.task_search = Some(search);
@@ -2993,6 +3048,26 @@ impl App {
                 }
                 KeyCode::Home if editor.focused_field == ProjectEditorField::Name => {
                     editor.name_cursor = 0;
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::Left if editor.focused_field == ProjectEditorField::Name => {
+                    if editor.name_cursor > 0 {
+                        editor.name_cursor = editor.name_input[..editor.name_cursor]
+                            .char_indices()
+                            .last()
+                            .map(|(index, _)| index)
+                            .unwrap_or(0);
+                    }
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::Right if editor.focused_field == ProjectEditorField::Name => {
+                    if editor.name_cursor < editor.name_input.len() {
+                        editor.name_cursor = editor.name_input[editor.name_cursor..]
+                            .char_indices()
+                            .nth(1)
+                            .map(|(offset, _)| editor.name_cursor + offset)
+                            .unwrap_or(editor.name_input.len());
+                    }
                     self.project_editor = Some(editor);
                 }
                 KeyCode::End if editor.focused_field == ProjectEditorField::Name => {
@@ -3163,6 +3238,14 @@ impl App {
                     Self::move_editor_cursor_home(&mut editor);
                     self.task_editor = Some(editor);
                 }
+                KeyCode::Left => {
+                    Self::move_editor_cursor_left(&mut editor);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Right => {
+                    Self::move_editor_cursor_right(&mut editor);
+                    self.task_editor = Some(editor);
+                }
                 KeyCode::End => {
                     Self::move_editor_cursor_end(&mut editor);
                     self.task_editor = Some(editor);
@@ -3216,6 +3299,14 @@ impl App {
                 Self::move_input_cursor_home(&mut input);
                 self.task_input = Some(input);
             }
+            KeyCode::Left => {
+                Self::move_input_cursor_left(&mut input);
+                self.task_input = Some(input);
+            }
+            KeyCode::Right => {
+                Self::move_input_cursor_right(&mut input);
+                self.task_input = Some(input);
+            }
             KeyCode::End => {
                 Self::move_input_cursor_end(&mut input);
                 self.task_input = Some(input);
@@ -3234,6 +3325,28 @@ impl App {
 
     fn move_search_cursor_home(search: &mut TaskSearchState) {
         search.cursor = 0;
+    }
+
+    fn move_search_cursor_left(search: &mut TaskSearchState) {
+        if search.cursor == 0 {
+            return;
+        }
+        search.cursor = search.query[..search.cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+    }
+
+    fn move_search_cursor_right(search: &mut TaskSearchState) {
+        if search.cursor >= search.query.len() {
+            return;
+        }
+        search.cursor = search.query[search.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(offset, _)| search.cursor + offset)
+            .unwrap_or(search.query.len());
     }
 
     fn move_search_cursor_end(search: &mut TaskSearchState) {
