@@ -11,14 +11,17 @@ use ratatui::{Terminal, prelude::CrosstermBackend};
 use tracing::info;
 
 use crate::{
-    config::{AppConfig, AppPaths, GlyphMode, TimerSettings, init_tracing, load_app_config},
+    config::{
+        AppConfig, AppPaths, GlyphMode, TaskSortOrder, TimerSettings, init_tracing,
+        load_app_config, save_app_config,
+    },
     domain::{
         DayHistorySummary, HistoryStats, SessionEntry, SessionKind, SessionOutcome, Task, TaskId,
         TaskStatus, TaskUpdate,
     },
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
     storage::{Database, PomodoroRepository, TaskRepository},
-    task_nlp::{parse_due_input, parse_due_time_input, parse_task_input},
+    task_nlp::{next_recurring_due, parse_due_input, parse_due_time_input, parse_task_input},
     theme::ThemePalette,
     ui,
 };
@@ -470,6 +473,11 @@ struct TaskSearchState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TaskSortPopupState {
+    selected_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskSearchMode {
     TimerAssignment,
     HistoryAssignment(i64),
@@ -543,6 +551,19 @@ pub struct TaskSearchView {
     pub cursor: usize,
     pub selected_index: usize,
     pub results: Vec<TaskSearchResultView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSortOptionView {
+    pub label: &'static str,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSortPopupView {
+    pub title: &'static str,
+    pub selected_index: usize,
+    pub options: Vec<TaskSortOptionView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -663,6 +684,10 @@ const TASKS_SHORTCUTS: &[ShortcutTip] = &[
         keys: "Space/x",
         description: "toggle done",
     },
+    ShortcutTip {
+        keys: "o/f",
+        description: "sort/filter",
+    },
 ];
 
 const STATISTICS_SHORTCUTS: &[ShortcutTip] = &[ShortcutTip {
@@ -711,7 +736,7 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "open calendar",
     },
     ShortcutTip {
-        keys: "u",
+        keys: "F7",
         description: "clear due",
     },
 ];
@@ -750,6 +775,21 @@ const DELETE_CONFIRMATION_SHORTCUTS: &[ShortcutTip] = &[
     },
 ];
 
+const SORT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter",
+        description: "apply sort",
+    },
+    ShortcutTip {
+        keys: "Esc",
+        description: "cancel",
+    },
+    ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "move option",
+    },
+];
+
 // `App` owns the mutable runtime state for the TUI loop.
 // Compared with a C program, this is the central state struct you would pass
 // around to input/render functions, but here methods are attached directly to
@@ -757,6 +797,8 @@ const DELETE_CONFIRMATION_SHORTCUTS: &[ShortcutTip] = &[
 #[derive(Debug)]
 pub struct App {
     database: Database,
+    config: AppConfig,
+    config_paths: Option<AppPaths>,
     timer_settings: TimerSettings,
     active_right_panel_tab: RightPanelTab,
     active_history_panel_tab: HistoryPanelTab,
@@ -772,6 +814,7 @@ pub struct App {
     task_input: Option<TaskInputState>,
     task_editor: Option<TaskEditorState>,
     task_search: Option<TaskSearchState>,
+    task_sort_popup: Option<TaskSortPopupState>,
     delete_confirmation: Option<TaskId>,
     help_open: bool,
     help_scroll: usize,
@@ -783,14 +826,18 @@ pub struct App {
 impl App {
     pub fn new(
         screen_data: ScreenData,
-        glyph_mode: GlyphMode,
+        config: AppConfig,
+        config_paths: Option<AppPaths>,
         theme: ThemePalette,
-        timer_settings: TimerSettings,
         database: Database,
     ) -> Self {
+        let glyph_mode = config.ui.glyph_mode;
+        let timer_settings = config.timer.clone();
         let long_break_interval = timer_settings.long_break_interval;
         let mut app = Self {
             database,
+            config,
+            config_paths,
             timer_settings,
             active_right_panel_tab: RightPanelTab::Tasks,
             active_history_panel_tab: HistoryPanelTab::Today,
@@ -806,6 +853,7 @@ impl App {
             task_input: None,
             task_editor: None,
             task_search: None,
+            task_sort_popup: None,
             delete_confirmation: None,
             help_open: false,
             help_scroll: 0,
@@ -846,20 +894,22 @@ impl App {
     }
 
     pub fn visible_tasks(&self) -> Vec<&Task> {
-        self.screen_data
+        let mut tasks = self
+            .screen_data
             .tasks
             .iter()
-            .filter(|task| self.task_is_active(task) && self.task_matches_active_view(task))
-            .collect()
+            .filter(|task| self.task_is_visible(task))
+            .collect::<Vec<_>>();
+        tasks.sort_by(|left, right| self.compare_tasks(left, right));
+        tasks
     }
 
     pub fn selected_task(&self) -> Option<&Task> {
         self.selected_task_id.and_then(|task_id| {
-            self.screen_data.tasks.iter().find(|task| {
-                task.id == task_id
-                    && self.task_is_active(task)
-                    && self.task_matches_active_view(task)
-            })
+            self.screen_data
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id && self.task_is_visible(task))
         })
     }
 
@@ -954,6 +1004,29 @@ impl App {
         })
     }
 
+    pub fn task_sort_popup_view(&self) -> Option<TaskSortPopupView> {
+        let popup = self.task_sort_popup?;
+        Some(TaskSortPopupView {
+            title: "Sort Tasks",
+            selected_index: popup.selected_index,
+            options: TaskSortOrder::all()
+                .iter()
+                .map(|sort_order| TaskSortOptionView {
+                    label: sort_order.label(),
+                    is_active: *sort_order == self.config.ui.task_list_sort,
+                })
+                .collect(),
+        })
+    }
+
+    pub fn task_sort_order(&self) -> TaskSortOrder {
+        self.config.ui.task_list_sort
+    }
+
+    pub fn hides_completed_tasks(&self) -> bool {
+        self.config.ui.hide_completed_tasks
+    }
+
     pub fn screen_data(&self) -> &ScreenData {
         // Returning `&ScreenData` lends read-only access to the caller.
         // No copy is made, and the borrow checker ensures the reference cannot
@@ -994,6 +1067,9 @@ impl App {
     }
 
     pub fn focused_panel_shortcuts(&self) -> &'static [ShortcutTip] {
+        if self.task_sort_popup.is_some() {
+            return SORT_POPUP_SHORTCUTS;
+        }
         if self.task_editor.is_some() {
             return EDITOR_POPUP_SHORTCUTS;
         }
@@ -1062,6 +1138,12 @@ impl App {
                 tips: SEARCH_POPUP_SHORTCUTS,
             });
         }
+        if self.task_sort_popup.is_some() {
+            sections.push(ShortcutSection {
+                title: "Task Sort Popup",
+                tips: SORT_POPUP_SHORTCUTS,
+            });
+        }
         if self.delete_confirmation.is_some() {
             sections.push(ShortcutSection {
                 title: "Delete Confirmation",
@@ -1117,14 +1199,15 @@ impl App {
     }
 
     fn editor_due_preview(&self, editor: &TaskEditorState) -> Option<TaskDuePreviewView> {
-        Self::build_due_from_editor(editor, self.today()).ok().flatten().map(|due| {
-            TaskDuePreviewView {
+        Self::build_due_from_editor(editor, self.today())
+            .ok()
+            .flatten()
+            .map(|due| TaskDuePreviewView {
                 date: due.date,
                 datetime: due.datetime,
                 string: due.string,
                 is_recurring: due.is_recurring,
-            }
-        })
+            })
     }
 
     fn build_due_from_editor(
@@ -1179,7 +1262,11 @@ impl App {
         } else if !recurrence_text.is_empty() {
             recurrence_text.to_string()
         } else if let Some(datetime) = datetime {
-            format!("{} at {}", date.format("%Y-%m-%d"), datetime.format("%H:%M"))
+            format!(
+                "{} at {}",
+                date.format("%Y-%m-%d"),
+                datetime.format("%H:%M")
+            )
         } else {
             date.format("%Y-%m-%d").to_string()
         };
@@ -1230,11 +1317,86 @@ impl App {
         task.deleted_at.is_none()
     }
 
+    fn task_is_visible(&self, task: &Task) -> bool {
+        self.task_is_active(task)
+            && self.task_matches_active_view(task)
+            && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
+    }
+
+    fn compare_tasks(&self, left: &Task, right: &Task) -> std::cmp::Ordering {
+        match self.config.ui.task_list_sort {
+            TaskSortOrder::DueAsc => self
+                .compare_task_due(left, right, false)
+                .then_with(|| self.compare_task_title(left, right))
+                .then_with(|| right.created_at.cmp(&left.created_at))
+                .then_with(|| right.id.0.cmp(&left.id.0)),
+            TaskSortOrder::DueDesc => self
+                .compare_task_due(left, right, true)
+                .then_with(|| self.compare_task_title(left, right))
+                .then_with(|| right.created_at.cmp(&left.created_at))
+                .then_with(|| right.id.0.cmp(&left.id.0)),
+            TaskSortOrder::TitleAsc => self
+                .compare_task_title(left, right)
+                .then_with(|| right.created_at.cmp(&left.created_at))
+                .then_with(|| right.id.0.cmp(&left.id.0)),
+            TaskSortOrder::TitleDesc => self
+                .compare_task_title(right, left)
+                .then_with(|| right.created_at.cmp(&left.created_at))
+                .then_with(|| right.id.0.cmp(&left.id.0)),
+            TaskSortOrder::CreatedNewest => right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| self.compare_task_title(left, right))
+                .then_with(|| right.id.0.cmp(&left.id.0)),
+            TaskSortOrder::CreatedOldest => left
+                .created_at
+                .cmp(&right.created_at)
+                .then_with(|| self.compare_task_title(left, right))
+                .then_with(|| left.id.0.cmp(&right.id.0)),
+        }
+    }
+
+    fn compare_task_due(&self, left: &Task, right: &Task, descending: bool) -> std::cmp::Ordering {
+        match (&left.due, &right.due) {
+            (Some(left_due), Some(right_due)) => {
+                let left_key = (left_due.date, left_due.datetime);
+                let right_key = (right_due.date, right_due.datetime);
+                if descending {
+                    right_key.cmp(&left_key)
+                } else {
+                    left_key.cmp(&right_key)
+                }
+            }
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    }
+
+    fn compare_task_title(&self, left: &Task, right: &Task) -> std::cmp::Ordering {
+        left.title
+            .to_lowercase()
+            .cmp(&right.title.to_lowercase())
+            .then_with(|| left.title.cmp(&right.title))
+    }
+
+    fn has_existing_recurring_successor(
+        &self,
+        original_task_id: TaskId,
+        title: &str,
+        due: &crate::domain::TaskDue,
+    ) -> bool {
+        self.screen_data.tasks.iter().any(|task| {
+            task.id != original_task_id
+                && task.deleted_at.is_none()
+                && task.title == title
+                && task.due.as_ref() == Some(due)
+        })
+    }
+
     fn visible_task_ids(&self) -> Vec<TaskId> {
-        self.screen_data
-            .tasks
-            .iter()
-            .filter(|task| self.task_is_active(task) && self.task_matches_active_view(task))
+        self.visible_tasks()
+            .into_iter()
             .map(|task| task.id)
             .collect()
     }
@@ -1270,9 +1432,38 @@ impl App {
         Ok(())
     }
 
+    fn persist_ui_preferences(&self) -> Result<()> {
+        if let Some(paths) = &self.config_paths {
+            save_app_config(paths, &self.config)?;
+        }
+        Ok(())
+    }
+
     fn set_active_task_view(&mut self, view: TaskView) {
         self.active_task_view = view;
         self.sync_task_selection();
+    }
+
+    fn open_task_sort_popup(&mut self) {
+        let selected_index = TaskSortOrder::all()
+            .iter()
+            .position(|sort_order| *sort_order == self.config.ui.task_list_sort)
+            .unwrap_or(0);
+        self.task_sort_popup = Some(TaskSortPopupState { selected_index });
+    }
+
+    fn toggle_hide_completed_tasks(&mut self) -> Result<()> {
+        self.config.ui.hide_completed_tasks = !self.config.ui.hide_completed_tasks;
+        self.persist_ui_preferences()?;
+        self.sync_task_selection();
+        Ok(())
+    }
+
+    fn apply_task_sort_order(&mut self, sort_order: TaskSortOrder) -> Result<()> {
+        self.config.ui.task_list_sort = sort_order;
+        self.persist_ui_preferences()?;
+        self.sync_task_selection();
+        Ok(())
     }
 
     fn select_next_task_view(&mut self) {
@@ -1339,12 +1530,7 @@ impl App {
                     due.string.clone(),
                 )
             } else {
-                (
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                )
+                (String::new(), String::new(), String::new(), String::new())
             };
 
         let due_date_cursor = due_date_input.len();
@@ -1400,9 +1586,10 @@ impl App {
     fn editor_value_mut(editor: &mut TaskEditorState) -> (&mut String, &mut usize) {
         match editor.focused_field {
             TaskEditorField::Title => (&mut editor.title_input, &mut editor.title_cursor),
-            TaskEditorField::Description => {
-                (&mut editor.description_input, &mut editor.description_cursor)
-            }
+            TaskEditorField::Description => (
+                &mut editor.description_input,
+                &mut editor.description_cursor,
+            ),
             TaskEditorField::DueDate => (&mut editor.due_date_input, &mut editor.due_date_cursor),
             TaskEditorField::DueTime => (&mut editor.due_time_input, &mut editor.due_time_cursor),
             TaskEditorField::Recurrence => {
@@ -1421,7 +1608,11 @@ impl App {
         *cursor = value.len();
     }
 
-    fn insert_editor_char(editor: &mut TaskEditorState, character: char, reference_date: NaiveDate) {
+    fn insert_editor_char(
+        editor: &mut TaskEditorState,
+        character: char,
+        reference_date: NaiveDate,
+    ) {
         let (value, cursor) = Self::editor_value_mut(editor);
         value.insert(*cursor, character);
         *cursor += character.len_utf8();
@@ -1493,10 +1684,7 @@ impl App {
             return;
         }
 
-        let parsed = parse_task_input(
-            format!("Placeholder {recurrence}").as_str(),
-            reference_date,
-        );
+        let parsed = parse_task_input(format!("Placeholder {recurrence}").as_str(), reference_date);
         let Some(due) = parsed.due else {
             return;
         };
@@ -1506,11 +1694,10 @@ impl App {
 
         editor.due_date_input = due.date.format("%Y-%m-%d").to_string();
         editor.due_natural = recurrence.to_string();
-        if editor.due_time_input.trim().is_empty() {
-            editor.due_time_input = due
-                .datetime
-                .map(|datetime| datetime.format("%H:%M").to_string())
-                .unwrap_or_default();
+        if let Some(datetime) = due.datetime {
+            editor.due_time_input = datetime.format("%H:%M").to_string();
+        } else if editor.due_time_input.trim().is_empty() {
+            editor.due_time_input.clear();
         }
     }
 
@@ -1572,7 +1759,11 @@ impl App {
         }
     }
 
-    fn submit_task_editor(&mut self, editor: TaskEditorState, now: DateTime<Local>) -> Result<bool> {
+    fn submit_task_editor(
+        &mut self,
+        editor: TaskEditorState,
+        now: DateTime<Local>,
+    ) -> Result<bool> {
         let parsed = parse_task_input(editor.title_input.as_str(), now.date_naive());
         if parsed.cleaned_title.is_empty() {
             self.task_editor = Some(editor);
@@ -1647,8 +1838,79 @@ impl App {
         self.database
             .task_repository()
             .update_status(task.id, next_status, completed_at)?;
+
+        let next_recurring_task = if next_status == TaskStatus::Done {
+            match task.due.as_ref() {
+                Some(due) if due.is_recurring => match next_recurring_due(due, now) {
+                    Some(next_due) => {
+                        if self.has_existing_recurring_successor(
+                            task.id,
+                            task.title.as_str(),
+                            &next_due,
+                        ) {
+                            info!(
+                                task_id = task.id.0,
+                                title = task.title.as_str(),
+                                next_due = next_due.string.as_str(),
+                                next_due_date = %next_due.date,
+                                "completed recurring task; existing next occurrence already present"
+                            );
+                            None
+                        } else {
+                            let next_task = self.database.task_repository().create(
+                                task.title.as_str(),
+                                Some(&next_due),
+                                now,
+                            )?;
+                            info!(
+                                task_id = task.id.0,
+                                title = task.title.as_str(),
+                                next_task_id = next_task.id.0,
+                                next_due = next_due.string.as_str(),
+                                next_due_date = %next_due.date,
+                                "completed recurring task and created next occurrence"
+                            );
+                            Some(next_task)
+                        }
+                    }
+                    None => {
+                        info!(
+                            task_id = task.id.0,
+                            title = task.title.as_str(),
+                            recurrence = due.string.as_str(),
+                            "completed recurring task but could not resolve next occurrence"
+                        );
+                        None
+                    }
+                },
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         self.refresh_tasks()?;
-        self.selected_task_id = Some(task.id);
+        if let Some(next_task) = next_recurring_task {
+            if self.active_focus_task_id == Some(task.id) {
+                self.active_focus_task_id = Some(next_task.id);
+            }
+            let next_task_visible = self
+                .screen_data
+                .tasks
+                .iter()
+                .find(|candidate| candidate.id == next_task.id)
+                .map(|candidate| {
+                    self.task_is_active(candidate) && self.task_matches_active_view(candidate)
+                })
+                .unwrap_or(false);
+            self.selected_task_id = Some(if next_task_visible {
+                next_task.id
+            } else {
+                task.id
+            });
+        } else {
+            self.selected_task_id = Some(task.id);
+        }
         Ok(())
     }
 
@@ -1699,6 +1961,32 @@ impl App {
     }
 
     fn handle_task_overlay_key(&mut self, code: KeyCode, now: DateTime<Local>) -> Result<bool> {
+        if let Some(mut popup) = self.task_sort_popup.take() {
+            match code {
+                KeyCode::Esc | KeyCode::Char('o') => {}
+                KeyCode::Enter => {
+                    if let Some(sort_order) =
+                        TaskSortOrder::all().get(popup.selected_index).copied()
+                    {
+                        self.apply_task_sort_order(sort_order)?;
+                    }
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let last_index = TaskSortOrder::all().len().saturating_sub(1);
+                    popup.selected_index = (popup.selected_index + 1).min(last_index);
+                    self.task_sort_popup = Some(popup);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    popup.selected_index = popup.selected_index.saturating_sub(1);
+                    self.task_sort_popup = Some(popup);
+                }
+                _ => {
+                    self.task_sort_popup = Some(popup);
+                }
+            }
+            return Ok(true);
+        }
+
         if let Some(mut search) = self.task_search.take() {
             match code {
                 KeyCode::Esc => {}
@@ -1839,7 +2127,7 @@ impl App {
                     Self::focus_editor_field(&mut editor, TaskEditorField::Recurrence);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::Char('u') => {
+                KeyCode::F(7) => {
                     Self::clear_editor_due(&mut editor);
                     self.task_editor = Some(editor);
                 }
@@ -2094,6 +2382,18 @@ impl App {
                     && self.active_right_panel_tab == RightPanelTab::Tasks =>
             {
                 self.toggle_selected_task_assignment();
+            }
+            KeyCode::Char('o')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.open_task_sort_popup();
+            }
+            KeyCode::Char('f')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.toggle_hide_completed_tasks()?;
             }
             KeyCode::Char('a') if self.focused_panel == PanelFocus::Timer => {
                 self.open_timer_task_search();
@@ -2356,13 +2656,7 @@ pub fn run(options: RunOptions) -> Result<()> {
         "integration boundary initialized"
     );
 
-    let mut app = App::new(
-        screen_data,
-        config.ui.glyph_mode,
-        theme,
-        config.timer,
-        database,
-    );
+    let mut app = App::new(screen_data, config, Some(paths.clone()), theme, database);
     let mut terminal = setup_terminal()?;
 
     let result = run_event_loop(&mut terminal, &mut app);
@@ -2498,31 +2792,32 @@ fn fuzzy_matches(query: &str, candidate: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration as ChronoDuration, Local};
+    use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 
-    use crate::config::{AppConfig, GlyphMode, TimerSettings};
-    use crate::domain::{TaskDue, TaskStatus};
+    use crate::config::{AppConfig, GlyphMode, TaskSortOrder, TimerSettings};
+    use crate::domain::{TaskDue, TaskId, TaskStatus};
     use crate::storage::{Database, TaskRepository};
     use crate::task_nlp::parse_task_input;
     use crate::theme::ThemePalette;
 
     use super::{
         App, CycleEntryState, HistoryPanelTab, PanelFocus, RightPanelTab, RunOptions, ScreenData,
-        TaskView, TimerPhase, TimerRunState, apply_debug_overrides, chrono_duration,
-        duration_to_stored_minutes,
+        TaskEditorField, TaskEditorState, TaskView, TimerPhase, TimerRunState,
+        apply_debug_overrides, chrono_duration, duration_to_stored_minutes,
     };
 
     fn test_app() -> App {
+        let config = AppConfig::default();
         App::new(
             ScreenData::default(),
-            GlyphMode::NerdFonts,
+            config,
+            None,
             ThemePalette::load(
                 &crate::config::AppPaths::from_data_dir(std::env::temp_dir())
                     .expect("paths should resolve"),
                 "catppuccin-mocha",
             )
             .expect("built-in theme should load"),
-            TimerSettings::default(),
             Database::open_in_memory().expect("in-memory database should open"),
         )
     }
@@ -2702,11 +2997,16 @@ mod tests {
         }
         app.handle_key(crossterm::event::KeyCode::Enter)
             .expect("task should be created");
-        assert!(app.selected_task().expect("task should exist").due.is_some());
+        assert!(
+            app.selected_task()
+                .expect("task should exist")
+                .due
+                .is_some()
+        );
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::Char('u'))
+        app.handle_key(crossterm::event::KeyCode::F(7))
             .expect("clear due should succeed");
         app.handle_key(crossterm::event::KeyCode::Enter)
             .expect("edit should submit");
@@ -2736,11 +3036,12 @@ mod tests {
             .expect("focus should switch to due date");
         app.handle_key(crossterm::event::KeyCode::F(6))
             .expect("calendar should open");
-        assert!(app
-            .task_editor_view()
-            .expect("editor should be visible")
-            .calendar
-            .is_some());
+        assert!(
+            app.task_editor_view()
+                .expect("editor should be visible")
+                .calendar
+                .is_some()
+        );
 
         app.handle_key(crossterm::event::KeyCode::Right)
             .expect("calendar should move selection");
@@ -2791,7 +3092,40 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Enter)
             .expect("edit should submit");
 
-        assert_eq!(app.selected_task().expect("task should exist").due, Some(expected_due));
+        assert_eq!(
+            app.selected_task().expect("task should exist").due,
+            Some(expected_due)
+        );
+    }
+
+    #[test]
+    fn task_editor_recurrence_phrase_updates_due_time() {
+        let mut editor = TaskEditorState {
+            task_id: TaskId(1),
+            title_input: "Write tests".to_string(),
+            title_cursor: "Write tests".len(),
+            description_input: String::new(),
+            description_cursor: 0,
+            due_date_input: "2026-04-13".to_string(),
+            due_date_cursor: "2026-04-13".len(),
+            due_time_input: "09:00".to_string(),
+            due_time_cursor: "09:00".len(),
+            recurrence_input: "every tuesday at 10am".to_string(),
+            recurrence_cursor: "every tuesday at 10am".len(),
+            due_natural: "every monday at 9am".to_string(),
+            due_from_title: false,
+            focused_field: TaskEditorField::Recurrence,
+            calendar: None,
+        };
+
+        App::sync_editor_due_from_recurrence(
+            &mut editor,
+            NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
+        );
+
+        assert_eq!(editor.due_date_input, "2026-04-14");
+        assert_eq!(editor.due_time_input, "10:00");
+        assert_eq!(editor.due_natural, "every tuesday at 10am");
     }
 
     #[test]
@@ -2815,8 +3149,7 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::F(3))
             .expect("focus should switch to due date");
         for _ in 0.."YYYY-MM-DD".len() {
-            app.handle_key(crossterm::event::KeyCode::Backspace)
-                .ok();
+            app.handle_key(crossterm::event::KeyCode::Backspace).ok();
         }
         for character in "tomorrow".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))
@@ -3003,6 +3336,113 @@ mod tests {
     }
 
     #[test]
+    fn task_list_hides_completed_tasks_by_default_and_can_toggle_them() {
+        let mut app = test_app();
+        let repository = app.database.task_repository();
+        let now = Local::now();
+        let created = repository
+            .create("Completed task", None, now)
+            .expect("task should create");
+        repository
+            .update_status(created.id, TaskStatus::Done, Some(now))
+            .expect("status should update");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+
+        assert!(app.visible_tasks().is_empty());
+
+        app.handle_key(crossterm::event::KeyCode::Char('f'))
+            .expect("filter should toggle");
+
+        let titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["Completed task"]);
+    }
+
+    #[test]
+    fn task_list_sorts_by_due_then_title_by_default() {
+        let mut app = test_app();
+        let repository = app.database.task_repository();
+        let now = Local::now();
+        let today = app.today();
+
+        repository
+            .create(
+                "Zulu",
+                Some(&TaskDue {
+                    date: today,
+                    datetime: None,
+                    string: "today".to_string(),
+                    is_recurring: false,
+                }),
+                now,
+            )
+            .expect("task should create");
+        repository
+            .create(
+                "Alpha",
+                Some(&TaskDue {
+                    date: today,
+                    datetime: None,
+                    string: "today".to_string(),
+                    is_recurring: false,
+                }),
+                now,
+            )
+            .expect("task should create");
+        repository
+            .create("Inbox", None, now)
+            .expect("task should create");
+
+        app.refresh_tasks().expect("tasks should refresh");
+
+        let titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["Alpha", "Zulu", "Inbox"]);
+    }
+
+    #[test]
+    fn task_sort_popup_applies_selected_sort() {
+        let mut app = test_app();
+        let repository = app.database.task_repository();
+        let now = Local::now();
+
+        repository
+            .create("Bravo", None, now)
+            .expect("task should create");
+        repository
+            .create("Alpha", None, now)
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+
+        app.handle_key(crossterm::event::KeyCode::Char('o'))
+            .expect("sort popup should open");
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("popup selection should move");
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("popup selection should move");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("sort should apply");
+
+        assert_eq!(app.task_sort_order(), TaskSortOrder::TitleAsc);
+        let titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["Alpha", "Bravo"]);
+    }
+
+    #[test]
     fn app_requires_delete_confirmation() {
         let mut app = test_app();
         app.handle_key(crossterm::event::KeyCode::Char('5'))
@@ -3090,10 +3530,143 @@ mod tests {
         app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
             .expect("status should toggle");
         assert_eq!(app.screen_data.tasks[0].status, TaskStatus::Done);
+        assert!(app.selected_task().is_none());
 
+        app.handle_key(crossterm::event::KeyCode::Char('f'))
+            .expect("filter should toggle");
         app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
             .expect("status should toggle");
         assert_eq!(app.screen_data.tasks[0].status, TaskStatus::Todo);
+    }
+
+    #[test]
+    fn app_completes_recurring_task_and_creates_next_occurrence() {
+        let mut app = test_app();
+        let now = Local::now();
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Review metrics every day at 9am".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        let original_task_id = app.selected_task().expect("task should exist").id;
+        let original_due = app
+            .selected_task()
+            .expect("task should exist")
+            .due
+            .clone()
+            .expect("due should exist");
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+            .expect("status should toggle");
+
+        assert_eq!(app.screen_data.tasks.len(), 2);
+
+        let completed_task = app
+            .screen_data
+            .tasks
+            .iter()
+            .find(|task| task.id == original_task_id)
+            .expect("completed task should still exist");
+        assert_eq!(completed_task.status, TaskStatus::Done);
+
+        let next_task = app
+            .screen_data
+            .tasks
+            .iter()
+            .find(|task| task.id != original_task_id)
+            .expect("next recurring task should exist");
+        assert_eq!(next_task.title, "Review metrics");
+        assert_eq!(next_task.status, TaskStatus::Todo);
+        assert!(next_task.due.as_ref().expect("next due should exist").date > original_due.date);
+        assert_eq!(app.selected_task_id, Some(next_task.id));
+    }
+
+    #[test]
+    fn app_does_not_create_duplicate_recurring_successor() {
+        let mut app = test_app();
+        let now = Local::now();
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Review metrics every day at 9am".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        let original_task_id = app.selected_task().expect("task should exist").id;
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+            .expect("status should toggle");
+        assert_eq!(app.screen_data.tasks.len(), 2);
+
+        app.selected_task_id = Some(original_task_id);
+        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+            .expect("status should toggle back");
+        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+            .expect("status should toggle again");
+
+        assert_eq!(app.screen_data.tasks.len(), 2);
+        let successor_count = app
+            .screen_data
+            .tasks
+            .iter()
+            .filter(|task| task.id != original_task_id && task.deleted_at.is_none())
+            .count();
+        assert_eq!(successor_count, 1);
+    }
+
+    #[test]
+    fn app_completes_editor_created_daily_recurring_task() {
+        let mut app = test_app();
+        let now = Local::now();
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Get this done".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::F(5))
+            .expect("focus should switch to recurrence");
+        for character in "every day".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("edit should submit");
+
+        let original_task_id = app.selected_task().expect("task should exist").id;
+        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+            .expect("status should toggle");
+
+        assert_eq!(app.screen_data.tasks.len(), 2);
+        assert!(
+            app.screen_data
+                .tasks
+                .iter()
+                .any(|task| task.id != original_task_id
+                    && task.title == "Get this done"
+                    && task.status == TaskStatus::Todo
+                    && task.due.as_ref().is_some_and(|due| due.is_recurring))
+        );
     }
 
     #[test]

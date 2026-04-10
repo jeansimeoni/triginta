@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use directories::ProjectDirs;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing_appender::non_blocking::WorkerGuard;
 
 #[derive(Debug, Clone)]
@@ -84,12 +84,61 @@ impl AppPaths {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum GlyphMode {
     Ascii,
     #[default]
     NerdFonts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskSortOrder {
+    #[default]
+    DueAsc,
+    DueDesc,
+    TitleAsc,
+    TitleDesc,
+    CreatedNewest,
+    CreatedOldest,
+}
+
+impl TaskSortOrder {
+    const ALL: [Self; 6] = [
+        Self::DueAsc,
+        Self::DueDesc,
+        Self::TitleAsc,
+        Self::TitleDesc,
+        Self::CreatedNewest,
+        Self::CreatedOldest,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DueAsc => "Due Date ↑",
+            Self::DueDesc => "Due Date ↓",
+            Self::TitleAsc => "Title A-Z",
+            Self::TitleDesc => "Title Z-A",
+            Self::CreatedNewest => "Created Newest",
+            Self::CreatedOldest => "Created Oldest",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::DueAsc => "due ↑",
+            Self::DueDesc => "due ↓",
+            Self::TitleAsc => "title ↑",
+            Self::TitleDesc => "title ↓",
+            Self::CreatedNewest => "newest",
+            Self::CreatedOldest => "oldest",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,11 +202,13 @@ impl Default for AppConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub glyph_mode: GlyphMode,
     pub theme: String,
+    pub task_list_sort: TaskSortOrder,
+    pub hide_completed_tasks: bool,
 }
 
 impl Default for UiConfig {
@@ -165,25 +216,36 @@ impl Default for UiConfig {
         Self {
             glyph_mode: GlyphMode::default(),
             theme: "catppuccin-mocha".to_string(),
+            task_list_sort: TaskSortOrder::default(),
+            hide_completed_tasks: true,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(default)]
 struct AppConfigFile {
     ui: UiConfig,
     timer: TimerConfigFile,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 struct TimerConfigFile {
-    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
     pomodoro_length: Duration,
-    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
     short_break_length: Duration,
-    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
     long_break_length: Duration,
     long_break_interval: u32,
 }
@@ -214,7 +276,27 @@ impl From<AppConfigFile> for AppConfig {
     }
 }
 
-pub fn load_app_config(paths: &AppPaths) -> Result<AppConfig> {
+impl From<&AppConfig> for AppConfigFile {
+    fn from(value: &AppConfig) -> Self {
+        Self {
+            ui: value.ui.clone(),
+            timer: TimerConfigFile {
+                pomodoro_length: value.timer.pomodoro_length,
+                short_break_length: value.timer.short_break_length,
+                long_break_length: value.timer.long_break_length,
+                long_break_interval: value.timer.long_break_interval,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigFormat {
+    Toml,
+    Yaml,
+}
+
+fn active_config_path(paths: &AppPaths) -> Result<Option<(PathBuf, ConfigFormat)>> {
     let candidates = paths
         .config_candidates()
         .into_iter()
@@ -222,7 +304,7 @@ pub fn load_app_config(paths: &AppPaths) -> Result<AppConfig> {
         .collect::<Vec<_>>();
 
     let Some(config_path) = candidates.first() else {
-        return Ok(AppConfig::default());
+        return Ok(None);
     };
 
     if candidates.len() > 1 {
@@ -234,21 +316,55 @@ pub fn load_app_config(paths: &AppPaths) -> Result<AppConfig> {
         bail!("multiple config files found; keep only one of: {names}");
     }
 
-    let config_text = fs::read_to_string(config_path)
-        .with_context(|| format!("failed to read config at {}", config_path.display()))?;
-
-    let file_config = match config_path.extension().and_then(|ext| ext.to_str()) {
-        Some("toml") => toml::from_str::<AppConfigFile>(&config_text)
-            .with_context(|| format!("failed to parse TOML config at {}", config_path.display()))?,
-        Some("yaml" | "yml") => serde_yaml::from_str::<AppConfigFile>(&config_text)
-            .with_context(|| format!("failed to parse YAML config at {}", config_path.display()))?,
+    let format = match config_path.extension().and_then(|ext| ext.to_str()) {
+        Some("toml") => ConfigFormat::Toml,
+        Some("yaml" | "yml") => ConfigFormat::Yaml,
         Some(other) => bail!("unsupported config file extension: {other}"),
         None => bail!("config file {} has no extension", config_path.display()),
+    };
+
+    Ok(Some((config_path.clone(), format)))
+}
+
+pub fn load_app_config(paths: &AppPaths) -> Result<AppConfig> {
+    let Some((config_path, format)) = active_config_path(paths)? else {
+        return Ok(AppConfig::default());
+    };
+
+    let config_text = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read config at {}", config_path.display()))?;
+
+    let file_config = match format {
+        ConfigFormat::Toml => toml::from_str::<AppConfigFile>(&config_text)
+            .with_context(|| format!("failed to parse TOML config at {}", config_path.display()))?,
+        ConfigFormat::Yaml => serde_yaml::from_str::<AppConfigFile>(&config_text)
+            .with_context(|| format!("failed to parse YAML config at {}", config_path.display()))?,
     };
 
     let config = AppConfig::from(file_config);
     config.timer.validate()?;
     Ok(config)
+}
+
+pub fn save_app_config(paths: &AppPaths, config: &AppConfig) -> Result<()> {
+    config.timer.validate()?;
+    paths.ensure_dirs()?;
+
+    let (path, format) = active_config_path(paths)?
+        .unwrap_or_else(|| (paths.config_toml_path.clone(), ConfigFormat::Toml));
+    let file_config = AppConfigFile::from(config);
+    let content = match format {
+        ConfigFormat::Toml => {
+            toml::to_string_pretty(&file_config).context("failed to serialize TOML config")?
+        }
+        ConfigFormat::Yaml => {
+            serde_yaml::to_string(&file_config).context("failed to serialize YAML config")?
+        }
+    };
+
+    fs::write(&path, content)
+        .with_context(|| format!("failed to write config at {}", path.display()))?;
+    Ok(())
 }
 
 pub fn init_tracing(paths: &AppPaths) -> Result<WorkerGuard> {
@@ -323,6 +439,13 @@ where
     deserializer.deserialize_any(DurationVisitor)
 }
 
+fn serialize_duration<S>(duration: &Duration, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(format_duration_string(*duration).as_str())
+}
+
 fn parse_duration_string(value: &str) -> Result<Duration> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -356,12 +479,24 @@ fn parse_duration_string(value: &str) -> Result<Duration> {
     Ok(duration)
 }
 
+fn format_duration_string(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds % 3600 == 0 {
+        format!("{}h", seconds / 3600)
+    } else if seconds % 60 == 0 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf, time::Duration};
 
     use super::{
-        AppConfig, AppPaths, GlyphMode, TimerSettings, load_app_config, parse_duration_string,
+        AppConfig, AppPaths, GlyphMode, TaskSortOrder, TimerSettings, load_app_config,
+        parse_duration_string, save_app_config,
     };
 
     #[test]
@@ -399,6 +534,8 @@ mod tests {
         assert_eq!(config, AppConfig::default());
         assert_eq!(config.ui.glyph_mode, GlyphMode::NerdFonts);
         assert_eq!(config.ui.theme, "catppuccin-mocha");
+        assert_eq!(config.ui.task_list_sort, TaskSortOrder::DueAsc);
+        assert!(config.ui.hide_completed_tasks);
     }
 
     #[test]
@@ -412,6 +549,8 @@ mod tests {
             r#"[ui]
 glyph_mode = "ascii"
 theme = "catppuccin-frappe"
+task_list_sort = "title-desc"
+hide_completed_tasks = false
 
 [timer]
 pomodoro_length = "30m"
@@ -425,6 +564,8 @@ long_break_interval = 5
         let config = load_app_config(&paths).expect("config should load");
         assert_eq!(config.ui.glyph_mode, GlyphMode::Ascii);
         assert_eq!(config.ui.theme, "catppuccin-frappe");
+        assert_eq!(config.ui.task_list_sort, TaskSortOrder::TitleDesc);
+        assert!(!config.ui.hide_completed_tasks);
         assert_eq!(config.timer.long_break_interval, 5);
         assert_eq!(config.timer.pomodoro_length, Duration::from_secs(30 * 60));
     }
@@ -440,6 +581,8 @@ long_break_interval = 5
             r#"ui:
   glyph_mode: ascii
   theme: forest
+  task_list_sort: created-oldest
+  hide_completed_tasks: false
 timer:
   pomodoro_length: 1800
   short_break_length: 300
@@ -452,6 +595,8 @@ timer:
         let config = load_app_config(&paths).expect("config should load");
         assert_eq!(config.ui.glyph_mode, GlyphMode::Ascii);
         assert_eq!(config.ui.theme, "forest");
+        assert_eq!(config.ui.task_list_sort, TaskSortOrder::CreatedOldest);
+        assert!(!config.ui.hide_completed_tasks);
         assert_eq!(config.timer.pomodoro_length, Duration::from_secs(1800));
         assert_eq!(config.timer.short_break_length, Duration::from_secs(300));
         assert_eq!(config.timer.long_break_length, Duration::from_secs(900));
@@ -478,6 +623,53 @@ timer:
 
         let error = load_app_config(&paths).expect_err("multiple config files should fail");
         assert!(error.to_string().contains("multiple config files found"));
+    }
+
+    #[test]
+    fn save_app_config_writes_toml_when_missing() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+        let mut config = AppConfig::default();
+        config.ui.task_list_sort = TaskSortOrder::CreatedNewest;
+        config.ui.hide_completed_tasks = false;
+
+        save_app_config(&paths, &config).expect("config should save");
+
+        let saved = fs::read_to_string(&paths.config_toml_path).expect("config should exist");
+        assert!(saved.contains("task_list_sort = \"created-newest\""));
+        assert!(saved.contains("hide_completed_tasks = false"));
+    }
+
+    #[test]
+    fn save_app_config_preserves_existing_yaml_format() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+        paths.ensure_dirs().expect("dirs should exist");
+        fs::write(
+            &paths.config_yaml_path,
+            r#"ui:
+  glyph_mode: nerd-fonts
+  theme: catppuccin-mocha
+timer:
+  pomodoro_length: 25m
+  short_break_length: 5m
+  long_break_length: 15m
+  long_break_interval: 4
+"#,
+        )
+        .expect("config should be written");
+        let mut config = load_app_config(&paths).expect("config should load");
+        config.ui.task_list_sort = TaskSortOrder::TitleAsc;
+        config.ui.hide_completed_tasks = false;
+
+        save_app_config(&paths, &config).expect("config should save");
+
+        let saved = fs::read_to_string(&paths.config_yaml_path).expect("yaml should exist");
+        assert!(saved.contains("task_list_sort: title-asc"));
+        assert!(saved.contains("hide_completed_tasks: false"));
+        assert!(!paths.config_toml_path.exists());
     }
 
     #[test]

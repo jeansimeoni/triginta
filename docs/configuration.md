@@ -28,6 +28,8 @@ The config is organized by sections.
 [ui]
 glyph_mode = "nerd-fonts"
 theme = "catppuccin-mocha"
+task_list_sort = "due-asc"
+hide_completed_tasks = true
 
 [timer]
 pomodoro_length = "25m"
@@ -42,6 +44,8 @@ long_break_interval = 4
 ui:
   glyph_mode: nerd-fonts
   theme: catppuccin-mocha
+  task_list_sort: due-asc
+  hide_completed_tasks: true
 
 timer:
   pomodoro_length: 25m
@@ -76,6 +80,33 @@ Built-in themes:
 Default:
 
 - `catppuccin-mocha`
+
+`ui.task_list_sort` controls the default sort order used in panel 5.
+
+Allowed values:
+
+- `due-asc`
+- `due-desc`
+- `title-asc`
+- `title-desc`
+- `created-newest`
+- `created-oldest`
+
+Default:
+
+- `due-asc`
+
+`ui.hide_completed_tasks` controls whether completed tasks are hidden in panel
+5 by default.
+
+Allowed values:
+
+- `true`
+- `false`
+
+Default:
+
+- `true`
 
 ## Theme Files
 

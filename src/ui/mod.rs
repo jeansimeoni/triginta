@@ -15,7 +15,7 @@ use crate::{
     app::{
         App, CalendarPickerView, CycleEntryState, DeleteConfirmationView, HistoryPanelTab,
         PanelFocus, RightPanelTab, ScreenData, ShortcutSection, ShortcutTip, TaskEditorView,
-        TaskInputView, TaskSearchView, TaskView, TimerPhase,
+        TaskInputView, TaskSearchView, TaskSortPopupView, TaskView, TimerPhase,
     },
     config::GlyphMode,
     domain::{DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
@@ -119,10 +119,7 @@ fn render_tasks_workspace(
     focused_panel: PanelFocus,
     palette: ThemePalette,
 ) {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+    let sections = task_workspace_sections(area);
 
     render_task_list_panel(frame, app, sections[0], symbols, focused_panel, palette);
     render_task_details_panel(frame, app, sections[1], symbols, palette);
@@ -394,12 +391,19 @@ fn render_task_list_panel(
         }
     }
 
+    let footer = task_list_footer(app, symbols, palette);
+    let footer_hints =
+        task_list_footer_hints(symbols, focused_panel == PanelFocus::RightPane, palette);
     let tasks = Paragraph::new(lines)
-        .block(panel_block(
-            right_panel_title(RightPanelTab::Tasks, symbols, palette),
-            focused_panel == PanelFocus::RightPane,
-            palette,
-        ))
+        .block(
+            panel_block(
+                right_panel_title(RightPanelTab::Tasks, symbols, palette),
+                focused_panel == PanelFocus::RightPane,
+                palette,
+            )
+            .title_bottom(footer)
+            .title_bottom(footer_hints),
+        )
         .wrap(Wrap { trim: true });
 
     frame.render_widget(tasks, area);
@@ -702,6 +706,12 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
         return;
     }
 
+    if let Some(sort_popup) = app.task_sort_popup_view() {
+        let anchor = task_sort_popup_anchor(frame.area());
+        render_task_sort_popup(frame, &sort_popup, anchor, symbols, palette);
+        return;
+    }
+
     if let Some(search) = app.task_search_view() {
         render_task_search_popup(frame, &search, palette);
         return;
@@ -720,6 +730,34 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
     if let Some(confirmation) = app.delete_confirmation_view() {
         render_delete_confirmation(frame, &confirmation, palette);
     }
+}
+
+fn task_workspace_sections(area: Rect) -> Vec<Rect> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area)
+        .to_vec()
+}
+
+fn task_sort_popup_anchor(area: Rect) -> Rect {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+    let right_sections = task_workspace_sections(columns[1]);
+    let task_list_area = right_sections[0];
+
+    Rect::new(
+        task_list_area
+            .x
+            .saturating_add(task_list_area.width.saturating_sub(20)),
+        task_list_area
+            .y
+            .saturating_add(task_list_area.height.saturating_sub(2)),
+        18,
+        1,
+    )
 }
 
 fn render_help_dialog(frame: &mut Frame<'_>, app: &App, palette: ThemePalette) {
@@ -985,6 +1023,52 @@ fn render_task_due_preview(
     frame.render_widget(panel, area);
 }
 
+fn task_list_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    let sort_prefix = if symbols.tasks == "#" {
+        "sort"
+    } else {
+        symbols.sort
+    };
+    let filter_prefix = if symbols.tasks == "#" {
+        "done"
+    } else if app.hides_completed_tasks() {
+        symbols.hidden
+    } else {
+        symbols.visible
+    };
+    let filter_label = if app.hides_completed_tasks() {
+        "hidden"
+    } else {
+        "shown"
+    };
+
+    Line::from(vec![Span::styled(
+        format!(
+            " {} {}  {} {} ",
+            sort_prefix,
+            app.task_sort_order().short_label(),
+            filter_prefix,
+            filter_label,
+        ),
+        Style::default().fg(palette.subtle_text),
+    )])
+}
+
+fn task_list_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> Line<'static> {
+    let hints = if focused {
+        let _ = symbols;
+        " o sort  f done "
+    } else {
+        ""
+    };
+
+    Line::from(vec![Span::styled(
+        hints,
+        Style::default().fg(palette.subtle_text),
+    )])
+    .right_aligned()
+}
+
 fn render_task_editor_popup(
     frame: &mut Frame<'_>,
     editor: &TaskEditorView,
@@ -1121,7 +1205,10 @@ fn render_editor_field(
                 .add_modifier(Modifier::DIM),
         ))]
     } else if area.height > 3 {
-        vec![Line::from(ellipsize_end(value, area.width.saturating_sub(4) as usize))]
+        vec![Line::from(ellipsize_end(
+            value,
+            area.width.saturating_sub(4) as usize,
+        ))]
     } else {
         vec![Line::from(input_window_text(
             value,
@@ -1150,7 +1237,11 @@ fn editor_input_text(
     let mut with_cursor = value.to_string();
     with_cursor.insert_str(safe_cursor, cursor_symbol);
     Span::styled(
-        input_window_text(with_cursor.as_str(), safe_cursor + cursor_symbol.len(), max_width),
+        input_window_text(
+            with_cursor.as_str(),
+            safe_cursor + cursor_symbol.len(),
+            max_width,
+        ),
         Style::default().fg(palette.text),
     )
 }
@@ -1190,7 +1281,11 @@ fn render_editor_due_preview_panel(
             Span::raw("   "),
             Span::styled("Recurring: ", Style::default().fg(palette.subtle_text)),
             Span::styled(
-                if due_preview.is_recurring { "yes" } else { "no" },
+                if due_preview.is_recurring {
+                    "yes"
+                } else {
+                    "no"
+                },
                 Style::default().fg(palette.text),
             ),
         ]));
@@ -1205,7 +1300,10 @@ fn render_editor_due_preview_panel(
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
-                .title(Span::styled("Due Preview", Style::default().fg(palette.accent)))
+                .title(Span::styled(
+                    "Due Preview",
+                    Style::default().fg(palette.accent),
+                ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(palette.accent)),
         ),
@@ -1237,7 +1335,11 @@ fn render_editor_calendar(
         .expect("valid display date"),
         events,
     )
-    .show_month_header(Style::default().fg(palette.text).add_modifier(Modifier::BOLD))
+    .show_month_header(
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD),
+    )
     .show_weekdays_header(Style::default().fg(palette.subtle_text))
     .show_surrounding(Style::default().fg(palette.subtle_text))
     .default_style(Style::default().fg(palette.text))
@@ -1259,7 +1361,7 @@ fn render_editor_calendar(
 fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "F6 calendar  u clear due  Enter save  Esc cancel",
+            "F6 calendar  F7 clear due  Enter save  Esc cancel",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
@@ -1268,11 +1370,14 @@ fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'stati
     Line::from(vec![
         Span::styled("F6", Style::default().fg(palette.subtle_text)),
         Span::raw(" 󰃭  "),
-        Span::styled("u", Style::default().fg(palette.subtle_text)),
+        Span::styled("F7", Style::default().fg(palette.subtle_text)),
         Span::raw(" due  "),
         Span::styled("󰄬", Style::default().fg(palette.subtle_text)),
         Span::raw(" ↵  "),
-        Span::styled(symbols.voided.to_string(), Style::default().fg(palette.subtle_text)),
+        Span::styled(
+            symbols.voided.to_string(),
+            Style::default().fg(palette.subtle_text),
+        ),
         Span::raw(" esc"),
     ])
     .right_aligned()
@@ -1286,7 +1391,10 @@ fn anchored_dropdown_rect(area: Rect, anchor: Rect, width: u16, height: u16) -> 
     let max_x = area
         .x
         .saturating_add(area.width.saturating_sub(popup_width).saturating_sub(1));
-    let x = preferred_x.clamp(area.x.saturating_add(1), max_x.max(area.x.saturating_add(1)));
+    let x = preferred_x.clamp(
+        area.x.saturating_add(1),
+        max_x.max(area.x.saturating_add(1)),
+    );
 
     let below_y = anchor.y.saturating_add(anchor.height.saturating_sub(1));
     let above_y = anchor.y.saturating_sub(popup_height.saturating_sub(1));
@@ -1297,7 +1405,10 @@ fn anchored_dropdown_rect(area: Rect, anchor: Rect, width: u16, height: u16) -> 
     let y = if below_y.saturating_add(popup_height) <= area.y.saturating_add(area.height) {
         below_y
     } else {
-        above_y.clamp(area.y.saturating_add(1), max_y.max(area.y.saturating_add(1)))
+        above_y.clamp(
+            area.y.saturating_add(1),
+            max_y.max(area.y.saturating_add(1)),
+        )
     };
 
     Rect::new(x, y, popup_width, popup_height)
@@ -1381,6 +1492,53 @@ fn render_task_search_popup(frame: &mut Frame<'_>, search: &TaskSearchView, pale
     );
 
     frame.render_widget(popup, area);
+}
+
+fn render_task_sort_popup(
+    frame: &mut Frame<'_>,
+    popup: &TaskSortPopupView,
+    anchor: Rect,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let width = 24;
+    let height = popup.options.len() as u16 + 2;
+    let area = anchored_dropdown_rect(frame.area(), anchor, width, height);
+    frame.render_widget(Clear, area);
+
+    let lines = popup
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let selected = popup.selected_index == index;
+            let marker = if option.is_active {
+                if symbols.tasks == "#" { "* " } else { "󰄵 " }
+            } else {
+                "  "
+            };
+            selectable_line(
+                &format!("{marker}{}", option.label),
+                selected,
+                area.width.saturating_sub(2),
+                palette,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                popup.title,
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.accent)),
+    );
+
+    frame.render_widget(widget, area);
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
@@ -1901,6 +2059,9 @@ struct Symbols {
     soon: &'static str,
     details: &'static str,
     stats: &'static str,
+    sort: &'static str,
+    hidden: &'static str,
+    visible: &'static str,
     recurring: &'static str,
     todo: &'static str,
     in_progress: &'static str,
@@ -1924,6 +2085,9 @@ impl Symbols {
                 soon: "S",
                 details: ">",
                 stats: "%",
+                sort: "~",
+                hidden: "x",
+                visible: "o",
                 recurring: "~",
                 todo: ".",
                 in_progress: ">",
@@ -1943,6 +2107,9 @@ impl Symbols {
                 soon: "󰸘",
                 details: "󰋼",
                 stats: "󰕾",
+                sort: "󰒺",
+                hidden: "󰈉",
+                visible: "󰈈",
                 recurring: "󰑖",
                 todo: "󰄱",
                 in_progress: "󰧞",
