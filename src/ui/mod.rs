@@ -310,17 +310,16 @@ fn render_navigation_panel(
                 vec![Line::from("No projects yet.")]
             } else {
                 rows.into_iter()
-                    .map(|row| project_tree_line(row, content_width, palette))
+                    .map(|row| project_tree_line(row, symbols, content_width, palette))
                     .collect::<Vec<_>>()
             }
         }
     };
 
     let footer_hint = match app.active_sidebar_tab() {
-        SidebarTab::Navigation => Line::from(" j/k move  Home/End jump ").right_aligned(),
+        SidebarTab::Navigation => navigation_footer_hint(symbols, palette),
         SidebarTab::FiltersTags => Line::from("").right_aligned(),
-        SidebarTab::Projects => Line::from(" C new  e edit  d delete  f favorite  c task ")
-            .right_aligned(),
+        SidebarTab::Projects => projects_footer_hint(symbols, palette),
     };
 
     let content = Paragraph::new(lines)
@@ -414,6 +413,7 @@ fn render_task_list_panel(
             lines.push(task_project_line(
                 app.screen_data(),
                 task,
+                symbols,
                 palette,
                 selected,
                 content_width,
@@ -717,6 +717,7 @@ fn task_summary_line(
 fn task_project_line(
     data: &ScreenData,
     task: &Task,
+    symbols: Symbols,
     palette: ThemePalette,
     selected: bool,
     width: u16,
@@ -736,7 +737,7 @@ fn task_project_line(
     };
     let mut spans = vec![
         Span::styled("  ", Style::default().fg(palette.subtle_text)),
-        Span::styled("󰉋", glyph_style),
+        Span::styled(symbols.project, glyph_style),
         Span::styled(" ", Style::default().fg(palette.subtle_text)),
         Span::styled(
             ellipsize_end(project_name, width.saturating_sub(4) as usize),
@@ -768,7 +769,12 @@ fn project_meta_for_task<'a>(
         .map(|project| (project.name.as_str(), project.color))
 }
 
-fn project_tree_line(row: ProjectTreeRowView, width: u16, palette: ThemePalette) -> Line<'static> {
+fn project_tree_line(
+    row: ProjectTreeRowView,
+    symbols: Symbols,
+    width: u16,
+    palette: ThemePalette,
+) -> Line<'static> {
     let mut label = String::new();
     label.push_str(&"  ".repeat(row.depth));
     if row.depth > 0 {
@@ -799,7 +805,7 @@ fn project_tree_line(row: ProjectTreeRowView, width: u16, palette: ThemePalette)
             },
         ),
         Span::styled(
-            "󰉋 ".to_string(),
+            format!("{} ", symbols.project),
             if row.is_selected {
                 selection_style
             } else {
@@ -1677,7 +1683,7 @@ fn render_project_editor_popup(
     palette: ThemePalette,
 ) {
     let show_parent_dropdown = !editor.parent_suggestions.is_empty();
-    let area = centered_rect(frame.area(), 72, if show_parent_dropdown { 12 } else { 8 });
+    let area = centered_rect(frame.area(), 72, if show_parent_dropdown { 12 } else { 10 });
     frame.render_widget(Clear, area);
     let block = Block::default()
         .title(Span::styled(
@@ -1703,7 +1709,7 @@ fn render_project_editor_popup(
         } else {
             [
                 Constraint::Length(3),
-                Constraint::Length(3),
+                Constraint::Length(5),
                 Constraint::Min(0),
                 Constraint::Min(0),
             ]
@@ -2163,6 +2169,37 @@ fn selectable_count_line(
     Line::from(spans)
 }
 
+fn navigation_footer_hint(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    let jump_label = if symbols.tasks == "#" {
+        "Home/End"
+    } else {
+        "↤/↦"
+    };
+    Line::from(vec![
+        Span::styled("j/k", Style::default().fg(palette.accent)),
+        Span::styled(" move  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(jump_label, Style::default().fg(palette.accent)),
+        Span::styled(" jump ", Style::default().fg(palette.subtle_text)),
+    ])
+    .right_aligned()
+}
+
+fn projects_footer_hint(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("C", Style::default().fg(palette.accent)),
+        Span::styled(" new  ", Style::default().fg(palette.subtle_text)),
+        Span::styled("e", Style::default().fg(palette.accent)),
+        Span::styled(" edit  ", Style::default().fg(palette.subtle_text)),
+        Span::styled("d", Style::default().fg(palette.accent)),
+        Span::styled(" delete  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.favorite, Style::default().fg(palette.accent)),
+        Span::styled(" f  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.project, Style::default().fg(palette.accent)),
+        Span::styled(" c ", Style::default().fg(palette.subtle_text)),
+    ])
+    .right_aligned()
+}
+
 fn task_view_symbol(view: TaskView, symbols: Symbols) -> &'static str {
     match view {
         TaskView::All => symbols.tasks,
@@ -2478,6 +2515,7 @@ fn progress_meta_line(
 struct Symbols {
     timer: &'static str,
     favorite: &'static str,
+    project: &'static str,
     tasks: &'static str,
     inbox: &'static str,
     today: &'static str,
@@ -2503,6 +2541,7 @@ impl Symbols {
             GlyphMode::Ascii => Self {
                 timer: "*",
                 favorite: "*",
+                project: "P",
                 tasks: "#",
                 inbox: "I",
                 today: "T",
@@ -2524,6 +2563,7 @@ impl Symbols {
             GlyphMode::NerdFonts => Self {
                 timer: "󰔛",
                 favorite: "󰓎",
+                project: "󰉋",
                 tasks: "󰄱",
                 inbox: "󰏆",
                 today: "󰃰",
