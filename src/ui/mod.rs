@@ -237,7 +237,11 @@ fn render_history_panel(
                 data.weekly_stats.total_sessions,
             ))
             .right_aligned(),
-            render_weekly_history_lines(data.weekly_summaries.as_slice(), palette),
+            render_weekly_history_lines(
+                data.weekly_summaries.as_slice(),
+                area.width.saturating_sub(4),
+                palette,
+            ),
             None,
         ),
     };
@@ -1626,6 +1630,7 @@ fn format_history_row(
 
 fn render_weekly_history_lines(
     summaries: &[DayHistorySummary],
+    width: u16,
     palette: ThemePalette,
 ) -> Vec<Line<'static>> {
     if summaries.is_empty() {
@@ -1650,6 +1655,33 @@ fn render_weekly_history_lines(
                 "█".repeat(completed_width),
                 "░".repeat(voided_width)
             );
+            let left_text = format!(
+                "{}  C{:>2} V{:>2}  {}",
+                summary.day.format("%a %d"),
+                summary.completed_sessions,
+                summary.voided_sessions,
+                bar,
+            );
+            let right_text = if total == 0 {
+                format!(
+                    "{} / {}  -",
+                    format_duration_seconds(summary.focus_seconds),
+                    format_duration_seconds(summary.break_seconds)
+                )
+            } else {
+                format!(
+                    "{} / {}",
+                    format_duration_seconds(summary.focus_seconds),
+                    format_duration_seconds(summary.break_seconds)
+                )
+            };
+            let left_width = UnicodeWidthStr::width(left_text.as_str());
+            let right_width = UnicodeWidthStr::width(right_text.as_str());
+            let spacing = (width as usize)
+                .saturating_sub(left_width)
+                .saturating_sub(right_width)
+                .max(2);
+
             Line::from(vec![
                 Span::styled(
                     summary.day.format("%a %d").to_string(),
@@ -1669,7 +1701,7 @@ fn render_weekly_history_lines(
                 ),
                 Span::raw("  "),
                 Span::styled(bar, Style::default().fg(palette.accent)),
-                Span::raw("  "),
+                Span::raw(" ".repeat(spacing)),
                 Span::styled(
                     format_duration_seconds(summary.focus_seconds),
                     Style::default().fg(palette.text),
