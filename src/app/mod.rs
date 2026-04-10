@@ -922,6 +922,17 @@ impl App {
         })
     }
 
+    pub fn task_details_task(&self) -> Option<&Task> {
+        match self.focused_panel {
+            PanelFocus::RightPane if self.active_right_panel_tab == RightPanelTab::Tasks => {
+                self.selected_task()
+            }
+            PanelFocus::Timer => self.assigned_task(),
+            PanelFocus::History => self.selected_history_task(),
+            _ => None,
+        }
+    }
+
     pub fn task_input_view(&self) -> Option<TaskInputView> {
         self.task_input.as_ref().map(|input| {
             let due_preview = parse_task_input(input.value.as_str(), self.today())
@@ -1957,6 +1968,14 @@ impl App {
             .iter()
             .filter(|entry| entry.kind == SessionKind::Focus)
             .nth(self.history_scroll)
+    }
+
+    fn selected_history_task(&self) -> Option<&Task> {
+        let task_id = self.selected_history_focus_entry()?.task_id?;
+        self.screen_data
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
     }
 
     fn begin_focus_task_if_needed(&mut self) {
@@ -3698,6 +3717,83 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Char('a'))
             .expect("assignment should toggle off");
         assert!(app.assigned_task().is_none());
+    }
+
+    #[test]
+    fn task_details_follow_focused_panel_source() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Details task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        assert_eq!(
+            app.task_details_task()
+                .expect("task details should exist")
+                .title,
+            "Details task"
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Char('1'))
+            .expect("focus should switch");
+        assert!(app.task_details_task().is_none());
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("assignment should toggle");
+        app.handle_key(crossterm::event::KeyCode::Char('1'))
+            .expect("focus should switch");
+
+        assert_eq!(
+            app.task_details_task()
+                .expect("assigned task should be shown")
+                .title,
+            "Details task"
+        );
+    }
+
+    #[test]
+    fn history_focus_shows_selected_session_task_details() {
+        let mut app = test_app();
+        let now = Local::now();
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "History task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("assignment should toggle");
+        app.handle_key(crossterm::event::KeyCode::Char('1'))
+            .expect("focus should switch");
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('x'),
+            now + ChronoDuration::seconds(5),
+        )
+        .expect("timer should void");
+        app.handle_key(crossterm::event::KeyCode::Char('2'))
+            .expect("focus should switch");
+
+        assert_eq!(
+            app.task_details_task()
+                .expect("history-linked task should be shown")
+                .title,
+            "History task"
+        );
     }
 
     #[test]

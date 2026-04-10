@@ -379,8 +379,10 @@ fn render_task_list_panel(
             }
         }
     } else {
+        let show_selection = focused_panel == PanelFocus::RightPane;
         for task in visible_tasks.iter().take(12) {
-            let selected = app.selected_task().map(|selected| selected.id) == Some(task.id);
+            let selected =
+                show_selection && app.selected_task().map(|selected| selected.id) == Some(task.id);
             lines.push(task_summary_line(
                 task,
                 symbols,
@@ -416,7 +418,7 @@ fn render_task_details_panel(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let lines = if let Some(task) = app.selected_task() {
+    let lines = if let Some(task) = app.task_details_task() {
         let mut lines = vec![
             Line::from(vec![Span::styled(
                 format!(
@@ -447,26 +449,7 @@ fn render_task_details_panel(
         }
         lines
     } else {
-        match app.active_task_view() {
-            TaskView::Today => vec![
-                Line::from("No task selected."),
-                Line::from(""),
-                Line::from("Tasks due today will appear"),
-                Line::from("here when available."),
-            ],
-            TaskView::Soon => vec![
-                Line::from("No task selected."),
-                Line::from(""),
-                Line::from("Upcoming due tasks will"),
-                Line::from("appear here when available."),
-            ],
-            TaskView::All | TaskView::Inbox => vec![
-                Line::from("No task selected."),
-                Line::from(""),
-                Line::from("Create a task with c to start"),
-                Line::from("filling this workspace."),
-            ],
-        }
+        Vec::new()
     };
 
     let details = Paragraph::new(lines)
