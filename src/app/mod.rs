@@ -1303,7 +1303,12 @@ impl App {
     fn task_matches_active_view(&self, task: &Task) -> bool {
         match self.active_task_view {
             TaskView::All => true,
-            TaskView::Inbox => task.due.is_none(),
+            // Projects are not implemented yet, so every active task is
+            // currently unassigned and therefore belongs to Inbox.
+            TaskView::Inbox => {
+                let _ = task;
+                true
+            }
             TaskView::Today => task.due.as_ref().map(|due| due.date) == Some(self.today()),
             TaskView::Soon => task
                 .due
@@ -3316,7 +3321,7 @@ mod tests {
             .into_iter()
             .map(|task| task.title.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(inbox_titles, vec!["Inbox task"]);
+        assert_eq!(inbox_titles, vec!["Today task", "Soon task", "Inbox task"]);
 
         app.set_active_task_view(TaskView::Today);
         let today_titles = app
