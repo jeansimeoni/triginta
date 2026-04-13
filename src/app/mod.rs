@@ -2757,21 +2757,17 @@ impl App {
     }
 
     fn open_create_project_popup(&mut self) {
-        let (name_input, name_cursor) = self
+        let parent_input = self
             .selected_project_id
             .and_then(|selected| self.project_name(selected))
-            .map(|name| {
-                let value = format!("#{name} ");
-                let cursor = value.len();
-                (value, cursor)
-            })
-            .unwrap_or_else(|| (String::new(), 0));
+            .unwrap_or("")
+            .to_string();
         self.project_editor = Some(ProjectEditorState {
             project_id: None,
-            name_input,
-            name_cursor,
-            parent_input: String::new(),
-            parent_cursor: 0,
+            name_input: String::new(),
+            name_cursor: 0,
+            parent_input: parent_input.clone(),
+            parent_cursor: parent_input.len(),
             color_index: ProjectColor::all()
                 .iter()
                 .position(|color| *color == ProjectColor::Charcoal)
@@ -2876,12 +2872,12 @@ impl App {
             self.project_editor = Some(editor);
             return Ok(());
         }
-        let parent_project_id = if !editor.parent_input.trim().is_empty() {
-            self.resolve_project_parent_input(editor.parent_input.as_str(), editor.project_id)
-        } else if inline_parent_project_id == ProjectId(0) {
-            None
-        } else {
+        let parent_project_id = if inline_parent_project_id != ProjectId(0) {
             Some(inline_parent_project_id)
+        } else if !editor.parent_input.trim().is_empty() {
+            self.resolve_project_parent_input(editor.parent_input.as_str(), editor.project_id)
+        } else {
+            None
         };
         let color = ProjectColor::all()
             .get(editor.color_index)
@@ -5538,7 +5534,8 @@ mod tests {
         let editor = app
             .project_editor_view()
             .expect("project editor should be visible");
-        assert_eq!(editor.name_value, "#Selected Parent ");
+        assert_eq!(editor.name_value, "");
+        assert_eq!(editor.parent_value, "Selected Parent");
     }
 
     #[test]
