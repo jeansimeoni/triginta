@@ -19,7 +19,7 @@ use crate::{
         ShortcutSection, ShortcutTip, SidebarTab, TaskEditorView, TaskInputView, TaskSearchView,
         TaskSortPopupView, TaskView, TimerPhase,
     },
-    config::{GlyphMode, ProjectSortOrder},
+    config::GlyphMode,
     domain::{DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
     theme::ThemePalette,
 };
@@ -342,10 +342,16 @@ fn render_navigation_panel(
         }
     };
 
-    let footer_hint = match app.active_sidebar_tab() {
+    let footer = match app.active_sidebar_tab() {
+        SidebarTab::Projects => projects_sort_footer(app, symbols, palette),
+        SidebarTab::Navigation | SidebarTab::FiltersTags => Line::from(""),
+    };
+    let footer_hints = match app.active_sidebar_tab() {
         SidebarTab::Navigation => navigation_footer_hint(symbols, palette),
         SidebarTab::FiltersTags => Line::from("").right_aligned(),
-        SidebarTab::Projects => projects_footer_hint(app, symbols, palette),
+        SidebarTab::Projects => {
+            projects_footer_hints(symbols, focused_panel == PanelFocus::Navigation, palette)
+        }
     };
 
     let block = panel_block(
@@ -353,7 +359,8 @@ fn render_navigation_panel(
         focused_panel == PanelFocus::Navigation,
         palette,
     )
-    .title_bottom(footer_hint);
+    .title_bottom(footer)
+    .title_bottom(footer_hints);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2628,41 +2635,38 @@ fn navigation_footer_hint(symbols: Symbols, palette: ThemePalette) -> Line<'stat
     .right_aligned()
 }
 
-fn projects_footer_hint(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+fn projects_sort_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     let sort_prefix = if symbols.tasks == "#" {
         "sort"
     } else {
         symbols.sort
     };
-    let reorder_hint = if app.project_sort_order() == ProjectSortOrder::Manual {
-        vec![
-            Span::styled("  J/K", Style::default().fg(palette.accent)),
-            Span::styled(" move", Style::default().fg(palette.subtle_text)),
-        ]
-    } else {
-        Vec::new()
-    };
-
-    let mut spans = vec![
-        Span::styled(sort_prefix, Style::default().fg(palette.accent)),
-        Span::styled(
-            format!(" o {}  ", app.project_sort_order().short_label()),
-            Style::default().fg(palette.subtle_text),
+    Line::from(vec![Span::styled(
+        format!(
+            " {} {} ",
+            sort_prefix,
+            app.project_sort_order().short_label()
         ),
-        Span::styled("C", Style::default().fg(palette.accent)),
-        Span::styled(" new  ", Style::default().fg(palette.subtle_text)),
-        Span::styled("e", Style::default().fg(palette.accent)),
-        Span::styled(" edit  ", Style::default().fg(palette.subtle_text)),
-        Span::styled("d", Style::default().fg(palette.accent)),
-        Span::styled(" delete  ", Style::default().fg(palette.subtle_text)),
-        Span::styled(symbols.favorite, Style::default().fg(palette.accent)),
-        Span::styled(" f  ", Style::default().fg(palette.subtle_text)),
-        Span::styled(symbols.project, Style::default().fg(palette.accent)),
-        Span::styled(" c ", Style::default().fg(palette.subtle_text)),
-    ];
-    spans.extend(reorder_hint);
+        Style::default().fg(palette.subtle_text),
+    )])
+}
 
-    Line::from(spans).right_aligned()
+fn projects_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> Line<'static> {
+    if !focused {
+        return Line::from("").right_aligned();
+    }
+
+    let project_new_icon = if symbols.tasks == "#" { "+" } else { "✚" };
+
+    Line::from(vec![
+        Span::styled(symbols.sort, Style::default().fg(palette.accent)),
+        Span::styled(" o sort  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(project_new_icon, Style::default().fg(palette.accent)),
+        Span::styled(" C new  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.tasks, Style::default().fg(palette.accent)),
+        Span::styled(" c ", Style::default().fg(palette.subtle_text)),
+    ])
+    .right_aligned()
 }
 
 fn task_view_symbol(view: TaskView, symbols: Symbols) -> &'static str {
