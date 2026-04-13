@@ -839,11 +839,19 @@ const NAVIGATION_SHORTCUTS: &[ShortcutTip] = &[
         keys: "Home/End",
         description: "jump first/last",
     },
+    ShortcutTip {
+        keys: "Enter",
+        description: "open task list",
+    },
 ];
 
 const FILTERS_TAGS_SHORTCUTS: &[ShortcutTip] = &[ShortcutTip {
     keys: "3/4/5",
     description: "switch tab",
+},
+ShortcutTip {
+    keys: "Enter",
+    description: "open task list",
 }];
 
 const PROJECTS_SHORTCUTS: &[ShortcutTip] = &[
@@ -870,6 +878,10 @@ const PROJECTS_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "c",
         description: "new task here",
+    },
+    ShortcutTip {
+        keys: "Enter",
+        description: "open task list",
     },
 ];
 
@@ -4143,6 +4155,10 @@ impl App {
                     }
                 }
             }
+            KeyCode::Enter if self.focused_panel == PanelFocus::Navigation => {
+                self.focused_panel = PanelFocus::RightPane;
+                self.active_right_panel_tab = RightPanelTab::Tasks;
+            }
             KeyCode::Char('C')
                 if self.focused_panel == PanelFocus::Navigation
                     && self.active_sidebar_tab == SidebarTab::Projects =>
@@ -4617,7 +4633,7 @@ mod tests {
 
     use super::{
         App, CycleEntryState, HistoryPanelTab, PanelFocus, PreviewLineView, RightPanelTab,
-        RunOptions, ScreenData, TaskEditorField, TaskEditorState, TaskView, TimerPhase,
+        RunOptions, ScreenData, SidebarTab, TaskEditorField, TaskEditorState, TaskView, TimerPhase,
         TimerRunState, apply_debug_overrides, chrono_duration, duration_to_stored_minutes,
     };
 
@@ -4737,6 +4753,65 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::End)
             .expect("task view should jump");
         assert_eq!(app.active_task_view(), TaskView::Soon);
+    }
+
+    #[test]
+    fn app_enter_from_navigation_tab_focuses_task_list_with_current_view() {
+        let mut app = test_app();
+        app.active_right_panel_tab = RightPanelTab::Statistics;
+        app.handle_key(crossterm::event::KeyCode::Char('3'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("task view should switch");
+        assert_eq!(app.active_task_view(), TaskView::Inbox);
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should open task list");
+        assert_eq!(app.focused_panel(), PanelFocus::RightPane);
+        assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
+        assert_eq!(app.active_task_view(), TaskView::Inbox);
+    }
+
+    #[test]
+    fn app_enter_from_filters_tab_focuses_task_list() {
+        let mut app = test_app();
+        app.active_right_panel_tab = RightPanelTab::Statistics;
+        app.handle_key(crossterm::event::KeyCode::Char('4'))
+            .expect("focus should switch");
+        assert_eq!(app.active_sidebar_tab(), SidebarTab::FiltersTags);
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should open task list");
+        assert_eq!(app.focused_panel(), PanelFocus::RightPane);
+        assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
+        assert_eq!(app.active_sidebar_tab(), SidebarTab::FiltersTags);
+    }
+
+    #[test]
+    fn app_enter_from_projects_tab_focuses_task_list_with_project_context() {
+        let mut app = test_app();
+        let project = app
+            .database
+            .project_repository()
+            .create(
+                "Context Project",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.active_right_panel_tab = RightPanelTab::Statistics;
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.selected_project_id = Some(project.id);
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should open task list");
+        assert_eq!(app.focused_panel(), PanelFocus::RightPane);
+        assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
+        assert_eq!(app.selected_project_id, Some(project.id));
     }
 
     #[test]
