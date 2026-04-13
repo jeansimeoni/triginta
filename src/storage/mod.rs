@@ -102,6 +102,7 @@ pub trait ProjectRepository {
         now: DateTime<Local>,
     ) -> Result<Project>;
     fn update(&self, project_id: ProjectId, update: &ProjectUpdate) -> Result<Project>;
+    fn move_within_parent(&self, project_id: ProjectId, direction: isize) -> Result<()>;
     fn delete(&self, project_id: ProjectId, now: DateTime<Local>) -> Result<()>;
 }
 
@@ -555,6 +556,41 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
             .context("updated project could not be reloaded")
     }
 
+    fn move_within_parent(&self, project_id: ProjectId, direction: isize) -> Result<()> {
+        if direction == 0 {
+            return Ok(());
+        }
+
+        let Some(project) = self.load_project(project_id)? else {
+            return Ok(());
+        };
+        if project.is_inbox || project.deleted_at.is_some() {
+            return Ok(());
+        }
+
+        let mut sibling_ids = self.active_sibling_ids(project.parent_project_id)?;
+        let Some(current_index) = sibling_ids.iter().position(|id| *id == project_id) else {
+            return Ok(());
+        };
+        let target_index = (current_index as isize + direction)
+            .clamp(0, sibling_ids.len().saturating_sub(1) as isize)
+            as usize;
+        if current_index == target_index {
+            return Ok(());
+        }
+
+        sibling_ids.remove(current_index);
+        sibling_ids.insert(target_index, project_id);
+
+        let mut statement = self
+            .connection
+            .prepare("UPDATE projects SET child_order = ?1 WHERE id = ?2")?;
+        for (index, sibling_id) in sibling_ids.iter().enumerate() {
+            statement.execute(params![index as i64 + 1, sibling_id.0])?;
+        }
+        Ok(())
+    }
+
     fn delete(&self, project_id: ProjectId, now: DateTime<Local>) -> Result<()> {
         let project = self
             .load_project(project_id)?
@@ -635,6 +671,23 @@ impl SqliteProjectRepository<'_> {
             )
             .context("failed to calculate next project order")?;
         Ok(next)
+    }
+
+    fn active_sibling_ids(&self, parent_project_id: Option<ProjectId>) -> Result<Vec<ProjectId>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id
+             FROM projects
+             WHERE parent_project_id IS ?1
+               AND deleted_at IS NULL
+               AND is_inbox = 0
+             ORDER BY child_order ASC, name COLLATE NOCASE ASC, id ASC",
+        )?;
+        let rows = statement.query_map(params![parent_project_id.map(|id| id.0)], |row| {
+            Ok(ProjectId(row.get(0)?))
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load project siblings")
     }
 
     fn validate_parent(
@@ -1138,6 +1191,28 @@ mod tests {
             .find(|candidate| candidate.id == task.id)
             .expect("task should remain stored");
         assert!(stored_task.deleted_at.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn project_repository_moves_project_within_parent() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let projects = database.project_repository();
+
+        let alpha = projects.create("Alpha", None, ProjectColor::Blue, false, Local::now())?;
+        let bravo = projects.create("Bravo", None, ProjectColor::Blue, false, Local::now())?;
+        let charlie = projects.create("Charlie", None, ProjectColor::Blue, false, Local::now())?;
+
+        projects.move_within_parent(charlie.id, -1)?;
+
+        let ordered_ids = projects
+            .list_all()?
+            .into_iter()
+            .filter(|project| !project.is_inbox && project.parent_project_id.is_none())
+            .map(|project| project.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordered_ids, vec![alpha.id, charlie.id, bravo.id]);
         Ok(())
     }
 }

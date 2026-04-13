@@ -141,6 +141,51 @@ impl TaskSortOrder {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProjectSortOrder {
+    NameAsc,
+    NameDesc,
+    TaskCountAsc,
+    TaskCountDesc,
+    #[default]
+    Manual,
+}
+
+impl ProjectSortOrder {
+    const ALL: [Self; 5] = [
+        Self::NameAsc,
+        Self::NameDesc,
+        Self::TaskCountAsc,
+        Self::TaskCountDesc,
+        Self::Manual,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NameAsc => "Name A-Z",
+            Self::NameDesc => "Name Z-A",
+            Self::TaskCountAsc => "Task Count ↑",
+            Self::TaskCountDesc => "Task Count ↓",
+            Self::Manual => "Manual",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::NameAsc => "name ↑",
+            Self::NameDesc => "name ↓",
+            Self::TaskCountAsc => "tasks ↑",
+            Self::TaskCountDesc => "tasks ↓",
+            Self::Manual => "manual",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimerSettings {
     pub pomodoro_length: Duration,
@@ -208,6 +253,8 @@ pub struct UiConfig {
     pub glyph_mode: GlyphMode,
     pub theme: String,
     pub task_list_sort: TaskSortOrder,
+    pub project_list_sort: ProjectSortOrder,
+    pub persist_project_list_sort: bool,
     pub hide_completed_tasks: bool,
 }
 
@@ -217,6 +264,8 @@ impl Default for UiConfig {
             glyph_mode: GlyphMode::default(),
             theme: "catppuccin-mocha".to_string(),
             task_list_sort: TaskSortOrder::default(),
+            project_list_sort: ProjectSortOrder::default(),
+            persist_project_list_sort: false,
             hide_completed_tasks: true,
         }
     }
@@ -495,8 +544,8 @@ mod tests {
     use std::{fs, path::PathBuf, time::Duration};
 
     use super::{
-        AppConfig, AppPaths, GlyphMode, TaskSortOrder, TimerSettings, load_app_config,
-        parse_duration_string, save_app_config,
+        AppConfig, AppPaths, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings,
+        load_app_config, parse_duration_string, save_app_config,
     };
 
     #[test]
@@ -535,6 +584,8 @@ mod tests {
         assert_eq!(config.ui.glyph_mode, GlyphMode::NerdFonts);
         assert_eq!(config.ui.theme, "catppuccin-mocha");
         assert_eq!(config.ui.task_list_sort, TaskSortOrder::DueAsc);
+        assert_eq!(config.ui.project_list_sort, ProjectSortOrder::Manual);
+        assert!(!config.ui.persist_project_list_sort);
         assert!(config.ui.hide_completed_tasks);
     }
 
@@ -550,6 +601,8 @@ mod tests {
 glyph_mode = "ascii"
 theme = "catppuccin-frappe"
 task_list_sort = "title-desc"
+project_list_sort = "name-desc"
+persist_project_list_sort = true
 hide_completed_tasks = false
 
 [timer]
@@ -565,6 +618,8 @@ long_break_interval = 5
         assert_eq!(config.ui.glyph_mode, GlyphMode::Ascii);
         assert_eq!(config.ui.theme, "catppuccin-frappe");
         assert_eq!(config.ui.task_list_sort, TaskSortOrder::TitleDesc);
+        assert_eq!(config.ui.project_list_sort, ProjectSortOrder::NameDesc);
+        assert!(config.ui.persist_project_list_sort);
         assert!(!config.ui.hide_completed_tasks);
         assert_eq!(config.timer.long_break_interval, 5);
         assert_eq!(config.timer.pomodoro_length, Duration::from_secs(30 * 60));
@@ -582,6 +637,8 @@ long_break_interval = 5
   glyph_mode: ascii
   theme: forest
   task_list_sort: created-oldest
+  project_list_sort: task-count-desc
+  persist_project_list_sort: true
   hide_completed_tasks: false
 timer:
   pomodoro_length: 1800
@@ -596,6 +653,8 @@ timer:
         assert_eq!(config.ui.glyph_mode, GlyphMode::Ascii);
         assert_eq!(config.ui.theme, "forest");
         assert_eq!(config.ui.task_list_sort, TaskSortOrder::CreatedOldest);
+        assert_eq!(config.ui.project_list_sort, ProjectSortOrder::TaskCountDesc);
+        assert!(config.ui.persist_project_list_sort);
         assert!(!config.ui.hide_completed_tasks);
         assert_eq!(config.timer.pomodoro_length, Duration::from_secs(1800));
         assert_eq!(config.timer.short_break_length, Duration::from_secs(300));
@@ -632,12 +691,16 @@ timer:
             AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
         let mut config = AppConfig::default();
         config.ui.task_list_sort = TaskSortOrder::CreatedNewest;
+        config.ui.project_list_sort = ProjectSortOrder::TaskCountAsc;
+        config.ui.persist_project_list_sort = true;
         config.ui.hide_completed_tasks = false;
 
         save_app_config(&paths, &config).expect("config should save");
 
         let saved = fs::read_to_string(&paths.config_toml_path).expect("config should exist");
         assert!(saved.contains("task_list_sort = \"created-newest\""));
+        assert!(saved.contains("project_list_sort = \"task-count-asc\""));
+        assert!(saved.contains("persist_project_list_sort = true"));
         assert!(saved.contains("hide_completed_tasks = false"));
     }
 
@@ -662,12 +725,16 @@ timer:
         .expect("config should be written");
         let mut config = load_app_config(&paths).expect("config should load");
         config.ui.task_list_sort = TaskSortOrder::TitleAsc;
+        config.ui.project_list_sort = ProjectSortOrder::NameAsc;
+        config.ui.persist_project_list_sort = true;
         config.ui.hide_completed_tasks = false;
 
         save_app_config(&paths, &config).expect("config should save");
 
         let saved = fs::read_to_string(&paths.config_yaml_path).expect("yaml should exist");
         assert!(saved.contains("task_list_sort: title-asc"));
+        assert!(saved.contains("project_list_sort: name-asc"));
+        assert!(saved.contains("persist_project_list_sort: true"));
         assert!(saved.contains("hide_completed_tasks: false"));
         assert!(!paths.config_toml_path.exists());
     }

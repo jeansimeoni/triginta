@@ -15,11 +15,11 @@ use crate::{
     app::{
         App, CalendarPickerView, CycleEntryState, DeleteConfirmationView, FormPreviewPanelView,
         HistoryPanelTab, PanelFocus, PreviewLineView, ProjectDeleteConfirmationView,
-        ProjectEditorView, ProjectTreeRowView, RightPanelTab, ScreenData, ShortcutSection,
-        ShortcutTip, SidebarTab, TaskEditorView, TaskInputView, TaskSearchView, TaskSortPopupView,
-        TaskView, TimerPhase,
+        ProjectEditorView, ProjectSortPopupView, ProjectTreeRowView, RightPanelTab, ScreenData,
+        ShortcutSection, ShortcutTip, SidebarTab, TaskEditorView, TaskInputView, TaskSearchView,
+        TaskSortPopupView, TaskView, TimerPhase,
     },
-    config::GlyphMode,
+    config::{GlyphMode, ProjectSortOrder},
     domain::{DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
     theme::ThemePalette,
 };
@@ -345,7 +345,7 @@ fn render_navigation_panel(
     let footer_hint = match app.active_sidebar_tab() {
         SidebarTab::Navigation => navigation_footer_hint(symbols, palette),
         SidebarTab::FiltersTags => Line::from("").right_aligned(),
-        SidebarTab::Projects => projects_footer_hint(symbols, palette),
+        SidebarTab::Projects => projects_footer_hint(app, symbols, palette),
     };
 
     let block = panel_block(
@@ -505,11 +505,9 @@ fn render_task_list_panel(
     let content_width = inner
         .width
         .saturating_sub(if has_scrollbar { 1 } else { 0 });
-    let selected_index = app.selected_task().and_then(|selected| {
-        visible_tasks
-            .iter()
-            .position(|task| task.id == selected.id)
-    });
+    let selected_index = app
+        .selected_task()
+        .and_then(|selected| visible_tasks.iter().position(|task| task.id == selected.id));
     let task_scroll = panel_scroll_offset(visible_tasks.len(), viewport_task_rows, selected_index);
 
     let mut lines = Vec::with_capacity(viewport_task_rows.saturating_mul(2));
@@ -871,7 +869,10 @@ fn task_project_line(
     let mut spans = vec![
         Span::styled(" ".repeat(leading_padding), base_style),
         Span::styled(symbols.project, glyph_style),
-        Span::styled(" ", base_style.patch(Style::default().fg(palette.subtle_text))),
+        Span::styled(
+            " ",
+            base_style.patch(Style::default().fg(palette.subtle_text)),
+        ),
         Span::styled(
             ellipsize_end(
                 project_name,
@@ -986,6 +987,12 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
         return;
     }
 
+    if let Some(sort_popup) = app.project_sort_popup_view() {
+        let anchor = project_sort_popup_anchor(frame.area());
+        render_project_sort_popup(frame, &sort_popup, anchor, symbols, palette);
+        return;
+    }
+
     if let Some(sort_popup) = app.task_sort_popup_view() {
         let anchor = task_sort_popup_anchor(frame.area());
         render_task_sort_popup(frame, &sort_popup, anchor, symbols, palette);
@@ -1045,6 +1052,34 @@ fn task_sort_popup_anchor(area: Rect) -> Rect {
         task_list_area
             .y
             .saturating_add(task_list_area.height.saturating_sub(2)),
+        18,
+        1,
+    )
+}
+
+fn project_sort_popup_anchor(area: Rect) -> Rect {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+    let left_sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(26),
+            Constraint::Percentage(22),
+            Constraint::Percentage(30),
+            Constraint::Percentage(22),
+        ])
+        .split(columns[0]);
+    let navigation_area = left_sections[2];
+
+    Rect::new(
+        navigation_area
+            .x
+            .saturating_add(navigation_area.width.saturating_sub(20)),
+        navigation_area
+            .y
+            .saturating_add(navigation_area.height.saturating_sub(2)),
         18,
         1,
     )
@@ -1460,10 +1495,7 @@ fn render_editor_field(
                 .add_modifier(Modifier::DIM),
         ))]
     } else if area.height > 3 {
-        vec![Line::from(ellipsize_end(
-            value,
-            visible_width,
-        ))]
+        vec![Line::from(ellipsize_end(value, visible_width))]
     } else {
         vec![Line::from(window.text)]
     };
@@ -2123,6 +2155,53 @@ fn render_task_sort_popup(
     frame.render_widget(widget, area);
 }
 
+fn render_project_sort_popup(
+    frame: &mut Frame<'_>,
+    popup: &ProjectSortPopupView,
+    anchor: Rect,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let width = 24;
+    let height = popup.options.len() as u16 + 2;
+    let area = anchored_dropdown_rect(frame.area(), anchor, width, height);
+    frame.render_widget(Clear, area);
+
+    let lines = popup
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let selected = popup.selected_index == index;
+            let marker = if option.is_active {
+                if symbols.tasks == "#" { "* " } else { "󰄵 " }
+            } else {
+                "  "
+            };
+            selectable_line(
+                &format!("{marker}{}", option.label),
+                selected,
+                area.width.saturating_sub(2),
+                palette,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                popup.title,
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.accent)),
+    );
+
+    frame.render_widget(widget, area);
+}
+
 fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
@@ -2210,11 +2289,7 @@ fn project_parent_dropdown_width(suggestions: &[String]) -> u16 {
     (content as u16).clamp(22, 56)
 }
 
-fn editor_cursor_display_column(
-    value: &str,
-    cursor: usize,
-    max_width: usize,
-) -> usize {
+fn editor_cursor_display_column(value: &str, cursor: usize, max_width: usize) -> usize {
     input_window_view(value, cursor, max_width).cursor_col
 }
 
@@ -2553,8 +2628,27 @@ fn navigation_footer_hint(symbols: Symbols, palette: ThemePalette) -> Line<'stat
     .right_aligned()
 }
 
-fn projects_footer_hint(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
-    Line::from(vec![
+fn projects_footer_hint(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    let sort_prefix = if symbols.tasks == "#" {
+        "sort"
+    } else {
+        symbols.sort
+    };
+    let reorder_hint = if app.project_sort_order() == ProjectSortOrder::Manual {
+        vec![
+            Span::styled("  J/K", Style::default().fg(palette.accent)),
+            Span::styled(" move", Style::default().fg(palette.subtle_text)),
+        ]
+    } else {
+        Vec::new()
+    };
+
+    let mut spans = vec![
+        Span::styled(sort_prefix, Style::default().fg(palette.accent)),
+        Span::styled(
+            format!(" o {}  ", app.project_sort_order().short_label()),
+            Style::default().fg(palette.subtle_text),
+        ),
         Span::styled("C", Style::default().fg(palette.accent)),
         Span::styled(" new  ", Style::default().fg(palette.subtle_text)),
         Span::styled("e", Style::default().fg(palette.accent)),
@@ -2565,8 +2659,10 @@ fn projects_footer_hint(symbols: Symbols, palette: ThemePalette) -> Line<'static
         Span::styled(" f  ", Style::default().fg(palette.subtle_text)),
         Span::styled(symbols.project, Style::default().fg(palette.accent)),
         Span::styled(" c ", Style::default().fg(palette.subtle_text)),
-    ])
-    .right_aligned()
+    ];
+    spans.extend(reorder_hint);
+
+    Line::from(spans).right_aligned()
 }
 
 fn task_view_symbol(view: TaskView, symbols: Symbols) -> &'static str {
@@ -2883,9 +2979,10 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
         return;
     }
     let content_width = area.width.saturating_sub(2);
-    let x = area.x.saturating_add(1).saturating_add(
-        (cursor_col as u16).min(content_width.saturating_sub(1)),
-    );
+    let x = area
+        .x
+        .saturating_add(1)
+        .saturating_add((cursor_col as u16).min(content_width.saturating_sub(1)));
     let y = area.y.saturating_add(1);
     frame.set_cursor_position((x, y));
 }

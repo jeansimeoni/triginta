@@ -12,8 +12,8 @@ use tracing::info;
 
 use crate::{
     config::{
-        AppConfig, AppPaths, GlyphMode, TaskSortOrder, TimerSettings, init_tracing,
-        load_app_config, save_app_config,
+        AppConfig, AppPaths, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings,
+        init_tracing, load_app_config, save_app_config,
     },
     domain::{
         DayHistorySummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate,
@@ -53,6 +53,22 @@ impl SidebarTab {
             Self::Navigation => "Navigation",
             Self::FiltersTags => "Filters & Tags",
             Self::Projects => "Projects",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Navigation => Self::FiltersTags,
+            Self::FiltersTags => Self::Projects,
+            Self::Projects => Self::Navigation,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Navigation => Self::Projects,
+            Self::FiltersTags => Self::Navigation,
+            Self::Projects => Self::FiltersTags,
         }
     }
 }
@@ -546,6 +562,11 @@ struct TaskSortPopupState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProjectSortPopupState {
+    selected_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskSearchMode {
     TimerAssignment,
     HistoryAssignment(i64),
@@ -749,6 +770,19 @@ pub struct TaskSortPopupView {
     pub options: Vec<TaskSortOptionView>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectSortOptionView {
+    pub label: &'static str,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectSortPopupView {
+    pub title: &'static str,
+    pub selected_index: usize,
+    pub options: Vec<ProjectSortOptionView>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShortcutTip {
     pub keys: &'static str,
@@ -832,6 +866,10 @@ const NAVIGATION_SHORTCUTS: &[ShortcutTip] = &[
         description: "change view",
     },
     ShortcutTip {
+        keys: "3/4/5 or h/l or ←/→",
+        description: "switch tab",
+    },
+    ShortcutTip {
         keys: "PgUp/PgDn",
         description: "page",
     },
@@ -845,16 +883,22 @@ const NAVIGATION_SHORTCUTS: &[ShortcutTip] = &[
     },
 ];
 
-const FILTERS_TAGS_SHORTCUTS: &[ShortcutTip] = &[ShortcutTip {
-    keys: "3/4/5",
-    description: "switch tab",
-},
-ShortcutTip {
-    keys: "Enter",
-    description: "open task list",
-}];
+const FILTERS_TAGS_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "3/4/5 or h/l or ←/→",
+        description: "switch tab",
+    },
+    ShortcutTip {
+        keys: "Enter",
+        description: "open task list",
+    },
+];
 
 const PROJECTS_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "3/4/5 or h/l or ←/→",
+        description: "switch tab",
+    },
     ShortcutTip {
         keys: "j/k or ↑/↓",
         description: "move project",
@@ -870,6 +914,14 @@ const PROJECTS_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "C/e/d",
         description: "new/edit/delete project",
+    },
+    ShortcutTip {
+        keys: "o",
+        description: "sort",
+    },
+    ShortcutTip {
+        keys: "J/K",
+        description: "reorder (manual)",
     },
     ShortcutTip {
         keys: "f",
@@ -1087,6 +1139,7 @@ pub struct App {
     project_editor: Option<ProjectEditorState>,
     task_search: Option<TaskSearchState>,
     task_sort_popup: Option<TaskSortPopupState>,
+    project_sort_popup: Option<ProjectSortPopupState>,
     delete_confirmation: Option<TaskId>,
     project_delete_confirmation: Option<ProjectId>,
     help_open: bool,
@@ -1110,11 +1163,14 @@ impl App {
 
     pub fn new(
         screen_data: ScreenData,
-        config: AppConfig,
+        mut config: AppConfig,
         config_paths: Option<AppPaths>,
         theme: ThemePalette,
         database: Database,
     ) -> Self {
+        if !config.ui.persist_project_list_sort {
+            config.ui.project_list_sort = ProjectSortOrder::Manual;
+        }
         let glyph_mode = config.ui.glyph_mode;
         let timer_settings = config.timer.clone();
         let long_break_interval = timer_settings.long_break_interval;
@@ -1141,6 +1197,7 @@ impl App {
             project_editor: None,
             task_search: None,
             task_sort_popup: None,
+            project_sort_popup: None,
             delete_confirmation: None,
             project_delete_confirmation: None,
             help_open: false,
@@ -1601,8 +1658,27 @@ impl App {
         })
     }
 
+    pub fn project_sort_popup_view(&self) -> Option<ProjectSortPopupView> {
+        let popup = self.project_sort_popup?;
+        Some(ProjectSortPopupView {
+            title: "Sort Projects",
+            selected_index: popup.selected_index,
+            options: ProjectSortOrder::all()
+                .iter()
+                .map(|sort_order| ProjectSortOptionView {
+                    label: sort_order.label(),
+                    is_active: *sort_order == self.config.ui.project_list_sort,
+                })
+                .collect(),
+        })
+    }
+
     pub fn task_sort_order(&self) -> TaskSortOrder {
         self.config.ui.task_list_sort
+    }
+
+    pub fn project_sort_order(&self) -> ProjectSortOrder {
+        self.config.ui.project_list_sort
     }
 
     pub fn hides_completed_tasks(&self) -> bool {
@@ -1672,7 +1748,7 @@ impl App {
     }
 
     pub fn focused_panel_shortcuts(&self) -> &'static [ShortcutTip] {
-        if self.task_sort_popup.is_some() {
+        if self.task_sort_popup.is_some() || self.project_sort_popup.is_some() {
             return SORT_POPUP_SHORTCUTS;
         }
         if self.task_editor.is_some() {
@@ -1770,6 +1846,12 @@ impl App {
         if self.task_sort_popup.is_some() {
             sections.push(ShortcutSection {
                 title: "Task Sort Popup",
+                tips: SORT_POPUP_SHORTCUTS,
+            });
+        }
+        if self.project_sort_popup.is_some() {
+            sections.push(ShortcutSection {
+                title: "Project Sort Popup",
                 tips: SORT_POPUP_SHORTCUTS,
             });
         }
@@ -2127,13 +2209,46 @@ impl App {
                     && !project.is_inbox
             })
             .collect::<Vec<_>>();
-        projects.sort_by(|left, right| {
-            left.child_order
-                .cmp(&right.child_order)
-                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-                .then_with(|| left.id.0.cmp(&right.id.0))
-        });
+        projects.sort_by(|left, right| self.compare_projects(left, right));
         projects
+    }
+
+    fn compare_projects(&self, left: &Project, right: &Project) -> std::cmp::Ordering {
+        match self.config.ui.project_list_sort {
+            // Todoist's project ordering is based on sibling-level `child_order`.
+            ProjectSortOrder::Manual => left
+                .child_order
+                .cmp(&right.child_order)
+                .then_with(|| self.compare_project_name(left, right))
+                .then_with(|| left.id.0.cmp(&right.id.0)),
+            ProjectSortOrder::NameAsc => self
+                .compare_project_name(left, right)
+                .then_with(|| left.child_order.cmp(&right.child_order))
+                .then_with(|| left.id.0.cmp(&right.id.0)),
+            ProjectSortOrder::NameDesc => self
+                .compare_project_name(right, left)
+                .then_with(|| left.child_order.cmp(&right.child_order))
+                .then_with(|| left.id.0.cmp(&right.id.0)),
+            ProjectSortOrder::TaskCountAsc => self
+                .tasks_for_project_filter(Some(left.id))
+                .cmp(&self.tasks_for_project_filter(Some(right.id)))
+                .then_with(|| self.compare_project_name(left, right))
+                .then_with(|| left.child_order.cmp(&right.child_order))
+                .then_with(|| left.id.0.cmp(&right.id.0)),
+            ProjectSortOrder::TaskCountDesc => self
+                .tasks_for_project_filter(Some(right.id))
+                .cmp(&self.tasks_for_project_filter(Some(left.id)))
+                .then_with(|| self.compare_project_name(left, right))
+                .then_with(|| left.child_order.cmp(&right.child_order))
+                .then_with(|| left.id.0.cmp(&right.id.0)),
+        }
+    }
+
+    fn compare_project_name(&self, left: &Project, right: &Project) -> std::cmp::Ordering {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.name.cmp(&right.name))
     }
 
     fn append_project_tree_rows(
@@ -2472,6 +2587,14 @@ impl App {
         self.task_sort_popup = Some(TaskSortPopupState { selected_index });
     }
 
+    fn open_project_sort_popup(&mut self) {
+        let selected_index = ProjectSortOrder::all()
+            .iter()
+            .position(|sort_order| *sort_order == self.config.ui.project_list_sort)
+            .unwrap_or(0);
+        self.project_sort_popup = Some(ProjectSortPopupState { selected_index });
+    }
+
     fn toggle_hide_completed_tasks(&mut self) -> Result<()> {
         self.config.ui.hide_completed_tasks = !self.config.ui.hide_completed_tasks;
         self.persist_ui_preferences()?;
@@ -2483,6 +2606,15 @@ impl App {
         self.config.ui.task_list_sort = sort_order;
         self.persist_ui_preferences()?;
         self.sync_task_selection();
+        Ok(())
+    }
+
+    fn apply_project_sort_order(&mut self, sort_order: ProjectSortOrder) -> Result<()> {
+        self.config.ui.project_list_sort = sort_order;
+        if self.config.ui.persist_project_list_sort {
+            self.persist_ui_preferences()?;
+        }
+        self.sync_project_selection();
         Ok(())
     }
 
@@ -3071,6 +3203,21 @@ impl App {
         self.selected_project_id = rows[next_index].project_id;
     }
 
+    fn reorder_selected_project(&mut self, direction: isize) -> Result<()> {
+        if self.config.ui.project_list_sort != ProjectSortOrder::Manual {
+            return Ok(());
+        }
+        let Some(project_id) = self.selected_project_id else {
+            return Ok(());
+        };
+        self.database
+            .project_repository()
+            .move_within_parent(project_id, direction)?;
+        self.refresh_tasks()?;
+        self.selected_project_id = Some(project_id);
+        Ok(())
+    }
+
     fn toggle_selected_project_favorite(&mut self) -> Result<()> {
         let Some(project_id) = self.selected_project_id else {
             return Ok(());
@@ -3335,6 +3482,32 @@ impl App {
                 }
                 _ => {
                     self.task_sort_popup = Some(popup);
+                }
+            }
+            return Ok(true);
+        }
+
+        if let Some(mut popup) = self.project_sort_popup.take() {
+            match code {
+                KeyCode::Esc | KeyCode::Char('o') => {}
+                KeyCode::Enter => {
+                    if let Some(sort_order) =
+                        ProjectSortOrder::all().get(popup.selected_index).copied()
+                    {
+                        self.apply_project_sort_order(sort_order)?;
+                    }
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let last_index = ProjectSortOrder::all().len().saturating_sub(1);
+                    popup.selected_index = (popup.selected_index + 1).min(last_index);
+                    self.project_sort_popup = Some(popup);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    popup.selected_index = popup.selected_index.saturating_sub(1);
+                    self.project_sort_popup = Some(popup);
+                }
+                _ => {
+                    self.project_sort_popup = Some(popup);
                 }
             }
             return Ok(true);
@@ -4148,6 +4321,12 @@ impl App {
             KeyCode::Char('h') | KeyCode::Left if self.focused_panel == PanelFocus::RightPane => {
                 self.active_right_panel_tab = self.active_right_panel_tab.previous();
             }
+            KeyCode::Char('l') | KeyCode::Right if self.focused_panel == PanelFocus::Navigation => {
+                self.active_sidebar_tab = self.active_sidebar_tab.next();
+            }
+            KeyCode::Char('h') | KeyCode::Left if self.focused_panel == PanelFocus::Navigation => {
+                self.active_sidebar_tab = self.active_sidebar_tab.previous();
+            }
             KeyCode::Char('l') | KeyCode::Right if self.focused_panel == PanelFocus::History => {
                 self.active_history_panel_tab = self.active_history_panel_tab.next();
             }
@@ -4260,6 +4439,24 @@ impl App {
                     && self.active_sidebar_tab == SidebarTab::Projects =>
             {
                 self.toggle_selected_project_favorite()?;
+            }
+            KeyCode::Char('o')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::Projects =>
+            {
+                self.open_project_sort_popup();
+            }
+            KeyCode::Char('J')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::Projects =>
+            {
+                self.reorder_selected_project(1)?;
+            }
+            KeyCode::Char('K')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::Projects =>
+            {
+                self.reorder_selected_project(-1)?;
             }
             KeyCode::Char('j') | KeyCode::Down
                 if self.focused_panel == PanelFocus::RightPane
@@ -4703,7 +4900,7 @@ fn fuzzy_matches(query: &str, candidate: &str) -> bool {
 mod tests {
     use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 
-    use crate::config::{AppConfig, GlyphMode, TaskSortOrder, TimerSettings};
+    use crate::config::{AppConfig, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings};
     use crate::domain::{ProjectColor, ProjectId, TaskDue, TaskId, TaskStatus};
     use crate::storage::{Database, ProjectRepository, TaskRepository};
     use crate::task_nlp::parse_task_input;
@@ -4789,6 +4986,72 @@ mod tests {
     }
 
     #[test]
+    fn app_defaults_projects_sort_to_manual_when_persistence_is_disabled() {
+        let mut config = AppConfig::default();
+        config.ui.project_list_sort = ProjectSortOrder::NameDesc;
+        config.ui.persist_project_list_sort = false;
+        let database = Database::open_in_memory().expect("in-memory database should open");
+
+        let app = App::new(
+            ScreenData {
+                tasks: database
+                    .task_repository()
+                    .list_all()
+                    .expect("tasks should load"),
+                projects: database
+                    .project_repository()
+                    .list_all()
+                    .expect("projects should load"),
+                ..ScreenData::default()
+            },
+            config,
+            None,
+            ThemePalette::load(
+                &crate::config::AppPaths::from_data_dir(std::env::temp_dir())
+                    .expect("paths should resolve"),
+                "catppuccin-mocha",
+            )
+            .expect("built-in theme should load"),
+            database,
+        );
+
+        assert_eq!(app.project_sort_order(), ProjectSortOrder::Manual);
+    }
+
+    #[test]
+    fn app_restores_projects_sort_when_persistence_is_enabled() {
+        let mut config = AppConfig::default();
+        config.ui.project_list_sort = ProjectSortOrder::NameDesc;
+        config.ui.persist_project_list_sort = true;
+        let database = Database::open_in_memory().expect("in-memory database should open");
+
+        let app = App::new(
+            ScreenData {
+                tasks: database
+                    .task_repository()
+                    .list_all()
+                    .expect("tasks should load"),
+                projects: database
+                    .project_repository()
+                    .list_all()
+                    .expect("projects should load"),
+                ..ScreenData::default()
+            },
+            config,
+            None,
+            ThemePalette::load(
+                &crate::config::AppPaths::from_data_dir(std::env::temp_dir())
+                    .expect("paths should resolve"),
+                "catppuccin-mocha",
+            )
+            .expect("built-in theme should load"),
+            database,
+        );
+
+        assert_eq!(app.project_sort_order(), ProjectSortOrder::NameDesc);
+    }
+
+    #[test]
     fn app_switches_right_panel_tabs() {
         let mut app = test_app();
         app.handle_key(crossterm::event::KeyCode::Char('7'))
@@ -4831,6 +5094,42 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::End)
             .expect("task view should jump");
         assert_eq!(app.active_task_view(), TaskView::Soon);
+    }
+
+    #[test]
+    fn app_switches_sidebar_tabs_with_arrow_keys() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('3'))
+            .expect("focus should switch");
+        assert_eq!(app.active_sidebar_tab(), SidebarTab::Navigation);
+
+        app.handle_key(crossterm::event::KeyCode::Right)
+            .expect("sidebar tab should switch");
+        assert_eq!(app.active_sidebar_tab(), SidebarTab::FiltersTags);
+
+        app.handle_key(crossterm::event::KeyCode::Right)
+            .expect("sidebar tab should switch");
+        assert_eq!(app.active_sidebar_tab(), SidebarTab::Projects);
+
+        app.handle_key(crossterm::event::KeyCode::Left)
+            .expect("sidebar tab should switch");
+        assert_eq!(app.active_sidebar_tab(), SidebarTab::FiltersTags);
+    }
+
+    #[test]
+    fn app_switches_sidebar_tabs_with_h_and_l() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('3'))
+            .expect("focus should switch");
+        assert_eq!(app.active_sidebar_tab(), SidebarTab::Navigation);
+
+        app.handle_key(crossterm::event::KeyCode::Char('l'))
+            .expect("sidebar tab should switch");
+        assert_eq!(app.active_sidebar_tab(), SidebarTab::FiltersTags);
+
+        app.handle_key(crossterm::event::KeyCode::Char('h'))
+            .expect("sidebar tab should switch");
+        assert_eq!(app.active_sidebar_tab(), SidebarTab::Navigation);
     }
 
     #[test]
@@ -5442,11 +5741,12 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Enter)
             .expect("project should save");
 
-        assert!(app
-            .screen_data
-            .projects
-            .iter()
-            .any(|project| project.name == "abd"));
+        assert!(
+            app.screen_data
+                .projects
+                .iter()
+                .any(|project| project.name == "abd")
+        );
     }
 
     #[test]
@@ -6234,6 +6534,124 @@ mod tests {
         assert_eq!(child_b_row.tree_prefix, "└ ");
         assert_eq!(grand_a_row.tree_prefix, "│ └ ");
         assert_eq!(great_a_row.tree_prefix, "│   └ ");
+    }
+
+    #[test]
+    fn project_sort_popup_applies_selected_sort() {
+        let mut app = test_app();
+        let alpha = app
+            .database
+            .project_repository()
+            .create("Alpha", None, ProjectColor::Blue, false, Local::now())
+            .expect("alpha should create");
+        let bravo = app
+            .database
+            .project_repository()
+            .create("Bravo", None, ProjectColor::Teal, false, Local::now())
+            .expect("bravo should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('o'))
+            .expect("sort popup should open");
+        for _ in 0..4 {
+            app.handle_key(crossterm::event::KeyCode::Char('k'))
+                .expect("selection should move");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("sort should apply");
+
+        assert_eq!(app.project_sort_order(), ProjectSortOrder::NameAsc);
+        let rows = app.project_tree_rows();
+        let alpha_index = rows
+            .iter()
+            .position(|row| row.project_id == Some(alpha.id))
+            .expect("alpha row should exist");
+        let bravo_index = rows
+            .iter()
+            .position(|row| row.project_id == Some(bravo.id))
+            .expect("bravo row should exist");
+        assert!(alpha_index < bravo_index);
+    }
+
+    #[test]
+    fn projects_manual_reorder_uses_shift_j_and_shift_k() {
+        let mut app = test_app();
+        let alpha = app
+            .database
+            .project_repository()
+            .create("Alpha", None, ProjectColor::Blue, false, Local::now())
+            .expect("alpha should create");
+        let bravo = app
+            .database
+            .project_repository()
+            .create("Bravo", None, ProjectColor::Teal, false, Local::now())
+            .expect("bravo should create");
+        let charlie = app
+            .database
+            .project_repository()
+            .create("Charlie", None, ProjectColor::SkyBlue, false, Local::now())
+            .expect("charlie should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.selected_project_id = Some(bravo.id);
+
+        app.handle_key(crossterm::event::KeyCode::Char('J'))
+            .expect("manual reorder should move down");
+        let moved_down = app.project_tree_rows();
+        let down_ids = moved_down
+            .iter()
+            .filter_map(|row| row.project_id)
+            .filter(|id| [alpha.id, bravo.id, charlie.id].contains(id))
+            .collect::<Vec<_>>();
+        assert_eq!(down_ids, vec![alpha.id, charlie.id, bravo.id]);
+
+        app.handle_key(crossterm::event::KeyCode::Char('K'))
+            .expect("manual reorder should move up");
+        let moved_up = app.project_tree_rows();
+        let up_ids = moved_up
+            .iter()
+            .filter_map(|row| row.project_id)
+            .filter(|id| [alpha.id, bravo.id, charlie.id].contains(id))
+            .collect::<Vec<_>>();
+        assert_eq!(up_ids, vec![alpha.id, bravo.id, charlie.id]);
+    }
+
+    #[test]
+    fn projects_shift_j_is_ignored_when_sort_is_not_manual() {
+        let mut app = test_app();
+        let bravo = app
+            .database
+            .project_repository()
+            .create("Bravo", None, ProjectColor::Blue, false, Local::now())
+            .expect("bravo should create");
+        let alpha = app
+            .database
+            .project_repository()
+            .create("Alpha", None, ProjectColor::Teal, false, Local::now())
+            .expect("alpha should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.apply_project_sort_order(ProjectSortOrder::NameAsc)
+            .expect("sort should apply");
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.selected_project_id = Some(bravo.id);
+        app.handle_key(crossterm::event::KeyCode::Char('J'))
+            .expect("reorder should no-op");
+
+        app.apply_project_sort_order(ProjectSortOrder::Manual)
+            .expect("sort should apply");
+        let rows = app.project_tree_rows();
+        let ordered_ids = rows
+            .iter()
+            .filter_map(|row| row.project_id)
+            .filter(|id| [alpha.id, bravo.id].contains(id))
+            .collect::<Vec<_>>();
+        assert_eq!(ordered_ids, vec![bravo.id, alpha.id]);
     }
 
     #[test]

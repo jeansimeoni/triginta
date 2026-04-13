@@ -29,6 +29,8 @@ The config is organized by sections.
 glyph_mode = "nerd-fonts"
 theme = "catppuccin-mocha"
 task_list_sort = "due-asc"
+project_list_sort = "manual"
+persist_project_list_sort = false
 hide_completed_tasks = true
 
 [timer]
@@ -45,6 +47,8 @@ ui:
   glyph_mode: nerd-fonts
   theme: catppuccin-mocha
   task_list_sort: due-asc
+  project_list_sort: manual
+  persist_project_list_sort: false
   hide_completed_tasks: true
 
 timer:
@@ -107,6 +111,35 @@ Allowed values:
 Default:
 
 - `true`
+
+`ui.project_list_sort` controls the default project-tree ordering used in panel
+5 (Projects tab in the Navigation panel).
+
+Allowed values:
+
+- `name-asc`
+- `name-desc`
+- `task-count-asc`
+- `task-count-desc`
+- `manual`
+
+Default:
+
+- `manual`
+
+`ui.persist_project_list_sort` controls startup behavior for project sorting.
+When `false` (default), Triginta always starts with `manual` sorting in the
+Projects tab, regardless of the previously selected sort. When `true`,
+Triginta persists and restores the selected project sort order.
+
+Allowed values:
+
+- `true`
+- `false`
+
+Default:
+
+- `false`
 
 ## Theme Files
 
