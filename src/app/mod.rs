@@ -763,6 +763,10 @@ const NAVIGATION_SHORTCUTS: &[ShortcutTip] = &[
         description: "change view",
     },
     ShortcutTip {
+        keys: "PgUp/PgDn",
+        description: "page",
+    },
+    ShortcutTip {
         keys: "Home/End",
         description: "jump first/last",
     },
@@ -777,6 +781,10 @@ const PROJECTS_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "j/k or ↑/↓",
         description: "move project",
+    },
+    ShortcutTip {
+        keys: "PgUp/PgDn",
+        description: "page",
     },
     ShortcutTip {
         keys: "Home",
@@ -2185,6 +2193,20 @@ impl App {
 
     fn select_previous_task_view(&mut self) {
         self.set_active_task_view(self.active_task_view.previous());
+    }
+
+    fn move_task_view_selection(&mut self, offset: isize) {
+        let all = TaskView::all();
+        if all.is_empty() {
+            return;
+        }
+        let current_index = all
+            .iter()
+            .position(|view| *view == self.active_task_view)
+            .unwrap_or(0);
+        let next_index = (current_index as isize + offset)
+            .clamp(0, all.len().saturating_sub(1) as isize) as usize;
+        self.set_active_task_view(all[next_index]);
     }
 
     fn move_task_selection(&mut self, offset: isize) {
@@ -3632,6 +3654,22 @@ impl App {
                     SidebarTab::Navigation => self.select_previous_task_view(),
                     SidebarTab::FiltersTags => {}
                     SidebarTab::Projects => self.move_project_selection(-1),
+                }
+            }
+            KeyCode::PageDown if self.focused_panel == PanelFocus::Navigation => {
+                const SIDEBAR_PAGE_STEP: isize = 5;
+                match self.active_sidebar_tab {
+                    SidebarTab::Navigation => self.move_task_view_selection(SIDEBAR_PAGE_STEP),
+                    SidebarTab::FiltersTags => {}
+                    SidebarTab::Projects => self.move_project_selection(SIDEBAR_PAGE_STEP),
+                }
+            }
+            KeyCode::PageUp if self.focused_panel == PanelFocus::Navigation => {
+                const SIDEBAR_PAGE_STEP: isize = 5;
+                match self.active_sidebar_tab {
+                    SidebarTab::Navigation => self.move_task_view_selection(-SIDEBAR_PAGE_STEP),
+                    SidebarTab::FiltersTags => {}
+                    SidebarTab::Projects => self.move_project_selection(-SIDEBAR_PAGE_STEP),
                 }
             }
             KeyCode::Home if self.focused_panel == PanelFocus::Navigation => {

@@ -191,10 +191,13 @@ fn render_history_panel(
 ) {
     let data = app.screen_data();
     let today_selected = app.history_scroll();
-    let (summary, lines, right_indicator) = match app.active_history_panel_tab() {
+    let (summary, lines, right_indicator): (Line<'static>, Vec<Line<'static>>, Option<(usize, usize)>) =
+        match app.active_history_panel_tab() {
         HistoryPanelTab::Today => {
             let rows = history_rows(data.history_entries.as_slice(), data.tasks.as_slice());
             let selected = today_selected.min(rows.len().saturating_sub(1));
+            let visible_height = area.height.saturating_sub(2) as usize;
+            let start = selected.saturating_sub(visible_height.saturating_sub(1));
             let summary = Line::from(format!(
                 "{} {}  |  {} {}  |  {} {}",
                 symbols.timer,
@@ -209,8 +212,6 @@ fn render_history_panel(
                 vec![Line::from("No pomodoros recorded today.")]
             } else {
                 let show_selection = app.focused_panel() == PanelFocus::History;
-                let visible_height = area.height.saturating_sub(2) as usize;
-                let start = selected.saturating_sub(visible_height.saturating_sub(1));
                 let end = (start + visible_height).min(rows.len());
                 rows[start..end]
                     .iter()
@@ -227,7 +228,7 @@ fn render_history_panel(
                     .collect::<Vec<_>>()
             };
             let indicator = if rows.len() > area.height.saturating_sub(2) as usize {
-                Some((rows.len(), selected))
+                Some((rows.len(), start))
             } else {
                 None
             };
@@ -269,9 +270,12 @@ fn render_history_panel(
     frame.render_widget(history, content);
 
     if let Some((content_length, position)) = right_indicator {
+        let viewport = inner.height as usize;
+        let max_position = content_length.saturating_sub(viewport);
         let mut scrollbar_state = ScrollbarState::default()
             .content_length(content_length)
-            .position(position);
+            .viewport_content_length(viewport)
+            .position(position.min(max_position));
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
@@ -292,8 +296,9 @@ fn render_navigation_panel(
     palette: ThemePalette,
 ) {
     let content_width = area.width.saturating_sub(2);
-    let lines = match app.active_sidebar_tab() {
-        SidebarTab::Navigation => TaskView::all()
+    let (lines, selected_index) = match app.active_sidebar_tab() {
+        SidebarTab::Navigation => (
+            TaskView::all()
             .iter()
             .map(|view| {
                 let selected = app.active_task_view() == *view;
@@ -306,18 +311,29 @@ fn render_navigation_panel(
                 )
             })
             .collect::<Vec<_>>(),
-        SidebarTab::FiltersTags => vec![
-            Line::from("Filters and tags are reserved here."),
-            Line::from("Project metadata now occupies the third tab."),
-        ],
+            TaskView::all()
+                .iter()
+                .position(|view| app.active_task_view() == *view),
+        ),
+        SidebarTab::FiltersTags => (
+            vec![
+                Line::from("Filters and tags are reserved here."),
+                Line::from("Project metadata now occupies the third tab."),
+            ],
+            None,
+        ),
         SidebarTab::Projects => {
             let rows = app.project_tree_rows();
+            let selected_index = rows.iter().position(|row| row.is_selected);
             if rows.len() == 1 {
-                vec![Line::from("No projects yet.")]
+                (vec![Line::from("No projects yet.")], selected_index)
             } else {
-                rows.into_iter()
-                    .map(|row| project_tree_line(row, symbols, content_width, palette))
-                    .collect::<Vec<_>>()
+                (
+                    rows.into_iter()
+                        .map(|row| project_tree_line(row, symbols, content_width, palette))
+                        .collect::<Vec<_>>(),
+                    selected_index,
+                )
             }
         }
     };
@@ -328,18 +344,55 @@ fn render_navigation_panel(
         SidebarTab::Projects => projects_footer_hint(symbols, palette),
     };
 
-    let content = Paragraph::new(lines)
-        .block(
-            panel_block(
-                navigation_title(app.active_sidebar_tab(), symbols, palette),
-                focused_panel == PanelFocus::Navigation,
-                palette,
-            )
-            .title_bottom(footer_hint),
-        )
-        .wrap(Wrap { trim: false });
+    let block = panel_block(
+        navigation_title(app.active_sidebar_tab(), symbols, palette),
+        focused_panel == PanelFocus::Navigation,
+        palette,
+    )
+    .title_bottom(footer_hint);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    frame.render_widget(content, area);
+    let viewport_lines = inner.height as usize;
+    let scroll = panel_scroll_offset(lines.len(), viewport_lines, selected_index);
+    let visible_lines = lines
+        .iter()
+        .skip(scroll)
+        .take(viewport_lines)
+        .cloned()
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(visible_lines).wrap(Wrap { trim: false }),
+        inner,
+    );
+
+    if lines.len() > viewport_lines {
+        let max_position = lines.len().saturating_sub(viewport_lines);
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(lines.len())
+            .viewport_content_length(viewport_lines)
+            .position(scroll.min(max_position));
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("▐")
+            .thumb_style(Style::default().fg(palette.subtle_text));
+        frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+    }
+}
+
+fn panel_scroll_offset(total_lines: usize, viewport_lines: usize, selected_index: Option<usize>) -> usize {
+    if total_lines <= viewport_lines || viewport_lines == 0 {
+        return 0;
+    }
+
+    let max_scroll = total_lines.saturating_sub(viewport_lines);
+    let selected = selected_index.unwrap_or(0).min(total_lines.saturating_sub(1));
+    selected
+        .saturating_sub(viewport_lines / 2)
+        .min(max_scroll)
 }
 
 fn render_favorites_panel(
@@ -959,9 +1012,11 @@ fn render_help_dialog(frame: &mut Frame<'_>, app: &App, palette: ThemePalette) {
     frame.render_widget(popup, area);
 
     if lines.len() > visible_height {
+        let max_position = lines.len().saturating_sub(visible_height);
         let mut scrollbar_state = ScrollbarState::default()
             .content_length(lines.len())
-            .position(start);
+            .viewport_content_length(visible_height)
+            .position(start.min(max_position));
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
