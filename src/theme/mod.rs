@@ -151,7 +151,9 @@ struct ProjectColorFile {
 
 impl ThemeFile {
     fn into_palette(self) -> Result<ThemePalette> {
-        let project_colors = self.project_colors.unwrap_or_else(default_project_color_file);
+        let project_colors = self
+            .project_colors
+            .unwrap_or_else(default_project_color_file);
         Ok(ThemePalette {
             text: parse_hex_color(&self.text).context("invalid theme color for text")?,
             subtle_text: parse_hex_color(&self.subtle_text)

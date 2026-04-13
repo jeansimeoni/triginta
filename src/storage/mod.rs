@@ -5,8 +5,8 @@ use chrono::{DateTime, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
-    DayHistorySummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate,
-    SessionEntry, SessionKind, SessionOutcome, Task, TaskDue, TaskId, TaskStatus, TaskUpdate,
+    DayHistorySummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate, SessionEntry,
+    SessionKind, SessionOutcome, Task, TaskDue, TaskId, TaskStatus, TaskUpdate,
 };
 
 // Keeping the schema as a string literal makes bootstrap simple for this early
@@ -174,7 +174,10 @@ impl Database {
             .execute_batch(SCHEMA)
             .context("failed to initialize database schema")?;
         self.ensure_tasks_column("deleted_at", "ALTER TABLE tasks ADD COLUMN deleted_at TEXT")?;
-        self.ensure_tasks_column("project_id", "ALTER TABLE tasks ADD COLUMN project_id INTEGER")?;
+        self.ensure_tasks_column(
+            "project_id",
+            "ALTER TABLE tasks ADD COLUMN project_id INTEGER",
+        )?;
         self.ensure_tasks_column("due_date", "ALTER TABLE tasks ADD COLUMN due_date TEXT")?;
         self.ensure_tasks_column(
             "due_datetime",
@@ -931,7 +934,8 @@ mod tests {
         let database = Database::open_in_memory()?;
         let repository = database.task_repository();
         let inbox_project_id = database.project_repository().inbox_project_id()?;
-        let created = repository.create("Write release notes", inbox_project_id, None, Local::now())?;
+        let created =
+            repository.create("Write release notes", inbox_project_id, None, Local::now())?;
 
         assert_eq!(created.title, "Write release notes");
         assert_eq!(created.status, TaskStatus::Todo);
@@ -1091,13 +1095,7 @@ mod tests {
         let projects = database.project_repository();
         let tasks = database.task_repository();
 
-        let parent = projects.create(
-            "Work",
-            None,
-            ProjectColor::Blue,
-            true,
-            Local::now(),
-        )?;
+        let parent = projects.create("Work", None, ProjectColor::Blue, true, Local::now())?;
         let child = projects.create(
             "Client A",
             Some(parent.id),
