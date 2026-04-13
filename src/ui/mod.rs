@@ -135,7 +135,7 @@ fn render_timer_panel(
 ) {
     let timer = app.timer_view();
     let block = panel_block(
-        Line::from(format!("[1] Pomodoro")),
+        Line::from(format!("[1] {} Pomodoro", symbols.timer)),
         app.focused_panel() == PanelFocus::Timer,
         palette,
     );
@@ -196,9 +196,12 @@ fn render_history_panel(
             let rows = history_rows(data.history_entries.as_slice(), data.tasks.as_slice());
             let selected = today_selected.min(rows.len().saturating_sub(1));
             let summary = Line::from(format!(
-                "{} focus  |  {} break  |  {} sessions",
+                "{} {}  |  {} {}  |  {} {}",
+                symbols.timer,
                 format_duration_seconds(data.today_stats.total_work_seconds),
+                symbols.breaking,
                 format_duration_seconds(data.today_stats.total_break_seconds),
+                symbols.stats,
                 data.today_stats.total_sessions,
             ))
             .right_aligned();
@@ -232,9 +235,12 @@ fn render_history_panel(
         }
         HistoryPanelTab::Last7Days => (
             Line::from(format!(
-                "{} focus  |  {} break  |  {} sessions",
+                "{} {}  |  {} {}  |  {} {}",
+                symbols.timer,
                 format_duration_seconds(data.weekly_stats.total_work_seconds),
+                symbols.breaking,
                 format_duration_seconds(data.weekly_stats.total_break_seconds),
+                symbols.stats,
                 data.weekly_stats.total_sessions,
             ))
             .right_aligned(),
@@ -247,7 +253,7 @@ fn render_history_panel(
         ),
     };
     let block = panel_block(
-        history_title(app.active_history_panel_tab(), palette),
+        history_title(app.active_history_panel_tab(), symbols, palette),
         app.focused_panel() == PanelFocus::History,
         palette,
     )
@@ -325,13 +331,13 @@ fn render_navigation_panel(
     let content = Paragraph::new(lines)
         .block(
             panel_block(
-                navigation_title(app.active_sidebar_tab(), palette),
+                navigation_title(app.active_sidebar_tab(), symbols, palette),
                 focused_panel == PanelFocus::Navigation,
                 palette,
             )
             .title_bottom(footer_hint),
         )
-        .wrap(Wrap { trim: true });
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(content, area);
 }
@@ -362,7 +368,7 @@ fn render_favorites_panel(
 
     let panel = Paragraph::new(lines)
         .block(panel_block(
-            Line::from("[6] Favorites"),
+            Line::from(format!("[6] {} Favorites", symbols.favorite)),
             focused_panel == PanelFocus::Favorites,
             palette,
         ))
@@ -521,8 +527,10 @@ fn render_statistics_panel(
         .round() as usize;
     let graph = format!(
         "[{}{}]",
-        "#".repeat(filled),
-        ".".repeat(completed_width.saturating_sub(filled))
+        symbols.bar_full.repeat(filled),
+        symbols
+            .bar_empty
+            .repeat(completed_width.saturating_sub(filled))
     );
 
     let lines = vec![
@@ -731,7 +739,9 @@ fn task_project_line(
         Style::default().fg(project_color)
     };
     let name_style = if selected {
-        Style::default().fg(project_color).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(project_color)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(project_color)
     };
@@ -775,13 +785,10 @@ fn project_tree_line(
     width: u16,
     palette: ThemePalette,
 ) -> Line<'static> {
-    let mut label = String::new();
-    label.push_str(&"  ".repeat(row.depth));
-    if row.depth > 0 {
-        label.push_str("└ ");
-    }
+    let mut label = row.tree_prefix.clone();
     if row.is_favorite {
-        label.push_str("★ ");
+        label.push_str(symbols.favorite);
+        label.push(' ');
     }
     let color = row
         .color
@@ -795,6 +802,13 @@ fn project_tree_line(
     } else {
         Style::default()
     };
+    let count_text = format!(" {}", row.task_count);
+    let name_width = ((width as usize)
+        .saturating_sub(label.width())
+        .saturating_sub(symbols.project.width())
+        .saturating_sub(1)
+        .saturating_sub(count_text.width()))
+    .max(1);
     let mut spans = vec![
         Span::styled(
             label,
@@ -813,10 +827,7 @@ fn project_tree_line(
             },
         ),
         Span::styled(
-            ellipsize_end(
-                row.name.as_str(),
-                width.saturating_sub(7 + row.task_count.to_string().width() as u16) as usize,
-            ),
+            ellipsize_end(row.name.as_str(), name_width),
             if row.is_selected {
                 selection_style
             } else {
@@ -824,7 +835,7 @@ fn project_tree_line(
             },
         ),
         Span::styled(
-            format!(" {}", row.task_count),
+            count_text,
             if row.is_selected {
                 Style::default().fg(palette.subtle_text).bg(palette.border)
             } else {
@@ -853,7 +864,7 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
     }
 
     if let Some(search) = app.task_search_view() {
-        render_task_search_popup(frame, &search, palette);
+        render_task_search_popup(frame, &search, symbols, palette);
         return;
     }
 
@@ -863,7 +874,7 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
     }
 
     if let Some(editor) = app.project_editor_view() {
-        render_project_editor_popup(frame, &editor, palette);
+        render_project_editor_popup(frame, &editor, symbols, palette);
         return;
     }
 
@@ -873,12 +884,12 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
     }
 
     if let Some(confirmation) = app.project_delete_confirmation_view() {
-        render_project_delete_confirmation(frame, &confirmation, palette);
+        render_project_delete_confirmation(frame, &confirmation, symbols, palette);
         return;
     }
 
     if let Some(confirmation) = app.delete_confirmation_view() {
-        render_delete_confirmation(frame, &confirmation, palette);
+        render_delete_confirmation(frame, &confirmation, symbols, palette);
     }
 }
 
@@ -1055,10 +1066,12 @@ fn fit_footer_parts(parts: &[String], width: usize) -> String {
 fn render_task_input_popup(
     frame: &mut Frame<'_>,
     input: &TaskInputView,
-    _symbols: Symbols,
+    symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let show_details = input.due_preview.is_some() || !input.project_suggestions.is_empty() || !input.project_name.is_empty();
+    let show_details = input.due_preview.is_some()
+        || !input.project_suggestions.is_empty()
+        || !input.project_name.is_empty();
     let total_height = if show_details { 11 } else { 3 };
     let area = centered_rect(frame.area(), 72, total_height);
     frame.render_widget(Clear, area);
@@ -1068,10 +1081,10 @@ fn render_task_input_popup(
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Length(8)])
             .split(area);
-        render_task_input_box(frame, sections[0], input, palette);
+        render_task_input_box(frame, sections[0], input, symbols, palette);
         render_task_due_preview(frame, sections[1], input, palette);
     } else {
-        render_task_input_box(frame, area, input, palette);
+        render_task_input_box(frame, area, input, symbols, palette);
     }
 }
 
@@ -1079,6 +1092,7 @@ fn render_task_input_box(
     frame: &mut Frame<'_>,
     area: Rect,
     input: &TaskInputView,
+    symbols: Symbols,
     palette: ThemePalette,
 ) {
     let visible_width = area.width.saturating_sub(4) as usize;
@@ -1095,6 +1109,7 @@ fn render_task_input_box(
                     .fg(palette.accent)
                     .add_modifier(Modifier::BOLD),
             ))
+            .title_bottom(task_input_shortcuts_line(symbols, palette))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette.accent)),
     );
@@ -1190,7 +1205,10 @@ fn task_input_meta_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(vec![
         Span::styled("Project: ", Style::default().fg(palette.subtle_text)),
-        Span::styled(input.project_name.clone(), Style::default().fg(palette.text)),
+        Span::styled(
+            input.project_name.clone(),
+            Style::default().fg(palette.text),
+        ),
     ])];
     if !input.project_suggestions.is_empty() {
         lines.push(Line::from(vec![
@@ -1249,17 +1267,16 @@ fn task_list_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<
 }
 
 fn task_list_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> Line<'static> {
-    let hints = if focused {
-        let _ = symbols;
-        " o sort  f done "
-    } else {
-        ""
-    };
+    if !focused {
+        return Line::from("").right_aligned();
+    }
 
-    Line::from(vec![Span::styled(
-        hints,
-        Style::default().fg(palette.subtle_text),
-    )])
+    Line::from(vec![
+        Span::styled(symbols.sort, Style::default().fg(palette.accent)),
+        Span::styled(" o sort  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.done, Style::default().fg(palette.accent)),
+        Span::styled(" x done", Style::default().fg(palette.subtle_text)),
+    ])
     .right_aligned()
 }
 
@@ -1611,6 +1628,7 @@ fn anchored_dropdown_rect(area: Rect, anchor: Rect, width: u16, height: u16) -> 
 fn render_delete_confirmation(
     frame: &mut Frame<'_>,
     confirmation: &DeleteConfirmationView,
+    symbols: Symbols,
     palette: ThemePalette,
 ) {
     let area = centered_rect(frame.area(), 64, 6);
@@ -1625,7 +1643,6 @@ fn render_delete_confirmation(
         )),
         Line::from(""),
         Line::from("History links will be preserved."),
-        Line::from("Enter/Y confirm  Esc/N cancel"),
     ];
     let popup = Paragraph::new(lines).block(
         Block::default()
@@ -1635,6 +1652,7 @@ fn render_delete_confirmation(
                     .fg(palette.error)
                     .add_modifier(Modifier::BOLD),
             ))
+            .title_bottom(confirm_shortcuts_line(symbols, palette))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette.error)),
     );
@@ -1645,6 +1663,7 @@ fn render_delete_confirmation(
 fn render_project_delete_confirmation(
     frame: &mut Frame<'_>,
     confirmation: &ProjectDeleteConfirmationView,
+    symbols: Symbols,
     palette: ThemePalette,
 ) {
     let area = centered_rect(frame.area(), 64, 7);
@@ -1660,7 +1679,6 @@ fn render_project_delete_confirmation(
         Line::from(""),
         Line::from("Tasks in this subtree will be soft-deleted."),
         Line::from("History links will be preserved."),
-        Line::from("Enter/Y confirm  Esc/N cancel"),
     ];
     let popup = Paragraph::new(lines).block(
         Block::default()
@@ -1670,6 +1688,7 @@ fn render_project_delete_confirmation(
                     .fg(palette.error)
                     .add_modifier(Modifier::BOLD),
             ))
+            .title_bottom(confirm_shortcuts_line(symbols, palette))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette.error)),
     );
@@ -1680,10 +1699,12 @@ fn render_project_delete_confirmation(
 fn render_project_editor_popup(
     frame: &mut Frame<'_>,
     editor: &ProjectEditorView,
+    symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let show_parent_dropdown = !editor.parent_suggestions.is_empty();
-    let area = centered_rect(frame.area(), 72, if show_parent_dropdown { 12 } else { 10 });
+    let show_parent_label = editor.parent_label != "No Parent";
+    let show_parent_dropdown = editor.focus.name && !editor.parent_suggestions.is_empty();
+    let area = centered_rect(frame.area(), 72, if show_parent_label { 11 } else { 8 });
     frame.render_widget(Clear, area);
     let block = Block::default()
         .title(Span::styled(
@@ -1692,72 +1713,101 @@ fn render_project_editor_popup(
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
         ))
-        .title_bottom(Line::from("Tab next field  h/l change value  Enter save").right_aligned())
+        .title_bottom(project_editor_shortcuts_line(symbols, palette))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.accent));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let constraints = if show_parent_label {
+        vec![
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ]
+    } else {
+        vec![
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ]
+    };
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(if show_parent_dropdown {
-            [
-                Constraint::Length(3),
-                Constraint::Length(4),
-                Constraint::Length(3),
-                Constraint::Min(0),
-            ]
-        } else {
-            [
-                Constraint::Length(3),
-                Constraint::Length(5),
-                Constraint::Min(0),
-                Constraint::Min(0),
-            ]
-        })
+        .constraints(constraints)
         .split(inner);
 
     render_editor_field(
         frame,
         sections[0],
-        "Name",
+        "Name [F1]",
         &editor.name_value,
         editor.name_cursor,
         editor.focus.name,
-        Symbols::new(GlyphMode::Ascii),
+        symbols,
+        None,
+        palette,
+    );
+    let meta_row = sections[1];
+    let meta_columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(meta_row);
+    render_project_value_field(
+        frame,
+        meta_columns[0],
+        "Color [F2]",
+        &editor.color_label,
+        editor.focus.color,
+        Some(Style::default().fg(palette.project_color(editor.color_value))),
+        palette,
+    );
+    render_project_value_field(
+        frame,
+        meta_columns[1],
+        "Favorite [F3]",
+        if editor.is_favorite { "yes" } else { "no" },
+        editor.focus.favorite,
         None,
         palette,
     );
 
+    if show_parent_label {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Parent: ", Style::default().fg(palette.subtle_text)),
+                Span::styled(
+                    editor.parent_label.clone(),
+                    Style::default().fg(palette.text),
+                ),
+            ]))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.border)),
+            ),
+            sections[2],
+        );
+    }
+
     if show_parent_dropdown {
-        render_project_parent_suggestions(frame, sections[1], editor, palette);
+        let dropdown_height = editor.parent_suggestions.len().min(4) as u16 + 2;
+        let visible_width = sections[0].width.saturating_sub(4) as usize;
+        let cursor_col = editor_cursor_display_column(
+            &editor.name_value,
+            editor.name_cursor,
+            visible_width,
+            symbols,
+        );
+        let dropdown_area = project_parent_dropdown_rect(
+            frame.area(),
+            sections[0],
+            cursor_col as u16,
+            project_parent_dropdown_width(editor.parent_suggestions.as_slice()),
+            dropdown_height,
+        );
+        render_project_parent_suggestions(frame, dropdown_area, editor, palette);
     }
-
-    let mut meta_lines = vec![Line::from(vec![
-        Span::styled("Color: ", Style::default().fg(palette.subtle_text)),
-        Span::styled(
-            editor.color_label.clone(),
-            Style::default().fg(palette.project_color(editor.color_value)),
-        ),
-    ])];
-    if editor.parent_label != "No Parent" {
-        meta_lines.push(Line::from(vec![
-            Span::styled("Parent: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(editor.parent_label.clone(), Style::default().fg(palette.text)),
-        ]));
-    }
-    meta_lines.push(Line::from(vec![
-        Span::styled("Favorite: ", Style::default().fg(palette.subtle_text)),
-        Span::styled(
-            if editor.is_favorite { "yes" } else { "no" },
-            Style::default().fg(palette.text),
-        ),
-    ]));
-
-    frame.render_widget(
-        Paragraph::new(meta_lines)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(palette.border))),
-        if show_parent_dropdown { sections[2] } else { sections[1] },
-    );
 }
 
 fn render_project_parent_suggestions(
@@ -1771,9 +1821,10 @@ fn render_project_parent_suggestions(
         .iter()
         .enumerate()
         .map(|(index, suggestion)| {
-            let style = if index == editor
-                .selected_parent_suggestion
-                .min(editor.parent_suggestions.len().saturating_sub(1))
+            let style = if index
+                == editor
+                    .selected_parent_suggestion
+                    .min(editor.parent_suggestions.len().saturating_sub(1))
             {
                 Style::default()
                     .fg(palette.text)
@@ -1792,15 +1843,61 @@ fn render_project_parent_suggestions(
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
-                .title(Span::styled("Parent", Style::default().fg(palette.accent)))
+                .title(Span::styled(
+                    "Parent Project",
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                ))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.accent)),
+                .border_style(
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
         ),
         area,
     );
 }
 
-fn render_task_search_popup(frame: &mut Frame<'_>, search: &TaskSearchView, palette: ThemePalette) {
+fn render_project_value_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: &str,
+    focused: bool,
+    value_style: Option<Style>,
+    palette: ThemePalette,
+) {
+    let border_style = if focused {
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.subtle_text)
+    };
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            ellipsize_end(value, area.width.saturating_sub(4) as usize),
+            value_style.unwrap_or_else(|| Style::default().fg(palette.text)),
+        )))
+        .block(
+            Block::default()
+                .title(Span::styled(label, border_style))
+                .borders(Borders::ALL)
+                .border_style(border_style),
+        ),
+        area,
+    );
+}
+
+fn render_task_search_popup(
+    frame: &mut Frame<'_>,
+    search: &TaskSearchView,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
     let area = centered_rect(frame.area(), 72, 8);
     frame.render_widget(Clear, area);
 
@@ -1839,6 +1936,7 @@ fn render_task_search_popup(frame: &mut Frame<'_>, search: &TaskSearchView, pale
                     .fg(palette.accent)
                     .add_modifier(Modifier::BOLD),
             ))
+            .title_bottom(search_shortcuts_line(symbols, palette))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette.accent)),
     );
@@ -1891,6 +1989,150 @@ fn render_task_sort_popup(
     );
 
     frame.render_widget(widget, area);
+}
+
+fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    if symbols.tasks == "#" {
+        return Line::from(vec![Span::styled(
+            "Tab accept project  Enter save  Esc cancel",
+            Style::default().fg(palette.subtle_text),
+        )])
+        .right_aligned();
+    }
+
+    Line::from(vec![
+        Span::styled("⇥", Style::default().fg(palette.subtle_text)),
+        Span::raw(" project  "),
+        Span::styled("󰌑", Style::default().fg(palette.subtle_text)),
+        Span::raw(" save  "),
+        Span::styled(symbols.voided, Style::default().fg(palette.subtle_text)),
+        Span::raw(" esc"),
+    ])
+    .right_aligned()
+}
+
+fn project_editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    if symbols.tasks == "#" {
+        return Line::from(vec![Span::styled(
+            "Tab accept parent/next  F1-F3 field  h/l change  Enter save",
+            Style::default().fg(palette.subtle_text),
+        )])
+        .right_aligned();
+    }
+
+    Line::from(vec![
+        Span::styled("⇥", Style::default().fg(palette.subtle_text)),
+        Span::raw(" parent/next  "),
+        Span::styled("F1-F3", Style::default().fg(palette.subtle_text)),
+        Span::raw(" field  "),
+        Span::styled("←/→", Style::default().fg(palette.subtle_text)),
+        Span::raw(" h/l  "),
+        Span::styled("󰌑", Style::default().fg(palette.subtle_text)),
+        Span::raw(" save"),
+    ])
+    .right_aligned()
+}
+
+fn project_parent_dropdown_rect(
+    frame: Rect,
+    name_field: Rect,
+    cursor_col: u16,
+    width: u16,
+    height: u16,
+) -> Rect {
+    let min_x = frame.x.saturating_add(1);
+    let max_x = frame
+        .x
+        .saturating_add(frame.width.saturating_sub(width).saturating_sub(1));
+    let cursor_x = name_field.x.saturating_add(2).saturating_add(cursor_col);
+    let x = cursor_x.clamp(min_x, max_x.max(min_x));
+
+    let frame_bottom = frame.y.saturating_add(frame.height);
+    let below_y = name_field
+        .y
+        .saturating_add(name_field.height.saturating_sub(1));
+    let above_y = name_field.y.saturating_sub(height.saturating_sub(1));
+    let can_place_below = below_y.saturating_add(height) <= frame_bottom;
+
+    let y = if can_place_below {
+        below_y
+    } else {
+        above_y.clamp(
+            frame.y.saturating_add(1),
+            frame_bottom.saturating_sub(height),
+        )
+    };
+
+    Rect::new(x, y, width, height)
+}
+
+fn project_parent_dropdown_width(suggestions: &[String]) -> u16 {
+    let content = suggestions
+        .iter()
+        .map(|suggestion| suggestion.width())
+        .max()
+        .unwrap_or(16)
+        .saturating_add(2);
+    (content as u16).clamp(18, 40)
+}
+
+fn editor_cursor_display_column(
+    value: &str,
+    cursor: usize,
+    max_width: usize,
+    symbols: Symbols,
+) -> usize {
+    let cursor_symbol = if symbols.tasks == "#" { "|" } else { "▏" };
+    let safe_cursor = cursor.min(value.len());
+    let mut with_cursor = value.to_string();
+    with_cursor.insert_str(safe_cursor, cursor_symbol);
+    let rendered = input_window_text(
+        with_cursor.as_str(),
+        safe_cursor + cursor_symbol.len(),
+        max_width,
+    );
+    rendered
+        .find(cursor_symbol)
+        .map(|index| UnicodeWidthStr::width(&rendered[..index]))
+        .unwrap_or_else(|| max_width.saturating_sub(1))
+}
+
+fn search_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    if symbols.tasks == "#" {
+        return Line::from(vec![Span::styled(
+            "j/k move  Enter assign  Esc cancel",
+            Style::default().fg(palette.subtle_text),
+        )])
+        .right_aligned();
+    }
+
+    Line::from(vec![
+        Span::styled("󰌑", Style::default().fg(palette.subtle_text)),
+        Span::raw(" assign  "),
+        Span::styled(symbols.voided, Style::default().fg(palette.subtle_text)),
+        Span::raw(" esc  "),
+        Span::styled("󰄾", Style::default().fg(palette.subtle_text)),
+        Span::raw(" j/k"),
+    ])
+    .right_aligned()
+}
+
+fn confirm_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    if symbols.tasks == "#" {
+        return Line::from(vec![Span::styled(
+            "Enter/y confirm  Esc/n cancel",
+            Style::default().fg(palette.subtle_text),
+        )])
+        .right_aligned();
+    }
+
+    Line::from(vec![
+        Span::styled("󰄵", Style::default().fg(palette.subtle_text)),
+        Span::raw(" enter/y  "),
+        Span::styled(symbols.voided, Style::default().fg(palette.subtle_text)),
+        Span::raw(" esc/n"),
+    ])
+    .right_aligned()
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
@@ -2082,7 +2324,11 @@ fn render_weekly_history_lines(
         .collect()
 }
 
-fn history_title(active_tab: HistoryPanelTab, palette: ThemePalette) -> Line<'static> {
+fn history_title(
+    active_tab: HistoryPanelTab,
+    symbols: Symbols,
+    palette: ThemePalette,
+) -> Line<'static> {
     let today_style = if active_tab == HistoryPanelTab::Today {
         Style::default().fg(palette.accent)
     } else {
@@ -2096,8 +2342,10 @@ fn history_title(active_tab: HistoryPanelTab, palette: ThemePalette) -> Line<'st
 
     Line::from(vec![
         Span::raw("[2] "),
+        Span::styled(format!("{} ", symbols.today), today_style),
         Span::styled("Today", today_style),
         Span::raw(" - "),
+        Span::styled(format!("{} ", symbols.stats), weekly_style),
         Span::styled("Last 7 Days", weekly_style),
     ])
 }
@@ -2209,7 +2457,11 @@ fn task_view_symbol(view: TaskView, symbols: Symbols) -> &'static str {
     }
 }
 
-fn navigation_title(active_tab: SidebarTab, palette: ThemePalette) -> Line<'static> {
+fn navigation_title(
+    active_tab: SidebarTab,
+    symbols: Symbols,
+    palette: ThemePalette,
+) -> Line<'static> {
     let nav_style = if active_tab == SidebarTab::Navigation {
         Style::default().fg(palette.accent)
     } else {
@@ -2228,10 +2480,12 @@ fn navigation_title(active_tab: SidebarTab, palette: ThemePalette) -> Line<'stat
 
     Line::from(vec![
         Span::raw("[3] "),
+        Span::styled(format!("{} ", symbols.tasks), nav_style),
         Span::styled("Navigation", nav_style),
         Span::raw(" - "),
         Span::styled("[4] Filters & Tags", filters_style),
         Span::raw(" - "),
+        Span::styled(format!("{} ", symbols.project), projects_style),
         Span::styled("[5] Projects", projects_style),
     ])
 }

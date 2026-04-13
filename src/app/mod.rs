@@ -487,20 +487,18 @@ struct CalendarState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectEditorField {
     Name,
-    Parent,
     Color,
     Favorite,
 }
 
 impl ProjectEditorField {
-    const ALL: [Self; 4] = [Self::Name, Self::Parent, Self::Color, Self::Favorite];
+    const ALL: [Self; 3] = [Self::Name, Self::Color, Self::Favorite];
 
     fn index(self) -> usize {
         match self {
             Self::Name => 0,
-            Self::Parent => 1,
-            Self::Color => 2,
-            Self::Favorite => 3,
+            Self::Color => 1,
+            Self::Favorite => 2,
         }
     }
 
@@ -631,6 +629,7 @@ pub struct ProjectTreeRowView {
     pub project_id: Option<ProjectId>,
     pub name: String,
     pub depth: usize,
+    pub tree_prefix: String,
     pub is_favorite: bool,
     pub color: Option<ProjectColor>,
     pub task_count: usize,
@@ -640,7 +639,6 @@ pub struct ProjectTreeRowView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectEditorFocusView {
     pub name: bool,
-    pub parent: bool,
     pub color: bool,
     pub favorite: bool,
 }
@@ -933,6 +931,10 @@ const PROJECT_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
         description: "next/prev field",
     },
     ShortcutTip {
+        keys: "F1-F3",
+        description: "jump to field",
+    },
+    ShortcutTip {
         keys: "h/l or j/k",
         description: "change value",
     },
@@ -1146,7 +1148,10 @@ impl App {
                 title: "New Task",
                 value: input.value.clone(),
                 cursor: input.cursor,
-                project_name: self.project_name(input.project_id).unwrap_or("Inbox").to_string(),
+                project_name: self
+                    .project_name(input.project_id)
+                    .unwrap_or("Inbox")
+                    .to_string(),
                 project_suggestions: self
                     .active_project_query(input.value.as_str(), input.cursor)
                     .map(|(_, _, query)| {
@@ -1199,10 +1204,13 @@ impl App {
             .active_project_query(editor.name_input.as_str(), editor.name_cursor)
             .map(|(_, _, query)| query)
             .unwrap_or_default();
-        let resolved_parent_id = self.resolve_parent_project_input(
-            inline_parent_query.as_str(),
-            editor.project_id,
-        );
+        let (_, extracted_parent_id) =
+            self.extract_project_reference(editor.name_input.as_str(), ProjectId(0));
+        let resolved_parent_id = if extracted_parent_id == ProjectId(0) {
+            None
+        } else {
+            Some(extracted_parent_id)
+        };
         let parent_label = resolved_parent_id
             .and_then(|project_id| self.project_name(project_id))
             .unwrap_or("No Parent")
@@ -1224,7 +1232,7 @@ impl App {
             parent_suggestions: self
                 .project_parent_suggestions(inline_parent_query.as_str(), editor.project_id)
                 .into_iter()
-                .take(3)
+                .take(4)
                 .map(|project| project.name.clone())
                 .collect(),
             selected_parent_suggestion: editor.suggestion_index,
@@ -1233,7 +1241,6 @@ impl App {
             is_favorite: editor.is_favorite,
             focus: ProjectEditorFocusView {
                 name: editor.focused_field == ProjectEditorField::Name,
-                parent: editor.focused_field == ProjectEditorField::Parent,
                 color: editor.focused_field == ProjectEditorField::Color,
                 favorite: editor.focused_field == ProjectEditorField::Favorite,
             },
@@ -1322,12 +1329,13 @@ impl App {
             project_id: None,
             name: "All Projects".to_string(),
             depth: 0,
+            tree_prefix: String::new(),
             is_favorite: false,
             color: None,
             task_count: self.tasks_for_project_filter(None),
             is_selected: self.selected_project_id.is_none(),
         }];
-        self.append_project_tree_rows(&mut rows, None, 0);
+        self.append_project_tree_rows(&mut rows, None, 0, &[]);
         rows
     }
 
@@ -1705,7 +1713,8 @@ impl App {
     }
 
     fn project_name(&self, project_id: ProjectId) -> Option<&str> {
-        self.project_by_id(project_id).map(|project| project.name.as_str())
+        self.project_by_id(project_id)
+            .map(|project| project.name.as_str())
     }
 
     fn resolve_project_input(
@@ -1744,7 +1753,9 @@ impl App {
         self.screen_data
             .projects
             .iter()
-            .filter(|project| project.deleted_at.is_none() && Some(project.id) != excluded_project_id)
+            .filter(|project| {
+                project.deleted_at.is_none() && Some(project.id) != excluded_project_id
+            })
             .filter_map(|project| {
                 let name = project.name.as_str();
                 let query_prefix = normalized_query.get(..name.len())?;
@@ -1768,12 +1779,7 @@ impl App {
         let Some(start) = raw.rfind('#') else {
             return (raw.trim().to_string(), fallback_project_id);
         };
-        if start > 0
-            && !raw[..start]
-                .chars()
-                .last()
-                .is_some_and(char::is_whitespace)
-        {
+        if start > 0 && !raw[..start].chars().last().is_some_and(char::is_whitespace) {
             return (raw.trim().to_string(), fallback_project_id);
         }
         let query = raw[start + 1..].trim();
@@ -1811,7 +1817,9 @@ impl App {
             if candidate == root_project_id {
                 return true;
             }
-            current = self.project_by_id(candidate).and_then(|project| project.parent_project_id);
+            current = self
+                .project_by_id(candidate)
+                .and_then(|project| project.parent_project_id);
         }
         false
     }
@@ -1841,6 +1849,7 @@ impl App {
         rows: &mut Vec<ProjectTreeRowView>,
         parent_project_id: Option<ProjectId>,
         depth: usize,
+        ancestor_has_more: &[bool],
     ) {
         let mut children = self.project_children(parent_project_id);
         if parent_project_id.is_none() {
@@ -1854,17 +1863,37 @@ impl App {
             }
         }
 
-        for project in children {
+        let total_children = children.len();
+        for (index, project) in children.into_iter().enumerate() {
+            let is_last = index + 1 == total_children;
+            let tree_prefix = if depth == 0 {
+                String::new()
+            } else {
+                let mut prefix = String::new();
+                for has_more in ancestor_has_more {
+                    prefix.push_str(if *has_more { "│ " } else { "  " });
+                }
+                prefix.push_str(if is_last { "└ " } else { "├ " });
+                prefix
+            };
             rows.push(ProjectTreeRowView {
                 project_id: Some(project.id),
                 name: project.name.clone(),
                 depth,
+                tree_prefix,
                 is_favorite: project.is_favorite,
                 color: Some(project.color),
                 task_count: self.tasks_for_project_filter(Some(project.id)),
                 is_selected: self.selected_project_id == Some(project.id),
             });
-            self.append_project_tree_rows(rows, Some(project.id), depth + 1);
+            let next_ancestor = if parent_project_id.is_none() {
+                Vec::new()
+            } else {
+                let mut value = ancestor_has_more.to_vec();
+                value.push(!is_last);
+                value
+            };
+            self.append_project_tree_rows(rows, Some(project.id), depth + 1, &next_ancestor);
         }
     }
 
@@ -1928,7 +1957,8 @@ impl App {
     }
 
     fn accept_task_input_project_suggestion(&self, input: &mut TaskInputState) -> bool {
-        let Some((start, end, query)) = self.active_project_query(input.value.as_str(), input.cursor)
+        let Some((start, end, query)) =
+            self.active_project_query(input.value.as_str(), input.cursor)
         else {
             return false;
         };
@@ -2147,7 +2177,9 @@ impl App {
         self.task_input = Some(TaskInputState {
             value: String::new(),
             cursor: 0,
-            project_id: self.selected_project_id.unwrap_or_else(|| self.inbox_project_id()),
+            project_id: self
+                .selected_project_id
+                .unwrap_or_else(|| self.inbox_project_id()),
         });
     }
 
@@ -2182,7 +2214,10 @@ impl App {
             task_id: task.id,
             title_cursor: task.title.len(),
             title_input: task.title,
-            project_input: self.project_name(task.project_id).unwrap_or("Inbox").to_string(),
+            project_input: self
+                .project_name(task.project_id)
+                .unwrap_or("Inbox")
+                .to_string(),
             project_cursor: self.project_name(task.project_id).unwrap_or("Inbox").len(),
             project_id: task.project_id,
             due_date_input,
@@ -2518,35 +2553,42 @@ impl App {
         matches
     }
 
-    fn resolve_parent_project_input(
-        &self,
-        query: &str,
-        project_id: Option<ProjectId>,
-    ) -> Option<ProjectId> {
-        let normalized = query.trim();
-        if normalized.is_empty() {
-            return None;
-        }
+    fn next_project_editor_field(&self, editor: &ProjectEditorState) -> ProjectEditorField {
+        editor.focused_field.next()
+    }
 
-        self.project_parent_suggestions(normalized, project_id)
-            .into_iter()
-            .next()
-            .map(|project| project.id)
+    fn previous_project_editor_field(&self, editor: &ProjectEditorState) -> ProjectEditorField {
+        editor.focused_field.previous()
+    }
+
+    fn focus_project_editor_field(
+        &self,
+        editor: &mut ProjectEditorState,
+        field: ProjectEditorField,
+    ) {
+        editor.focused_field = field;
+    }
+
+    fn project_editor_has_parent_without_name(&self, editor: &ProjectEditorState) -> bool {
+        let (clean_name, parent_project_id) =
+            self.extract_project_reference(editor.name_input.as_str(), ProjectId(0));
+        parent_project_id != ProjectId(0) && clean_name.trim().is_empty()
     }
 
     fn open_create_project_popup(&mut self) {
+        let (name_input, name_cursor) = self
+            .selected_project_id
+            .and_then(|selected| self.project_name(selected))
+            .map(|name| {
+                let value = format!("#{name} ");
+                let cursor = value.len();
+                (value, cursor)
+            })
+            .unwrap_or_else(|| (String::new(), 0));
         self.project_editor = Some(ProjectEditorState {
             project_id: None,
-            name_input: self
-                .selected_project_id
-                .and_then(|selected| self.project_name(selected))
-                .map(|name| format!("#{name} "))
-                .unwrap_or_default(),
-            name_cursor: self
-                .selected_project_id
-                .and_then(|selected| self.project_name(selected))
-                .map(|name| name.len() + 2)
-                .unwrap_or(0),
+            name_input,
+            name_cursor,
             color_index: ProjectColor::all()
                 .iter()
                 .position(|color| *color == ProjectColor::Charcoal)
@@ -2637,11 +2679,13 @@ impl App {
         Ok(())
     }
 
-    fn submit_project_editor(&mut self, editor: ProjectEditorState, now: DateTime<Local>) -> Result<()> {
-        let (clean_name, parent_project_id) = self.extract_project_reference(
-            editor.name_input.as_str(),
-            ProjectId(0),
-        );
+    fn submit_project_editor(
+        &mut self,
+        editor: ProjectEditorState,
+        now: DateTime<Local>,
+    ) -> Result<()> {
+        let (clean_name, parent_project_id) =
+            self.extract_project_reference(editor.name_input.as_str(), ProjectId(0));
         let name = clean_name.trim();
         if name.is_empty() {
             self.project_editor = Some(editor);
@@ -2964,9 +3008,7 @@ impl App {
         if let Some(project_id) = self.project_delete_confirmation {
             match code {
                 KeyCode::Enter | KeyCode::Char('y') => {
-                    self.database
-                        .project_repository()
-                        .delete(project_id, now)?;
+                    self.database.project_repository().delete(project_id, now)?;
                     self.project_delete_confirmation = None;
                     self.refresh_tasks()?;
                 }
@@ -2988,9 +3030,11 @@ impl App {
                         {
                             let suggestions =
                                 self.project_parent_suggestions(query.as_str(), editor.project_id);
-                            if let Some(project) = suggestions
-                                .get(editor.suggestion_index.min(suggestions.len().saturating_sub(1)))
-                            {
+                            if let Some(project) = suggestions.get(
+                                editor
+                                    .suggestion_index
+                                    .min(suggestions.len().saturating_sub(1)),
+                            ) {
                                 editor.name_input.replace_range(
                                     start..end,
                                     format!("#{} ", project.name).as_str(),
@@ -3012,25 +3056,48 @@ impl App {
                         {
                             let suggestions =
                                 self.project_parent_suggestions(query.as_str(), editor.project_id);
-                            if let Some(project) = suggestions
-                                .get(editor.suggestion_index.min(suggestions.len().saturating_sub(1)))
-                            {
+                            if let Some(project) = suggestions.get(
                                 editor
-                                    .name_input
-                                    .replace_range(start..end, format!("#{} ", project.name).as_str());
-                                editor.name_cursor = (start + project.name.len() + 2)
-                                    .min(editor.name_input.len());
+                                    .suggestion_index
+                                    .min(suggestions.len().saturating_sub(1)),
+                            ) {
+                                editor.name_input.replace_range(
+                                    start..end,
+                                    format!("#{} ", project.name).as_str(),
+                                );
+                                editor.name_cursor =
+                                    (start + project.name.len() + 2).min(editor.name_input.len());
                                 editor.suggestion_index = 0;
                                 self.project_editor = Some(editor);
                                 return Ok(true);
                             }
                         }
+                        if self.project_editor_has_parent_without_name(&editor) {
+                            if !editor.name_input.ends_with(' ') {
+                                editor.name_input.push(' ');
+                            }
+                            editor.name_cursor = editor.name_input.len();
+                            self.project_editor = Some(editor);
+                            return Ok(true);
+                        }
                     }
-                    editor.focused_field = editor.focused_field.next();
+                    editor.focused_field = self.next_project_editor_field(&editor);
                     self.project_editor = Some(editor);
                 }
                 KeyCode::BackTab => {
-                    editor.focused_field = editor.focused_field.previous();
+                    editor.focused_field = self.previous_project_editor_field(&editor);
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::F(1) => {
+                    self.focus_project_editor_field(&mut editor, ProjectEditorField::Name);
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::F(2) => {
+                    self.focus_project_editor_field(&mut editor, ProjectEditorField::Color);
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::F(3) => {
+                    self.focus_project_editor_field(&mut editor, ProjectEditorField::Favorite);
                     self.project_editor = Some(editor);
                 }
                 KeyCode::Backspace if editor.focused_field == ProjectEditorField::Name => {
@@ -3075,8 +3142,7 @@ impl App {
                     self.project_editor = Some(editor);
                 }
                 KeyCode::Left | KeyCode::Char('h') | KeyCode::Up | KeyCode::Char('k')
-                    if editor.focused_field != ProjectEditorField::Name
-                        && editor.focused_field != ProjectEditorField::Parent =>
+                    if editor.focused_field != ProjectEditorField::Name =>
                 {
                     match editor.focused_field {
                         ProjectEditorField::Color => {
@@ -3085,13 +3151,12 @@ impl App {
                         ProjectEditorField::Favorite => {
                             editor.is_favorite = !editor.is_favorite;
                         }
-                        ProjectEditorField::Name | ProjectEditorField::Parent => {}
+                        ProjectEditorField::Name => {}
                     }
                     self.project_editor = Some(editor);
                 }
                 KeyCode::Right | KeyCode::Char('l') | KeyCode::Down | KeyCode::Char('j')
-                    if editor.focused_field != ProjectEditorField::Name
-                        && editor.focused_field != ProjectEditorField::Parent =>
+                    if editor.focused_field != ProjectEditorField::Name =>
                 {
                     match editor.focused_field {
                         ProjectEditorField::Color => {
@@ -3101,11 +3166,25 @@ impl App {
                         ProjectEditorField::Favorite => {
                             editor.is_favorite = !editor.is_favorite;
                         }
-                        ProjectEditorField::Name | ProjectEditorField::Parent => {}
+                        ProjectEditorField::Name => {}
                     }
                     self.project_editor = Some(editor);
                 }
                 KeyCode::Char(character) if editor.focused_field == ProjectEditorField::Name => {
+                    if character == '#' && self.project_editor_has_parent_without_name(&editor) {
+                        editor.name_input.clear();
+                        editor.name_cursor = 0;
+                    }
+                    if character == '#'
+                        && editor.name_cursor > 0
+                        && editor.name_input[..editor.name_cursor]
+                            .chars()
+                            .last()
+                            .is_some_and(|previous| !previous.is_whitespace())
+                    {
+                        editor.name_input.insert(editor.name_cursor, ' ');
+                        editor.name_cursor += 1;
+                    }
                     editor.name_input.insert(editor.name_cursor, character);
                     editor.name_cursor += character.len_utf8();
                     editor.suggestion_index = 0;
@@ -3208,11 +3287,16 @@ impl App {
                     if editor.focused_field == TaskEditorField::Project =>
                 {
                     let project_ids = self.active_project_ids();
-                    if let Some(index) = project_ids.iter().position(|project_id| *project_id == editor.project_id) {
+                    if let Some(index) = project_ids
+                        .iter()
+                        .position(|project_id| *project_id == editor.project_id)
+                    {
                         let next_index = index.saturating_sub(1);
                         editor.project_id = project_ids[next_index];
-                        editor.project_input =
-                            self.project_name(editor.project_id).unwrap_or("Inbox").to_string();
+                        editor.project_input = self
+                            .project_name(editor.project_id)
+                            .unwrap_or("Inbox")
+                            .to_string();
                         editor.project_cursor = editor.project_input.len();
                     }
                     self.task_editor = Some(editor);
@@ -3221,11 +3305,16 @@ impl App {
                     if editor.focused_field == TaskEditorField::Project =>
                 {
                     let project_ids = self.active_project_ids();
-                    if let Some(index) = project_ids.iter().position(|project_id| *project_id == editor.project_id) {
+                    if let Some(index) = project_ids
+                        .iter()
+                        .position(|project_id| *project_id == editor.project_id)
+                    {
                         let next_index = (index + 1).min(project_ids.len().saturating_sub(1));
                         editor.project_id = project_ids[next_index];
-                        editor.project_input =
-                            self.project_name(editor.project_id).unwrap_or("Inbox").to_string();
+                        editor.project_input = self
+                            .project_name(editor.project_id)
+                            .unwrap_or("Inbox")
+                            .to_string();
                         editor.project_cursor = editor.project_input.len();
                     }
                     self.task_editor = Some(editor);
@@ -3521,7 +3610,10 @@ impl App {
                     SidebarTab::Navigation => self.set_active_task_view(TaskView::Soon),
                     SidebarTab::FiltersTags => {}
                     SidebarTab::Projects => {
-                        self.selected_project_id = self.project_tree_rows().last().and_then(|row| row.project_id)
+                        self.selected_project_id = self
+                            .project_tree_rows()
+                            .last()
+                            .and_then(|row| row.project_id)
                     }
                 }
             }
@@ -4587,6 +4679,530 @@ mod tests {
             .map(|task| task.title.as_str())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["Child task", "Parent task"]);
+    }
+
+    #[test]
+    fn project_editor_uses_inline_parent_autocomplete_and_field_shortcuts() {
+        let mut app = test_app();
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("project editor should open");
+
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert!(editor.focus.name);
+        assert!(editor.parent_suggestions.is_empty());
+
+        app.handle_key(crossterm::event::KeyCode::Tab)
+            .expect("focus should switch");
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert!(editor.focus.color);
+
+        app.handle_key(crossterm::event::KeyCode::BackTab)
+            .expect("focus should switch back");
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert!(editor.focus.name);
+
+        app.handle_key(crossterm::event::KeyCode::F(2))
+            .expect("focus should jump");
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert!(editor.focus.color);
+
+        app.handle_key(crossterm::event::KeyCode::F(3))
+            .expect("focus should jump");
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert!(editor.focus.favorite);
+    }
+
+    #[test]
+    fn project_editor_persists_parent_selected_from_inline_autocomplete() {
+        let mut app = test_app();
+        let parent = app
+            .database
+            .project_repository()
+            .create(
+                "Test Project 01",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("parent project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("project editor should open");
+
+        for character in "Child Project 03 #Test".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Tab)
+            .expect("tab should accept parent suggestion");
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should remain visible");
+        assert_eq!(editor.parent_label, "Test Project 01");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("project should be created");
+
+        let created = app
+            .screen_data
+            .projects
+            .iter()
+            .find(|project| project.name == "Child Project 03")
+            .expect("child project should exist");
+        assert_eq!(created.parent_project_id, Some(parent.id));
+    }
+
+    #[test]
+    fn project_editor_tab_after_exact_parent_match_keeps_name_field_for_inline_name_entry() {
+        let mut app = test_app();
+        let parent = app
+            .database
+            .project_repository()
+            .create(
+                "Child Project 01",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("parent project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("project editor should open");
+
+        for character in "#Child Project 01".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Tab)
+            .expect("tab should keep inline parent workflow");
+        for character in " Another Project 01".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should keep editing name");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("project should be created");
+
+        let created = app
+            .screen_data
+            .projects
+            .iter()
+            .find(|project| project.name == "Another Project 01")
+            .expect("child project should exist");
+        assert_eq!(created.parent_project_id, Some(parent.id));
+    }
+
+    #[test]
+    fn project_editor_persists_parent_when_name_is_typed_before_hash_reference() {
+        let mut app = test_app();
+        let parent = app
+            .database
+            .project_repository()
+            .create(
+                "Child Project 01",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("parent project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("project editor should open");
+        for character in "Another Project 01 #Child Project 01".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("project should be created");
+
+        let created = app
+            .screen_data
+            .projects
+            .iter()
+            .find(|project| project.name == "Another Project 01")
+            .expect("child project should exist");
+        assert_eq!(created.parent_project_id, Some(parent.id));
+    }
+
+    #[test]
+    fn project_editor_persists_parent_when_name_is_typed_before_hash_autocomplete() {
+        let mut app = test_app();
+        let parent = app
+            .database
+            .project_repository()
+            .create(
+                "Child Project 01",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("parent project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("project editor should open");
+        for character in "Another Project 01 #Child".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Tab)
+            .expect("tab should accept parent");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("project should be created");
+
+        let created = app
+            .screen_data
+            .projects
+            .iter()
+            .find(|project| project.name == "Another Project 01")
+            .expect("child project should exist");
+        assert_eq!(created.parent_project_id, Some(parent.id));
+    }
+
+    #[test]
+    fn project_editor_autoinserts_space_before_hash_reference_after_name_text() {
+        let mut app = test_app();
+        let parent = app
+            .database
+            .project_repository()
+            .create(
+                "Child Project 01",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("parent project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("project editor should open");
+        for character in "Another Project 01#Child".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Tab)
+            .expect("tab should accept parent");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("project should be created");
+
+        let created = app
+            .screen_data
+            .projects
+            .iter()
+            .find(|project| project.name == "Another Project 01")
+            .expect("child project should exist");
+        assert_eq!(created.parent_project_id, Some(parent.id));
+    }
+
+    #[test]
+    fn project_editor_hash_prefix_then_name_picks_exact_child_not_ancestor() {
+        let mut app = test_app();
+        let test_parent = app
+            .database
+            .project_repository()
+            .create(
+                "Test Project 01",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("test parent should create");
+        let child = app
+            .database
+            .project_repository()
+            .create(
+                "Child Project 01",
+                Some(test_parent.id),
+                ProjectColor::Teal,
+                false,
+                Local::now(),
+            )
+            .expect("child should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("project editor should open");
+        for character in "#Child Project 01 Another Project 01".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("project should be created");
+
+        let created = app
+            .screen_data
+            .projects
+            .iter()
+            .find(|project| project.name == "Another Project 01")
+            .expect("new project should exist");
+        assert_eq!(created.parent_project_id, Some(child.id));
+    }
+
+    #[test]
+    fn project_editor_hash_prefix_then_name_ignores_prefilled_selected_project_context() {
+        let mut app = test_app();
+        let test_parent = app
+            .database
+            .project_repository()
+            .create(
+                "Test Project 01",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("test parent should create");
+        let child = app
+            .database
+            .project_repository()
+            .create(
+                "Child Project 01",
+                Some(test_parent.id),
+                ProjectColor::Teal,
+                false,
+                Local::now(),
+            )
+            .expect("child should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.selected_project_id = Some(test_parent.id);
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("project editor should open");
+        for character in "#Child Project 01 Another Project 01".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("project should be created");
+
+        let created = app
+            .screen_data
+            .projects
+            .iter()
+            .find(|project| project.name == "Another Project 01")
+            .expect("new project should exist");
+        assert_eq!(created.parent_project_id, Some(child.id));
+    }
+
+    #[test]
+    fn project_editor_create_prefills_selected_project_and_all_starts_empty() {
+        let mut app = test_app();
+        let parent = app
+            .database
+            .project_repository()
+            .create(
+                "Selected Parent",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+
+        app.selected_project_id = None;
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("project editor should open");
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert_eq!(editor.name_value, "");
+        app.handle_key(crossterm::event::KeyCode::Esc)
+            .expect("editor should close");
+
+        app.selected_project_id = Some(parent.id);
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("project editor should open");
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert_eq!(editor.name_value, "#Selected Parent ");
+    }
+
+    #[test]
+    fn project_tree_rows_render_clear_branch_prefixes_for_nested_projects() {
+        let mut app = test_app();
+        let test_parent = app
+            .database
+            .project_repository()
+            .create(
+                "Test Project 01",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("test parent should create");
+        let child_one = app
+            .database
+            .project_repository()
+            .create(
+                "Child Project 01",
+                Some(test_parent.id),
+                ProjectColor::Teal,
+                false,
+                Local::now(),
+            )
+            .expect("child 1 should create");
+        let child_two = app
+            .database
+            .project_repository()
+            .create(
+                "Child Project 02",
+                Some(test_parent.id),
+                ProjectColor::SkyBlue,
+                false,
+                Local::now(),
+            )
+            .expect("child 2 should create");
+        app.database
+            .project_repository()
+            .create(
+                "Another Project 01",
+                Some(child_one.id),
+                ProjectColor::Charcoal,
+                false,
+                Local::now(),
+            )
+            .expect("nested child 1 should create");
+        app.database
+            .project_repository()
+            .create(
+                "Another Project 02",
+                Some(child_two.id),
+                ProjectColor::Charcoal,
+                false,
+                Local::now(),
+            )
+            .expect("nested child 2 should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        let rows = app.project_tree_rows();
+        let child_one_row = rows
+            .iter()
+            .find(|row| row.name == "Child Project 01")
+            .expect("child 1 row should exist");
+        let child_two_row = rows
+            .iter()
+            .find(|row| row.name == "Child Project 02")
+            .expect("child 2 row should exist");
+        let nested_one_row = rows
+            .iter()
+            .find(|row| row.name == "Another Project 01")
+            .expect("nested child 1 row should exist");
+        let nested_two_row = rows
+            .iter()
+            .find(|row| row.name == "Another Project 02")
+            .expect("nested child 2 row should exist");
+
+        assert_eq!(child_one_row.tree_prefix, "├ ");
+        assert_eq!(child_two_row.tree_prefix, "└ ");
+        assert_eq!(nested_one_row.tree_prefix, "│ └ ");
+        assert_eq!(nested_two_row.tree_prefix, "  └ ");
+    }
+
+    #[test]
+    fn project_tree_rows_render_clear_branch_prefixes_for_deeper_levels() {
+        let mut app = test_app();
+        let root = app
+            .database
+            .project_repository()
+            .create("Root", None, ProjectColor::Blue, false, Local::now())
+            .expect("root should create");
+        let child_a = app
+            .database
+            .project_repository()
+            .create("Child A", Some(root.id), ProjectColor::Teal, false, Local::now())
+            .expect("child A should create");
+        let _child_b = app
+            .database
+            .project_repository()
+            .create("Child B", Some(root.id), ProjectColor::SkyBlue, false, Local::now())
+            .expect("child B should create");
+        let grand_a = app
+            .database
+            .project_repository()
+            .create(
+                "Grand A",
+                Some(child_a.id),
+                ProjectColor::Charcoal,
+                false,
+                Local::now(),
+            )
+            .expect("grand A should create");
+        app.database
+            .project_repository()
+            .create(
+                "Great A",
+                Some(grand_a.id),
+                ProjectColor::Grey,
+                false,
+                Local::now(),
+            )
+            .expect("great A should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        let rows = app.project_tree_rows();
+        let child_a_row = rows
+            .iter()
+            .find(|row| row.name == "Child A")
+            .expect("child A row should exist");
+        let child_b_row = rows
+            .iter()
+            .find(|row| row.name == "Child B")
+            .expect("child B row should exist");
+        let grand_a_row = rows
+            .iter()
+            .find(|row| row.name == "Grand A")
+            .expect("grand A row should exist");
+        let great_a_row = rows
+            .iter()
+            .find(|row| row.name == "Great A")
+            .expect("great A row should exist");
+
+        assert_eq!(child_a_row.tree_prefix, "├ ");
+        assert_eq!(child_b_row.tree_prefix, "└ ");
+        assert_eq!(grand_a_row.tree_prefix, "│ └ ");
+        assert_eq!(great_a_row.tree_prefix, "│   └ ");
     }
 
     #[test]
