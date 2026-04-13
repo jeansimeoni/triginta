@@ -13,10 +13,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
-        App, CalendarPickerView, CycleEntryState, DeleteConfirmationView, HistoryPanelTab,
-        PanelFocus, ProjectDeleteConfirmationView, ProjectEditorView, ProjectTreeRowView,
-        RightPanelTab, ScreenData, ShortcutSection, ShortcutTip, SidebarTab, TaskEditorView,
-        TaskInputView, TaskSearchView, TaskSortPopupView, TaskView, TimerPhase,
+        App, CalendarPickerView, CycleEntryState, DeleteConfirmationView, FormPreviewPanelView,
+        HistoryPanelTab, PanelFocus, PreviewLineView, ProjectDeleteConfirmationView,
+        ProjectEditorView, ProjectTreeRowView, RightPanelTab, ScreenData, ShortcutSection,
+        ShortcutTip, SidebarTab, TaskEditorView, TaskInputView, TaskSearchView, TaskSortPopupView,
+        TaskView, TimerPhase,
     },
     config::GlyphMode,
     domain::{DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
@@ -191,8 +192,11 @@ fn render_history_panel(
 ) {
     let data = app.screen_data();
     let today_selected = app.history_scroll();
-    let (summary, lines, right_indicator): (Line<'static>, Vec<Line<'static>>, Option<(usize, usize)>) =
-        match app.active_history_panel_tab() {
+    let (summary, lines, right_indicator): (
+        Line<'static>,
+        Vec<Line<'static>>,
+        Option<(usize, usize)>,
+    ) = match app.active_history_panel_tab() {
         HistoryPanelTab::Today => {
             let rows = history_rows(data.history_entries.as_slice(), data.tasks.as_slice());
             let selected = today_selected.min(rows.len().saturating_sub(1));
@@ -299,18 +303,18 @@ fn render_navigation_panel(
     let (lines, selected_index) = match app.active_sidebar_tab() {
         SidebarTab::Navigation => (
             TaskView::all()
-            .iter()
-            .map(|view| {
-                let selected = app.active_task_view() == *view;
-                selectable_count_line(
-                    &format!("{} {}", task_view_symbol(*view, symbols), view.label()),
-                    app.task_count_for_view(*view),
-                    selected,
-                    content_width,
-                    palette,
-                )
-            })
-            .collect::<Vec<_>>(),
+                .iter()
+                .map(|view| {
+                    let selected = app.active_task_view() == *view;
+                    selectable_count_line(
+                        &format!("{} {}", task_view_symbol(*view, symbols), view.label()),
+                        app.task_count_for_view(*view),
+                        selected,
+                        content_width,
+                        palette,
+                    )
+                })
+                .collect::<Vec<_>>(),
             TaskView::all()
                 .iter()
                 .position(|view| app.active_task_view() == *view),
@@ -383,19 +387,27 @@ fn render_navigation_panel(
     }
 }
 
-fn panel_scroll_offset(total_lines: usize, viewport_lines: usize, selected_index: Option<usize>) -> usize {
+fn panel_scroll_offset(
+    total_lines: usize,
+    viewport_lines: usize,
+    selected_index: Option<usize>,
+) -> usize {
     if total_lines <= viewport_lines || viewport_lines == 0 {
         return 0;
     }
 
     let max_scroll = total_lines.saturating_sub(viewport_lines);
-    let selected = selected_index.unwrap_or(0).min(total_lines.saturating_sub(1));
-    selected
-        .saturating_sub(viewport_lines / 2)
-        .min(max_scroll)
+    let selected = selected_index
+        .unwrap_or(0)
+        .min(total_lines.saturating_sub(1));
+    selected.saturating_sub(viewport_lines / 2).min(max_scroll)
 }
 
-fn scrollbar_position_from_offset(scroll_offset: usize, total_lines: usize, viewport_lines: usize) -> usize {
+fn scrollbar_position_from_offset(
+    scroll_offset: usize,
+    total_lines: usize,
+    viewport_lines: usize,
+) -> usize {
     if total_lines == 0 {
         return 0;
     }
@@ -1137,25 +1149,17 @@ fn render_task_input_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let show_details = input.due_preview.is_some()
-        || !input.project_suggestions.is_empty()
-        || !input.project_name.is_empty();
-    let total_height = if show_details { 11 } else { 3 };
+    let total_height = 11;
     let area = centered_rect(frame.area(), 72, total_height);
     frame.render_widget(Clear, area);
 
-    let input_area = if show_details {
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Length(8)])
-            .split(area);
-        render_task_input_box(frame, sections[0], input, symbols, palette);
-        render_task_due_preview(frame, sections[1], input, palette);
-        sections[0]
-    } else {
-        render_task_input_box(frame, area, input, symbols, palette);
-        area
-    };
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(8)])
+        .split(area);
+    render_task_input_box(frame, sections[0], input, symbols, palette);
+    render_form_preview_panel(frame, sections[1], &input.preview_panel, palette);
+    let input_area = sections[0];
 
     if !input.project_suggestions.is_empty() {
         let dropdown_height = input.project_suggestions.len().min(4) as u16 + 2;
@@ -1200,116 +1204,6 @@ fn render_task_input_box(
     );
 
     frame.render_widget(popup, area);
-}
-
-fn render_task_due_preview(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    input: &TaskInputView,
-    palette: ThemePalette,
-) {
-    let Some(due_preview) = &input.due_preview else {
-        let mut lines = task_input_meta_lines(input, palette);
-        append_task_preview_tip(&mut lines, area, palette);
-        frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.border)),
-            ),
-            area,
-        );
-        return;
-    };
-
-    let mut lines = task_input_meta_lines(input, palette);
-    lines.push(Line::from(vec![
-        Span::styled("Due Date: ", Style::default().fg(palette.subtle_text)),
-        Span::styled(
-            due_preview.date.format("%Y-%m-%d").to_string(),
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    if let Some(datetime) = due_preview.datetime {
-        lines.push(Line::from(vec![
-            Span::styled("Due Time: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(
-                datetime.format("%H:%M").to_string(),
-                Style::default().fg(palette.text),
-            ),
-        ]));
-    }
-    lines.push(Line::from(vec![
-        Span::styled("Recurring: ", Style::default().fg(palette.subtle_text)),
-        Span::styled(
-            if due_preview.is_recurring {
-                "yes"
-            } else {
-                "no"
-            },
-            Style::default().fg(palette.text),
-        ),
-    ]));
-    if due_preview.string.to_ascii_lowercase()
-        != due_preview
-            .datetime
-            .map(|_| {
-                format!(
-                    "{} {}",
-                    due_preview.date.format("%Y-%m-%d"),
-                    due_preview.datetime.expect("checked above").format("%H:%M")
-                )
-            })
-            .unwrap_or_else(|| due_preview.date.format("%Y-%m-%d").to_string())
-    {
-        lines.push(Line::from(vec![
-            Span::styled("From: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(
-                due_preview.string.clone(),
-                Style::default()
-                    .fg(palette.subtle_text)
-                    .add_modifier(Modifier::DIM),
-            ),
-        ]));
-    }
-    append_task_preview_tip(&mut lines, area, palette);
-
-    let panel = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.border)),
-    );
-
-    frame.render_widget(panel, area);
-}
-
-fn task_input_meta_lines(input: &TaskInputView, palette: ThemePalette) -> Vec<Line<'static>> {
-    if input.show_project_assignment {
-        vec![Line::from(vec![
-            Span::styled("Project: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(
-                input.project_name.clone(),
-                Style::default().fg(palette.text),
-            ),
-        ])]
-    } else {
-        Vec::new()
-    }
-}
-
-fn append_task_preview_tip(lines: &mut Vec<Line<'static>>, area: Rect, palette: ThemePalette) {
-    let target_tip_index = area.height.saturating_sub(3) as usize;
-    while lines.len() < target_tip_index {
-        lines.push(Line::from(""));
-    }
-    lines.push(Line::from(Span::styled(
-        "Press # for selecting a project",
-        Style::default()
-            .fg(palette.subtle_text)
-            .add_modifier(Modifier::DIM),
-    )));
 }
 
 fn task_list_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
@@ -1452,7 +1346,7 @@ fn render_task_editor_popup(
         Some("every monday at 9am"),
         palette,
     );
-    render_editor_due_preview_panel(frame, sections[1], editor, palette);
+    render_form_preview_panel(frame, sections[1], &editor.preview_panel, palette);
 
     if editor.focus.project && !editor.project_suggestions.is_empty() {
         let dropdown_height = editor.project_suggestions.len().min(4) as u16 + 2;
@@ -1552,103 +1446,6 @@ fn editor_input_text(
         ),
         Style::default().fg(palette.text),
     )
-}
-
-fn render_editor_due_preview_panel(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    editor: &TaskEditorView,
-    palette: ThemePalette,
-) {
-    let lines = if let Some(due_preview) = &editor.due_preview {
-        let mut lines = vec![Line::from(vec![
-            Span::styled("Project: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(editor.project_value.clone(), Style::default().fg(palette.text)),
-        ])];
-        lines.push(Line::from(vec![
-            Span::styled("Summary: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(
-                due_preview.string.clone(),
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("Date: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(
-                due_preview.date.format("%Y-%m-%d").to_string(),
-                Style::default().fg(palette.text),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("Time: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(
-                due_preview
-                    .datetime
-                    .map(|datetime| datetime.format("%H:%M").to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                Style::default().fg(palette.text),
-            ),
-            Span::raw("   "),
-            Span::styled("Recurring: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(
-                if due_preview.is_recurring {
-                    "yes"
-                } else {
-                    "no"
-                },
-                Style::default().fg(palette.text),
-            ),
-        ]));
-        lines
-    } else {
-        vec![
-            Line::from(vec![
-                Span::styled("Project: ", Style::default().fg(palette.subtle_text)),
-                Span::styled(editor.project_value.clone(), Style::default().fg(palette.text)),
-            ]),
-            Line::from(vec![
-                Span::styled("Summary: ", Style::default().fg(palette.subtle_text)),
-                Span::styled("no due date", Style::default().fg(palette.text)),
-            ]),
-        ]
-    };
-    let mut lines = lines;
-    let tip_text = if editor.focus.title {
-        Some("Press # for selecting a project")
-    } else if editor.focus.project {
-        Some("Type in Project to fuzzy-match and use Enter/Tab to accept")
-    } else {
-        None
-    };
-    if let Some(tip_text) = tip_text {
-        let tip_line = Line::from(Span::styled(
-            tip_text,
-            Style::default()
-                .fg(palette.subtle_text)
-                .add_modifier(Modifier::DIM),
-        ));
-        let tip_slot = area.height.saturating_sub(3) as usize;
-        let spacer_slot = tip_slot.saturating_sub(1);
-        if lines.len() > spacer_slot {
-            lines.truncate(spacer_slot);
-        }
-        while lines.len() < spacer_slot {
-            lines.push(Line::from(""));
-        }
-        lines.push(Line::from(""));
-        lines.push(tip_line);
-    }
-
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.border)),
-        ),
-        area,
-    );
 }
 
 fn render_editor_project_suggestions(
@@ -1883,8 +1680,8 @@ fn render_project_editor_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let show_parent_dropdown = (editor.focus.name || editor.focus.parent)
-        && !editor.parent_suggestions.is_empty();
+    let show_parent_dropdown =
+        (editor.focus.name || editor.focus.parent) && !editor.parent_suggestions.is_empty();
     let area = centered_rect(frame.area(), 72, 17);
     frame.render_widget(Clear, area);
     let sections = Layout::default()
@@ -1959,7 +1756,7 @@ fn render_project_editor_popup(
         palette,
     );
 
-    render_project_preview_panel(frame, sections[1], editor, palette);
+    render_form_preview_panel(frame, sections[1], &editor.preview_panel, palette);
 
     if show_parent_dropdown {
         let dropdown_height = editor.parent_suggestions.len().min(4) as u16 + 2;
@@ -1969,12 +1766,7 @@ fn render_project_editor_popup(
             (form_rows[0], &editor.name_value, editor.name_cursor)
         };
         let visible_width = anchor.width.saturating_sub(4) as usize;
-        let cursor_col = editor_cursor_display_column(
-            value,
-            cursor,
-            visible_width,
-            symbols,
-        );
+        let cursor_col = editor_cursor_display_column(value, cursor, visible_width, symbols);
         let dropdown_area = project_parent_dropdown_rect(
             frame.area(),
             anchor,
@@ -1986,33 +1778,29 @@ fn render_project_editor_popup(
     }
 }
 
-fn render_project_preview_panel(
+fn render_form_preview_panel(
     frame: &mut Frame<'_>,
     area: Rect,
-    editor: &ProjectEditorView,
+    preview_panel: &FormPreviewPanelView,
     palette: ThemePalette,
 ) {
+    let content_width = area.width.saturating_sub(4) as usize;
     let mut lines = Vec::new();
-    if let Some(parent_label) = &editor.parent_label {
-        let content_width = area.width.saturating_sub(4) as usize;
-        let parent_text = format!("Parent: {parent_label}");
-        lines.push(Line::from(Span::styled(
-            ellipsize_end(parent_text.as_str(), content_width),
-            Style::default().fg(palette.text),
-        )));
+    for preview_line in &preview_panel.preview_lines {
+        lines.push(render_preview_line(preview_line, content_width, palette));
     }
 
-    let tip_line = Line::from(Span::styled(
-        "Press # for selecting a parent project",
-        Style::default()
-            .fg(palette.subtle_text)
-            .add_modifier(Modifier::DIM),
-    ));
-    let target_tip_index = area.height.saturating_sub(3) as usize;
-    while lines.len() < target_tip_index {
+    if !preview_panel.tips.is_empty() {
         lines.push(Line::from(""));
+        for tip in &preview_panel.tips {
+            lines.push(Line::from(Span::styled(
+                ellipsize_end(tip, content_width),
+                Style::default()
+                    .fg(palette.subtle_text)
+                    .add_modifier(Modifier::DIM),
+            )));
+        }
     }
-    lines.push(tip_line);
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -2024,6 +1812,53 @@ fn render_project_preview_panel(
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn render_preview_line(
+    preview_line: &PreviewLineView,
+    content_width: usize,
+    palette: ThemePalette,
+) -> Line<'static> {
+    match preview_line {
+        PreviewLineView::KeyValue {
+            label,
+            value,
+            emphasized,
+            dimmed,
+        } => {
+            let mut value_style = Style::default().fg(palette.text);
+            if *emphasized {
+                value_style = value_style.add_modifier(Modifier::BOLD);
+            }
+            if *dimmed {
+                value_style = value_style
+                    .fg(palette.subtle_text)
+                    .add_modifier(Modifier::DIM);
+            }
+            let plain = format!("{label}: {value}");
+            let clipped = ellipsize_end(plain.as_str(), content_width);
+            let prefix = format!("{label}: ");
+            if clipped.starts_with(prefix.as_str()) {
+                let suffix = clipped[prefix.len()..].to_string();
+                Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(palette.subtle_text)),
+                    Span::styled(suffix, value_style),
+                ])
+            } else {
+                Line::from(Span::styled(clipped, value_style))
+            }
+        }
+        PreviewLineView::Text { text, dimmed } => {
+            let mut style = Style::default().fg(palette.text);
+            if *dimmed {
+                style = style.fg(palette.subtle_text).add_modifier(Modifier::DIM);
+            }
+            Line::from(Span::styled(
+                ellipsize_end(text.as_str(), content_width),
+                style,
+            ))
+        }
+    }
 }
 
 fn render_project_parent_suggestions(

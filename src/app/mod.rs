@@ -561,6 +561,7 @@ pub struct TaskInputView {
     pub project_suggestions: Vec<String>,
     pub selected_project_suggestion: usize,
     pub due_preview: Option<TaskDuePreviewView>,
+    pub preview_panel: FormPreviewPanelView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -596,6 +597,7 @@ pub struct TaskEditorView {
     pub focus: TaskEditorFocusView,
     pub due_preview: Option<TaskDuePreviewView>,
     pub calendar: Option<CalendarPickerView>,
+    pub preview_panel: FormPreviewPanelView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -604,6 +606,62 @@ pub struct TaskDuePreviewView {
     pub datetime: Option<NaiveDateTime>,
     pub string: String,
     pub is_recurring: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewLineView {
+    KeyValue {
+        label: String,
+        value: String,
+        emphasized: bool,
+        dimmed: bool,
+    },
+    Text {
+        text: String,
+        dimmed: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormPreviewPanelView {
+    pub preview_lines: Vec<PreviewLineView>,
+    pub tips: Vec<String>,
+}
+
+impl PreviewLineView {
+    fn key_value(label: &str, value: impl Into<String>) -> Self {
+        Self::KeyValue {
+            label: label.to_string(),
+            value: value.into(),
+            emphasized: false,
+            dimmed: false,
+        }
+    }
+
+    fn emphasized_key_value(label: &str, value: impl Into<String>) -> Self {
+        Self::KeyValue {
+            label: label.to_string(),
+            value: value.into(),
+            emphasized: true,
+            dimmed: false,
+        }
+    }
+
+    fn dimmed_key_value(label: &str, value: impl Into<String>) -> Self {
+        Self::KeyValue {
+            label: label.to_string(),
+            value: value.into(),
+            emphasized: false,
+            dimmed: true,
+        }
+    }
+
+    fn text(text: impl Into<String>) -> Self {
+        Self::Text {
+            text: text.into(),
+            dimmed: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -669,6 +727,7 @@ pub struct ProjectEditorView {
     pub color_value: ProjectColor,
     pub is_favorite: bool,
     pub focus: ProjectEditorFocusView,
+    pub preview_panel: FormPreviewPanelView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1175,21 +1234,28 @@ impl App {
                     string: due.string,
                     is_recurring: due.is_recurring,
                 });
+            let project_name = self
+                .project_name(input.project_id)
+                .unwrap_or("Inbox")
+                .to_string();
+            let show_project_assignment = input.project_id != self.inbox_project_id();
 
             TaskInputView {
                 title: "New Task",
                 value: input.value.clone(),
                 cursor: input.cursor,
-                project_name: self
-                    .project_name(input.project_id)
-                    .unwrap_or("Inbox")
-                    .to_string(),
-                show_project_assignment: input.project_id != self.inbox_project_id(),
+                project_name: project_name.clone(),
+                show_project_assignment,
                 project_suggestions: project_suggestions.clone(),
                 selected_project_suggestion: input
                     .suggestion_index
                     .min(project_suggestions.len().saturating_sub(1)),
-                due_preview,
+                due_preview: due_preview.clone(),
+                preview_panel: Self::task_input_preview_panel(
+                    show_project_assignment,
+                    project_name.as_str(),
+                    due_preview.as_ref(),
+                ),
             }
         })
     }
@@ -1212,6 +1278,14 @@ impl App {
             } else {
                 Vec::new()
             };
+            let focus = TaskEditorFocusView {
+                title: editor.focused_field == TaskEditorField::Title,
+                project: editor.focused_field == TaskEditorField::Project,
+                due_date: editor.focused_field == TaskEditorField::DueDate,
+                due_time: editor.focused_field == TaskEditorField::DueTime,
+                recurrence: editor.focused_field == TaskEditorField::Recurrence,
+            };
+            let due_preview = self.editor_due_preview(editor);
             TaskEditorView {
                 title: "Edit Task",
                 title_value: editor.title_input.clone(),
@@ -1228,18 +1302,17 @@ impl App {
                 due_time_cursor: editor.due_time_cursor,
                 recurrence_value: editor.recurrence_input.clone(),
                 recurrence_cursor: editor.recurrence_cursor,
-                focus: TaskEditorFocusView {
-                    title: editor.focused_field == TaskEditorField::Title,
-                    project: editor.focused_field == TaskEditorField::Project,
-                    due_date: editor.focused_field == TaskEditorField::DueDate,
-                    due_time: editor.focused_field == TaskEditorField::DueTime,
-                    recurrence: editor.focused_field == TaskEditorField::Recurrence,
-                },
-                due_preview: self.editor_due_preview(editor),
+                focus,
+                due_preview: due_preview.clone(),
                 calendar: editor.calendar.as_ref().map(|calendar| CalendarPickerView {
                     display_date: calendar.display_date,
                     selected_date: calendar.selected_date,
                 }),
+                preview_panel: Self::task_editor_preview_panel(
+                    editor.project_input.as_str(),
+                    due_preview.as_ref(),
+                    editor.focused_field,
+                ),
             }
         })
     }
@@ -1314,7 +1387,7 @@ impl App {
             parent_value: editor.parent_input.clone(),
             parent_cursor: editor.parent_cursor,
             parsed_name,
-            parent_label,
+            parent_label: parent_label.clone(),
             parent_suggestions: parent_suggestions.clone(),
             selected_parent_suggestion: editor.suggestion_index,
             color_label: color.label().to_string(),
@@ -1326,7 +1399,132 @@ impl App {
                 color: editor.focused_field == ProjectEditorField::Color,
                 favorite: editor.focused_field == ProjectEditorField::Favorite,
             },
+            preview_panel: Self::project_editor_preview_panel(
+                parent_label.as_deref(),
+                editor.focused_field,
+            ),
         })
+    }
+
+    fn task_input_preview_panel(
+        show_project_assignment: bool,
+        project_name: &str,
+        due_preview: Option<&TaskDuePreviewView>,
+    ) -> FormPreviewPanelView {
+        let mut preview_lines = Vec::new();
+        if show_project_assignment {
+            preview_lines.push(PreviewLineView::key_value("Project", project_name));
+        }
+        if let Some(due) = due_preview {
+            preview_lines.push(PreviewLineView::key_value(
+                "Due Date",
+                due.date.format("%Y-%m-%d").to_string(),
+            ));
+            if let Some(datetime) = due.datetime {
+                preview_lines.push(PreviewLineView::key_value(
+                    "Due Time",
+                    datetime.format("%H:%M").to_string(),
+                ));
+            }
+            preview_lines.push(PreviewLineView::key_value(
+                "Recurring",
+                if due.is_recurring { "yes" } else { "no" },
+            ));
+            let normalized = due
+                .datetime
+                .map(|datetime| {
+                    format!(
+                        "{} {}",
+                        due.date.format("%Y-%m-%d"),
+                        datetime.format("%H:%M")
+                    )
+                })
+                .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
+            if due.string.to_ascii_lowercase() != normalized {
+                preview_lines.push(PreviewLineView::dimmed_key_value(
+                    "From",
+                    due.string.as_str(),
+                ));
+            }
+        }
+
+        FormPreviewPanelView {
+            preview_lines,
+            tips: vec!["Press # for selecting a project".to_string()],
+        }
+    }
+
+    fn task_editor_preview_panel(
+        project_value: &str,
+        due_preview: Option<&TaskDuePreviewView>,
+        focused_field: TaskEditorField,
+    ) -> FormPreviewPanelView {
+        let mut preview_lines = vec![PreviewLineView::key_value("Project", project_value)];
+        if let Some(due) = due_preview {
+            preview_lines.push(PreviewLineView::emphasized_key_value(
+                "Summary",
+                due.string.as_str(),
+            ));
+            preview_lines.push(PreviewLineView::key_value(
+                "Date",
+                due.date.format("%Y-%m-%d").to_string(),
+            ));
+            let time_value = due
+                .datetime
+                .map(|datetime| datetime.format("%H:%M").to_string())
+                .unwrap_or_else(|| "-".to_string());
+            preview_lines.push(PreviewLineView::key_value("Time", time_value));
+            preview_lines.push(PreviewLineView::key_value(
+                "Recurring",
+                if due.is_recurring { "yes" } else { "no" },
+            ));
+        } else {
+            preview_lines.push(PreviewLineView::key_value("Summary", "no due date"));
+        }
+
+        let tips = match focused_field {
+            TaskEditorField::Title => vec!["Press # for selecting a project".to_string()],
+            TaskEditorField::Project => {
+                vec!["Type in Project to fuzzy-match and use Enter/Tab to accept".to_string()]
+            }
+            TaskEditorField::DueDate => {
+                vec!["Type YYYY-MM-DD or use F6 to pick from calendar".to_string()]
+            }
+            TaskEditorField::DueTime => {
+                vec!["Type HH:MM (24h) or leave empty for all-day due date".to_string()]
+            }
+            TaskEditorField::Recurrence => {
+                vec!["Type recurrence phrases like: every monday at 9am".to_string()]
+            }
+        };
+
+        FormPreviewPanelView {
+            preview_lines,
+            tips,
+        }
+    }
+
+    fn project_editor_preview_panel(
+        parent_label: Option<&str>,
+        focused_field: ProjectEditorField,
+    ) -> FormPreviewPanelView {
+        let mut preview_lines = Vec::new();
+        if let Some(parent_label) = parent_label {
+            preview_lines.push(PreviewLineView::text(format!("Parent: {parent_label}")));
+        }
+        let tips = match focused_field {
+            ProjectEditorField::Name => vec!["Press # for selecting a parent project".to_string()],
+            ProjectEditorField::Parent => {
+                vec!["Type to fuzzy-match a parent project and use Enter/Tab to accept".to_string()]
+            }
+            ProjectEditorField::Color => vec!["Use ←/→ or h/l to change the color".to_string()],
+            ProjectEditorField::Favorite => vec!["Use ←/→ or h/l to toggle favorite".to_string()],
+        };
+
+        FormPreviewPanelView {
+            preview_lines,
+            tips,
+        }
     }
 
     pub fn delete_confirmation_view(&self) -> Option<DeleteConfirmationView> {
@@ -2711,11 +2909,7 @@ impl App {
 
     fn active_parent_field_query<'a>(&self, value: &'a str) -> Option<&'a str> {
         let query = value.trim();
-        if query.is_empty() {
-            None
-        } else {
-            Some(query)
-        }
+        if query.is_empty() { None } else { Some(query) }
     }
 
     fn resolve_project_parent_input(
@@ -3432,7 +3626,8 @@ impl App {
                     self.project_editor = Some(editor);
                 }
                 KeyCode::Down if editor.focused_field == ProjectEditorField::Parent => {
-                    if let Some(query) = self.active_parent_field_query(editor.parent_input.as_str())
+                    if let Some(query) =
+                        self.active_parent_field_query(editor.parent_input.as_str())
                     {
                         let last_index = self
                             .project_parent_suggestions(query, editor.project_id)
@@ -4421,10 +4616,24 @@ mod tests {
     use crate::theme::ThemePalette;
 
     use super::{
-        App, CycleEntryState, HistoryPanelTab, PanelFocus, RightPanelTab, RunOptions, ScreenData,
-        TaskEditorField, TaskEditorState, TaskView, TimerPhase, TimerRunState,
-        apply_debug_overrides, chrono_duration, duration_to_stored_minutes,
+        App, CycleEntryState, HistoryPanelTab, PanelFocus, PreviewLineView, RightPanelTab,
+        RunOptions, ScreenData, TaskEditorField, TaskEditorState, TaskView, TimerPhase,
+        TimerRunState, apply_debug_overrides, chrono_duration, duration_to_stored_minutes,
     };
+
+    fn assert_key_value_preview_line(
+        line: &PreviewLineView,
+        expected_label: &str,
+        expected_value: &str,
+    ) {
+        match line {
+            PreviewLineView::KeyValue { label, value, .. } => {
+                assert_eq!(label, expected_label);
+                assert_eq!(value, expected_value);
+            }
+            _ => panic!("expected key/value preview line"),
+        }
+    }
 
     fn test_app() -> App {
         let config = AppConfig::default();
@@ -4905,6 +5114,109 @@ mod tests {
     }
 
     #[test]
+    fn task_input_preview_panel_includes_due_preview_and_contextual_tip() {
+        let mut app = test_app();
+        let tomorrow = app.today() + chrono::Days::new(1);
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Ship report tomorrow at 3pm".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let input = app.task_input_view().expect("input popup should be open");
+        assert_eq!(input.preview_panel.tips.len(), 1);
+        assert_eq!(
+            input.preview_panel.tips[0],
+            "Press # for selecting a project"
+        );
+        assert!(input.preview_panel.preview_lines.len() >= 3);
+        assert_key_value_preview_line(
+            &input.preview_panel.preview_lines[0],
+            "Due Date",
+            tomorrow.format("%Y-%m-%d").to_string().as_str(),
+        );
+        assert_key_value_preview_line(&input.preview_panel.preview_lines[1], "Due Time", "15:00");
+        assert_key_value_preview_line(&input.preview_panel.preview_lines[2], "Recurring", "no");
+    }
+
+    #[test]
+    fn task_editor_preview_panel_switches_tip_by_active_field() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Prepare deck tomorrow".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_eq!(
+            editor.preview_panel.tips,
+            vec!["Press # for selecting a project".to_string()]
+        );
+
+        app.handle_key(crossterm::event::KeyCode::F(3))
+            .expect("focus should switch");
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_eq!(
+            editor.preview_panel.tips,
+            vec!["Type YYYY-MM-DD or use F6 to pick from calendar".to_string()]
+        );
+
+        app.handle_key(crossterm::event::KeyCode::F(5))
+            .expect("focus should switch");
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_eq!(
+            editor.preview_panel.tips,
+            vec!["Type recurrence phrases like: every monday at 9am".to_string()]
+        );
+    }
+
+    #[test]
+    fn project_editor_preview_panel_switches_tip_by_active_field() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("editor should open");
+
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert_eq!(
+            editor.preview_panel.tips,
+            vec!["Press # for selecting a parent project".to_string()]
+        );
+
+        app.handle_key(crossterm::event::KeyCode::F(3))
+            .expect("focus should switch");
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert_eq!(
+            editor.preview_panel.tips,
+            vec!["Use ←/→ or h/l to change the color".to_string()]
+        );
+
+        app.handle_key(crossterm::event::KeyCode::F(4))
+            .expect("focus should switch");
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert_eq!(
+            editor.preview_panel.tips,
+            vec!["Use ←/→ or h/l to toggle favorite".to_string()]
+        );
+    }
+
+    #[test]
     fn create_popup_enter_accepts_project_suggestion_before_submitting_task() {
         let mut app = test_app();
         let project = app
@@ -5155,13 +5467,7 @@ mod tests {
         let parent = app
             .database
             .project_repository()
-            .create(
-                "Parent A",
-                None,
-                ProjectColor::Blue,
-                false,
-                Local::now(),
-            )
+            .create("Parent A", None, ProjectColor::Blue, false, Local::now())
             .expect("parent should create");
         let child = app
             .database
