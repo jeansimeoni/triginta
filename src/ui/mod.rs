@@ -465,62 +465,94 @@ fn render_task_list_panel(
 ) {
     let visible_tasks = app.visible_tasks();
     let content_width = area.width.saturating_sub(2);
-    let mut lines = vec![];
+    let footer = task_list_footer(app, symbols, palette);
+    let footer_hints = task_list_footer_hints(
+        app,
+        symbols,
+        focused_panel == PanelFocus::RightPane,
+        palette,
+    );
+    let block = panel_block(
+        right_panel_title(RightPanelTab::Tasks, symbols, palette),
+        focused_panel == PanelFocus::RightPane,
+        palette,
+    )
+    .title_bottom(footer)
+    .title_bottom(footer_hints);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     if visible_tasks.is_empty() {
-        match app.active_task_view() {
-            TaskView::Today => {
-                lines.push(Line::from("No tasks in Today yet."));
-                lines.push(Line::from("Tasks due today will appear here."));
-            }
-            TaskView::Soon => {
-                lines.push(Line::from("No tasks in Soon yet."));
-                lines.push(Line::from("Upcoming tasks will appear here."));
-            }
-            TaskView::All | TaskView::Inbox => {
-                lines.push(Line::from("No tasks yet."));
-                lines.push(Line::from("Press c to create your first task."));
-            }
-        }
-    } else {
-        let show_selection = focused_panel == PanelFocus::RightPane;
-        for task in visible_tasks.iter().take(6) {
-            let selected =
-                show_selection && app.selected_task().map(|selected| selected.id) == Some(task.id);
-            lines.push(task_summary_line(
-                task,
-                symbols,
-                palette,
-                selected,
-                content_width,
-            ));
-            lines.push(task_project_line(
-                app.screen_data(),
-                task,
-                symbols,
-                palette,
-                selected,
-                content_width,
-            ));
-        }
+        let lines = match app.active_task_view() {
+            TaskView::Today => vec![
+                Line::from("No tasks in Today yet."),
+                Line::from("Tasks due today will appear here."),
+            ],
+            TaskView::Soon => vec![
+                Line::from("No tasks in Soon yet."),
+                Line::from("Upcoming tasks will appear here."),
+            ],
+            TaskView::All | TaskView::Inbox => vec![
+                Line::from("No tasks yet."),
+                Line::from("Press c to create your first task."),
+            ],
+        };
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
     }
 
-    let footer = task_list_footer(app, symbols, palette);
-    let footer_hints =
-        task_list_footer_hints(symbols, focused_panel == PanelFocus::RightPane, palette);
-    let tasks = Paragraph::new(lines)
-        .block(
-            panel_block(
-                right_panel_title(RightPanelTab::Tasks, symbols, palette),
-                focused_panel == PanelFocus::RightPane,
-                palette,
-            )
-            .title_bottom(footer)
-            .title_bottom(footer_hints),
-        )
-        .wrap(Wrap { trim: true });
+    let viewport_task_rows = (inner.height as usize / 2).max(1);
+    let selected_index = app.selected_task().and_then(|selected| {
+        visible_tasks
+            .iter()
+            .position(|task| task.id == selected.id)
+    });
+    let task_scroll = panel_scroll_offset(visible_tasks.len(), viewport_task_rows, selected_index);
 
-    frame.render_widget(tasks, area);
+    let mut lines = Vec::with_capacity(viewport_task_rows.saturating_mul(2));
+    let show_selection = focused_panel == PanelFocus::RightPane;
+    for task in visible_tasks
+        .iter()
+        .skip(task_scroll)
+        .take(viewport_task_rows)
+    {
+        let selected =
+            show_selection && app.selected_task().map(|selected| selected.id) == Some(task.id);
+        lines.push(task_summary_line(
+            task,
+            symbols,
+            palette,
+            selected,
+            content_width,
+        ));
+        lines.push(task_project_line(
+            app.screen_data(),
+            task,
+            symbols,
+            palette,
+            selected,
+            content_width,
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+
+    if visible_tasks.len() > viewport_task_rows {
+        let position =
+            scrollbar_position_from_offset(task_scroll, visible_tasks.len(), viewport_task_rows);
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(visible_tasks.len())
+            .viewport_content_length(viewport_task_rows)
+            .position(position);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("▐")
+            .thumb_style(Style::default().fg(palette.subtle_text));
+        frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+    }
 }
 
 fn render_task_details_panel(
@@ -1237,16 +1269,29 @@ fn task_list_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<
     )])
 }
 
-fn task_list_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> Line<'static> {
+fn task_list_footer_hints(
+    app: &App,
+    symbols: Symbols,
+    focused: bool,
+    palette: ThemePalette,
+) -> Line<'static> {
     if !focused {
         return Line::from("").right_aligned();
     }
 
+    let done_filter_hint = if app.hides_completed_tasks() {
+        " f hidden  "
+    } else {
+        " f shown  "
+    };
+
     Line::from(vec![
         Span::styled(symbols.sort, Style::default().fg(palette.accent)),
         Span::styled(" o sort  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.visible, Style::default().fg(palette.accent)),
+        Span::styled(done_filter_hint, Style::default().fg(palette.subtle_text)),
         Span::styled(symbols.done, Style::default().fg(palette.accent)),
-        Span::styled(" x done", Style::default().fg(palette.subtle_text)),
+        Span::styled(" space done", Style::default().fg(palette.subtle_text)),
     ])
     .right_aligned()
 }

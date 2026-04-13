@@ -900,7 +900,7 @@ const TASKS_SHORTCUTS: &[ShortcutTip] = &[
         description: "assign to timer",
     },
     ShortcutTip {
-        keys: "Space/x",
+        keys: "Space",
         description: "toggle done",
     },
     ShortcutTip {
@@ -4221,7 +4221,7 @@ impl App {
             KeyCode::Char('u') if self.focused_panel == PanelFocus::History => {
                 self.clear_selected_history_task()?;
             }
-            KeyCode::Char('x') | KeyCode::Char(' ')
+            KeyCode::Char(' ')
                 if self.focused_panel == PanelFocus::RightPane
                     && self.active_right_panel_tab == RightPanelTab::Tasks =>
             {
@@ -6207,7 +6207,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('f'))
             .expect("filter should toggle");
-        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
             .expect("status should toggle");
         assert_eq!(app.screen_data.tasks[0].status, TaskStatus::Todo);
     }
@@ -6236,7 +6236,7 @@ mod tests {
             .clone()
             .expect("due should exist");
 
-        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
             .expect("status should toggle");
 
         assert_eq!(app.screen_data.tasks.len(), 2);
@@ -6279,14 +6279,14 @@ mod tests {
 
         let original_task_id = app.selected_task().expect("task should exist").id;
 
-        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
             .expect("status should toggle");
         assert_eq!(app.screen_data.tasks.len(), 2);
 
         app.selected_task_id = Some(original_task_id);
-        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
             .expect("status should toggle back");
-        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
             .expect("status should toggle again");
 
         assert_eq!(app.screen_data.tasks.len(), 2);
@@ -6327,7 +6327,7 @@ mod tests {
             .expect("edit should submit");
 
         let original_task_id = app.selected_task().expect("task should exist").id;
-        app.handle_key_at(crossterm::event::KeyCode::Char('x'), now)
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
             .expect("status should toggle");
 
         assert_eq!(app.screen_data.tasks.len(), 2);
