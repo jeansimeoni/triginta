@@ -467,6 +467,7 @@ struct TaskEditorState {
     project_input: String,
     project_cursor: usize,
     project_id: ProjectId,
+    suggestion_index: usize,
     due_date_input: String,
     due_date_cursor: usize,
     due_time_input: String,
@@ -488,18 +489,20 @@ struct CalendarState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectEditorField {
     Name,
+    Parent,
     Color,
     Favorite,
 }
 
 impl ProjectEditorField {
-    const ALL: [Self; 3] = [Self::Name, Self::Color, Self::Favorite];
+    const ALL: [Self; 4] = [Self::Name, Self::Parent, Self::Color, Self::Favorite];
 
     fn index(self) -> usize {
         match self {
             Self::Name => 0,
-            Self::Color => 1,
-            Self::Favorite => 2,
+            Self::Parent => 1,
+            Self::Color => 2,
+            Self::Favorite => 3,
         }
     }
 
@@ -529,6 +532,8 @@ struct ProjectEditorState {
     project_id: Option<ProjectId>,
     name_input: String,
     name_cursor: usize,
+    parent_input: String,
+    parent_cursor: usize,
     color_index: usize,
     is_favorite: bool,
     suggestion_index: usize,
@@ -580,6 +585,8 @@ pub struct TaskEditorView {
     pub title_cursor: usize,
     pub project_value: String,
     pub project_cursor: usize,
+    pub project_suggestions: Vec<String>,
+    pub selected_project_suggestion: usize,
     pub due_date_value: String,
     pub due_date_cursor: usize,
     pub due_time_value: String,
@@ -642,6 +649,7 @@ pub struct ProjectTreeRowView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectEditorFocusView {
     pub name: bool,
+    pub parent: bool,
     pub color: bool,
     pub favorite: bool,
 }
@@ -651,6 +659,8 @@ pub struct ProjectEditorView {
     pub title: &'static str,
     pub name_value: String,
     pub name_cursor: usize,
+    pub parent_value: String,
+    pub parent_cursor: usize,
     pub parsed_name: String,
     pub parent_label: Option<String>,
     pub parent_suggestions: Vec<String>,
@@ -882,8 +892,8 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "jump to field",
     },
     ShortcutTip {
-        keys: "h/l",
-        description: "change project/date",
+        keys: "j/k or ↑/↓",
+        description: "project suggestions",
     },
     ShortcutTip {
         keys: "F6",
@@ -943,7 +953,7 @@ const PROJECT_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
         description: "next/prev field",
     },
     ShortcutTip {
-        keys: "F1-F3",
+        keys: "F1-F4",
         description: "jump to field",
     },
     ShortcutTip {
@@ -1185,33 +1195,52 @@ impl App {
     }
 
     pub fn task_editor_view(&self) -> Option<TaskEditorView> {
-        self.task_editor.as_ref().map(|editor| TaskEditorView {
-            title: "Edit Task",
-            title_value: editor.title_input.clone(),
-            title_cursor: editor.title_cursor,
-            project_value: self
-                .project_name(editor.project_id)
-                .unwrap_or("Inbox")
-                .to_string(),
-            project_cursor: editor.project_cursor,
-            due_date_value: editor.due_date_input.clone(),
-            due_date_cursor: editor.due_date_cursor,
-            due_time_value: editor.due_time_input.clone(),
-            due_time_cursor: editor.due_time_cursor,
-            recurrence_value: editor.recurrence_input.clone(),
-            recurrence_cursor: editor.recurrence_cursor,
-            focus: TaskEditorFocusView {
-                title: editor.focused_field == TaskEditorField::Title,
-                project: editor.focused_field == TaskEditorField::Project,
-                due_date: editor.focused_field == TaskEditorField::DueDate,
-                due_time: editor.focused_field == TaskEditorField::DueTime,
-                recurrence: editor.focused_field == TaskEditorField::Recurrence,
-            },
-            due_preview: self.editor_due_preview(editor),
-            calendar: editor.calendar.as_ref().map(|calendar| CalendarPickerView {
-                display_date: calendar.display_date,
-                selected_date: calendar.selected_date,
-            }),
+        self.task_editor.as_ref().map(|editor| {
+            let current_project_name = self.project_name(editor.project_id).unwrap_or("Inbox");
+            let show_project_suggestions = editor.focused_field == TaskEditorField::Project
+                && !editor.project_input.trim().is_empty()
+                && !editor
+                    .project_input
+                    .trim()
+                    .eq_ignore_ascii_case(current_project_name);
+            let project_suggestions = if show_project_suggestions {
+                self.project_suggestions(editor.project_input.as_str())
+                    .into_iter()
+                    .take(4)
+                    .map(|project| project.name.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            TaskEditorView {
+                title: "Edit Task",
+                title_value: editor.title_input.clone(),
+                title_cursor: editor.title_cursor,
+                project_value: editor.project_input.clone(),
+                project_cursor: editor.project_cursor,
+                project_suggestions: project_suggestions.clone(),
+                selected_project_suggestion: editor
+                    .suggestion_index
+                    .min(project_suggestions.len().saturating_sub(1)),
+                due_date_value: editor.due_date_input.clone(),
+                due_date_cursor: editor.due_date_cursor,
+                due_time_value: editor.due_time_input.clone(),
+                due_time_cursor: editor.due_time_cursor,
+                recurrence_value: editor.recurrence_input.clone(),
+                recurrence_cursor: editor.recurrence_cursor,
+                focus: TaskEditorFocusView {
+                    title: editor.focused_field == TaskEditorField::Title,
+                    project: editor.focused_field == TaskEditorField::Project,
+                    due_date: editor.focused_field == TaskEditorField::DueDate,
+                    due_time: editor.focused_field == TaskEditorField::DueTime,
+                    recurrence: editor.focused_field == TaskEditorField::Recurrence,
+                },
+                due_preview: self.editor_due_preview(editor),
+                calendar: editor.calendar.as_ref().map(|calendar| CalendarPickerView {
+                    display_date: calendar.display_date,
+                    selected_date: calendar.selected_date,
+                }),
+            }
         })
     }
 
@@ -1219,17 +1248,56 @@ impl App {
         let editor = self.project_editor.as_ref()?;
         let inline_parent_query = self
             .active_project_query(editor.name_input.as_str(), editor.name_cursor)
-            .map(|(_, _, query)| query)
-            .unwrap_or_default();
+            .map(|(_, _, query)| query);
+        let direct_parent_query = self.active_parent_field_query(editor.parent_input.as_str());
         let (parsed_name, extracted_parent_id) =
             self.extract_project_reference(editor.name_input.as_str(), ProjectId(0));
-        let resolved_parent_id = if extracted_parent_id == ProjectId(0) {
+        let inline_parent_id = if extracted_parent_id == ProjectId(0) {
             None
         } else {
             Some(extracted_parent_id)
         };
-        let parent_label =
-            resolved_parent_id.and_then(|project_id| self.project_name(project_id).map(str::to_string));
+        let direct_parent_id =
+            self.resolve_project_parent_input(editor.parent_input.as_str(), editor.project_id);
+        let parent_label = direct_parent_id
+            .or(inline_parent_id)
+            .and_then(|project_id| self.project_name(project_id).map(str::to_string));
+        let parent_suggestions = match editor.focused_field {
+            ProjectEditorField::Parent => {
+                let should_show = direct_parent_query
+                    .map(|query| {
+                        let resolved = self.resolve_project_parent_input(query, editor.project_id);
+                        resolved
+                            .and_then(|project_id| self.project_name(project_id))
+                            .map(|name| !query.eq_ignore_ascii_case(name))
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(false);
+                if should_show {
+                    direct_parent_query
+                        .map(|query| {
+                            self.project_parent_suggestions(query, editor.project_id)
+                                .into_iter()
+                                .take(4)
+                                .map(|project| project.name.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            }
+            ProjectEditorField::Name => inline_parent_query
+                .map(|query| {
+                    self.project_parent_suggestions(query.as_str(), editor.project_id)
+                        .into_iter()
+                        .take(4)
+                        .map(|project| project.name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
         let color = ProjectColor::all()
             .get(editor.color_index)
             .copied()
@@ -1243,20 +1311,18 @@ impl App {
             },
             name_value: editor.name_input.clone(),
             name_cursor: editor.name_cursor,
+            parent_value: editor.parent_input.clone(),
+            parent_cursor: editor.parent_cursor,
             parsed_name,
             parent_label,
-            parent_suggestions: self
-                .project_parent_suggestions(inline_parent_query.as_str(), editor.project_id)
-                .into_iter()
-                .take(4)
-                .map(|project| project.name.clone())
-                .collect(),
+            parent_suggestions: parent_suggestions.clone(),
             selected_parent_suggestion: editor.suggestion_index,
             color_label: color.label().to_string(),
             color_value: color,
             is_favorite: editor.is_favorite,
             focus: ProjectEditorFocusView {
                 name: editor.focused_field == ProjectEditorField::Name,
+                parent: editor.focused_field == ProjectEditorField::Parent,
                 color: editor.focused_field == ProjectEditorField::Color,
                 favorite: editor.focused_field == ProjectEditorField::Favorite,
             },
@@ -1913,15 +1979,6 @@ impl App {
         }
     }
 
-    fn active_project_ids(&self) -> Vec<ProjectId> {
-        self.screen_data
-            .projects
-            .iter()
-            .filter(|project| project.deleted_at.is_none())
-            .map(|project| project.id)
-            .collect()
-    }
-
     fn project_suggestions(&self, query: &str) -> Vec<&Project> {
         let normalized = query.trim();
         if normalized.is_empty() {
@@ -2024,6 +2081,38 @@ impl App {
             .name_input
             .replace_range(start..end, format!("#{} ", project.name).as_str());
         editor.name_cursor = (start + project.name.len() + 2).min(editor.name_input.len());
+        editor.suggestion_index = 0;
+        true
+    }
+
+    fn accept_project_editor_parent_field_suggestion(
+        &self,
+        editor: &mut ProjectEditorState,
+    ) -> bool {
+        let Some(query) = self.active_parent_field_query(editor.parent_input.as_str()) else {
+            return false;
+        };
+        let suggestions = self.project_parent_suggestions(query, editor.project_id);
+        let Some(project) = suggestions
+            .get(
+                editor
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        else {
+            return false;
+        };
+        if editor
+            .parent_input
+            .trim()
+            .eq_ignore_ascii_case(project.name.as_str())
+        {
+            return false;
+        }
+
+        editor.parent_input = project.name.clone();
+        editor.parent_cursor = editor.parent_input.len();
         editor.suggestion_index = 0;
         true
     }
@@ -2286,6 +2375,7 @@ impl App {
                 .to_string(),
             project_cursor: self.project_name(task.project_id).unwrap_or("Inbox").len(),
             project_id: task.project_id,
+            suggestion_index: 0,
             due_date_input,
             due_date_cursor,
             due_time_input,
@@ -2619,6 +2709,30 @@ impl App {
         matches
     }
 
+    fn active_parent_field_query<'a>(&self, value: &'a str) -> Option<&'a str> {
+        let query = value.trim();
+        if query.is_empty() {
+            None
+        } else {
+            Some(query)
+        }
+    }
+
+    fn resolve_project_parent_input(
+        &self,
+        query: &str,
+        project_id: Option<ProjectId>,
+    ) -> Option<ProjectId> {
+        let normalized = query.trim();
+        if normalized.is_empty() {
+            return None;
+        }
+        self.project_parent_suggestions(normalized, project_id)
+            .first()
+            .copied()
+            .map(|project| project.id)
+    }
+
     fn next_project_editor_field(&self, editor: &ProjectEditorState) -> ProjectEditorField {
         editor.focused_field.next()
     }
@@ -2633,6 +2747,7 @@ impl App {
         field: ProjectEditorField,
     ) {
         editor.focused_field = field;
+        editor.suggestion_index = 0;
     }
 
     fn project_editor_has_parent_without_name(&self, editor: &ProjectEditorState) -> bool {
@@ -2655,6 +2770,8 @@ impl App {
             project_id: None,
             name_input,
             name_cursor,
+            parent_input: String::new(),
+            parent_cursor: 0,
             color_index: ProjectColor::all()
                 .iter()
                 .position(|color| *color == ProjectColor::Charcoal)
@@ -2678,16 +2795,18 @@ impl App {
             .unwrap_or(0);
         self.project_editor = Some(ProjectEditorState {
             project_id: Some(project.id),
-            name_input: project
+            name_input: project.name.clone(),
+            name_cursor: project.name.len(),
+            parent_input: project
                 .parent_project_id
                 .and_then(|parent_id| self.project_name(parent_id))
-                .map(|name| format!("#{} {}", name, project.name))
-                .unwrap_or_else(|| project.name.clone()),
-            name_cursor: project
+                .unwrap_or("")
+                .to_string(),
+            parent_cursor: project
                 .parent_project_id
                 .and_then(|parent_id| self.project_name(parent_id))
-                .map(|name| name.len() + project.name.len() + 2)
-                .unwrap_or(project.name.len()),
+                .unwrap_or("")
+                .len(),
             color_index,
             is_favorite: project.is_favorite,
             suggestion_index: 0,
@@ -2750,17 +2869,19 @@ impl App {
         editor: ProjectEditorState,
         now: DateTime<Local>,
     ) -> Result<()> {
-        let (clean_name, parent_project_id) =
+        let (clean_name, inline_parent_project_id) =
             self.extract_project_reference(editor.name_input.as_str(), ProjectId(0));
         let name = clean_name.trim();
         if name.is_empty() {
             self.project_editor = Some(editor);
             return Ok(());
         }
-        let parent_project_id = if parent_project_id == ProjectId(0) {
+        let parent_project_id = if !editor.parent_input.trim().is_empty() {
+            self.resolve_project_parent_input(editor.parent_input.as_str(), editor.project_id)
+        } else if inline_parent_project_id == ProjectId(0) {
             None
         } else {
-            Some(parent_project_id)
+            Some(inline_parent_project_id)
         };
         let color = ProjectColor::all()
             .get(editor.color_index)
@@ -3096,6 +3217,12 @@ impl App {
                         self.project_editor = Some(editor);
                         return Ok(true);
                     }
+                    if editor.focused_field == ProjectEditorField::Parent
+                        && self.accept_project_editor_parent_field_suggestion(&mut editor)
+                    {
+                        self.project_editor = Some(editor);
+                        return Ok(true);
+                    }
                     self.submit_project_editor(editor, now)?;
                 }
                 KeyCode::Tab => {
@@ -3113,11 +3240,19 @@ impl App {
                             return Ok(true);
                         }
                     }
+                    if editor.focused_field == ProjectEditorField::Parent
+                        && self.accept_project_editor_parent_field_suggestion(&mut editor)
+                    {
+                        self.project_editor = Some(editor);
+                        return Ok(true);
+                    }
                     editor.focused_field = self.next_project_editor_field(&editor);
+                    editor.suggestion_index = 0;
                     self.project_editor = Some(editor);
                 }
                 KeyCode::BackTab => {
                     editor.focused_field = self.previous_project_editor_field(&editor);
+                    editor.suggestion_index = 0;
                     self.project_editor = Some(editor);
                 }
                 KeyCode::F(1) => {
@@ -3125,33 +3260,66 @@ impl App {
                     self.project_editor = Some(editor);
                 }
                 KeyCode::F(2) => {
-                    self.focus_project_editor_field(&mut editor, ProjectEditorField::Color);
+                    self.focus_project_editor_field(&mut editor, ProjectEditorField::Parent);
                     self.project_editor = Some(editor);
                 }
                 KeyCode::F(3) => {
+                    self.focus_project_editor_field(&mut editor, ProjectEditorField::Color);
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::F(4) => {
                     self.focus_project_editor_field(&mut editor, ProjectEditorField::Favorite);
                     self.project_editor = Some(editor);
                 }
-                KeyCode::Backspace if editor.focused_field == ProjectEditorField::Name => {
-                    if editor.name_cursor > 0 {
-                        let previous_index = editor.name_input[..editor.name_cursor]
+                KeyCode::Backspace
+                    if matches!(
+                        editor.focused_field,
+                        ProjectEditorField::Name | ProjectEditorField::Parent
+                    ) =>
+                {
+                    let (value, cursor) = if editor.focused_field == ProjectEditorField::Name {
+                        (&mut editor.name_input, &mut editor.name_cursor)
+                    } else {
+                        (&mut editor.parent_input, &mut editor.parent_cursor)
+                    };
+                    if *cursor > 0 {
+                        let previous_index = value[..*cursor]
                             .char_indices()
                             .last()
                             .map(|(index, _)| index)
                             .unwrap_or(0);
-                        editor.name_input.drain(previous_index..editor.name_cursor);
-                        editor.name_cursor = previous_index;
+                        value.drain(previous_index..*cursor);
+                        *cursor = previous_index;
                     }
                     editor.suggestion_index = 0;
                     self.project_editor = Some(editor);
                 }
-                KeyCode::Home if editor.focused_field == ProjectEditorField::Name => {
-                    editor.name_cursor = 0;
+                KeyCode::Home
+                    if matches!(
+                        editor.focused_field,
+                        ProjectEditorField::Name | ProjectEditorField::Parent
+                    ) =>
+                {
+                    if editor.focused_field == ProjectEditorField::Name {
+                        editor.name_cursor = 0;
+                    } else {
+                        editor.parent_cursor = 0;
+                    }
                     self.project_editor = Some(editor);
                 }
-                KeyCode::Left if editor.focused_field == ProjectEditorField::Name => {
-                    if editor.name_cursor > 0 {
-                        editor.name_cursor = editor.name_input[..editor.name_cursor]
+                KeyCode::Left
+                    if matches!(
+                        editor.focused_field,
+                        ProjectEditorField::Name | ProjectEditorField::Parent
+                    ) =>
+                {
+                    let (value, cursor) = if editor.focused_field == ProjectEditorField::Name {
+                        (&editor.name_input, &mut editor.name_cursor)
+                    } else {
+                        (&editor.parent_input, &mut editor.parent_cursor)
+                    };
+                    if *cursor > 0 {
+                        *cursor = value[..*cursor]
                             .char_indices()
                             .last()
                             .map(|(index, _)| index)
@@ -3159,22 +3327,44 @@ impl App {
                     }
                     self.project_editor = Some(editor);
                 }
-                KeyCode::Right if editor.focused_field == ProjectEditorField::Name => {
-                    if editor.name_cursor < editor.name_input.len() {
-                        editor.name_cursor = editor.name_input[editor.name_cursor..]
+                KeyCode::Right
+                    if matches!(
+                        editor.focused_field,
+                        ProjectEditorField::Name | ProjectEditorField::Parent
+                    ) =>
+                {
+                    let (value, cursor) = if editor.focused_field == ProjectEditorField::Name {
+                        (&editor.name_input, &mut editor.name_cursor)
+                    } else {
+                        (&editor.parent_input, &mut editor.parent_cursor)
+                    };
+                    if *cursor < value.len() {
+                        *cursor = value[*cursor..]
                             .char_indices()
                             .nth(1)
-                            .map(|(offset, _)| editor.name_cursor + offset)
-                            .unwrap_or(editor.name_input.len());
+                            .map(|(offset, _)| *cursor + offset)
+                            .unwrap_or(value.len());
                     }
                     self.project_editor = Some(editor);
                 }
-                KeyCode::End if editor.focused_field == ProjectEditorField::Name => {
-                    editor.name_cursor = editor.name_input.len();
+                KeyCode::End
+                    if matches!(
+                        editor.focused_field,
+                        ProjectEditorField::Name | ProjectEditorField::Parent
+                    ) =>
+                {
+                    if editor.focused_field == ProjectEditorField::Name {
+                        editor.name_cursor = editor.name_input.len();
+                    } else {
+                        editor.parent_cursor = editor.parent_input.len();
+                    }
                     self.project_editor = Some(editor);
                 }
                 KeyCode::Left | KeyCode::Char('h') | KeyCode::Up | KeyCode::Char('k')
-                    if editor.focused_field != ProjectEditorField::Name =>
+                    if matches!(
+                        editor.focused_field,
+                        ProjectEditorField::Color | ProjectEditorField::Favorite
+                    ) =>
                 {
                     match editor.focused_field {
                         ProjectEditorField::Color => {
@@ -3183,12 +3373,16 @@ impl App {
                         ProjectEditorField::Favorite => {
                             editor.is_favorite = !editor.is_favorite;
                         }
+                        ProjectEditorField::Parent => {}
                         ProjectEditorField::Name => {}
                     }
                     self.project_editor = Some(editor);
                 }
                 KeyCode::Right | KeyCode::Char('l') | KeyCode::Down | KeyCode::Char('j')
-                    if editor.focused_field != ProjectEditorField::Name =>
+                    if matches!(
+                        editor.focused_field,
+                        ProjectEditorField::Color | ProjectEditorField::Favorite
+                    ) =>
                 {
                     match editor.focused_field {
                         ProjectEditorField::Color => {
@@ -3198,6 +3392,7 @@ impl App {
                         ProjectEditorField::Favorite => {
                             editor.is_favorite = !editor.is_favorite;
                         }
+                        ProjectEditorField::Parent => {}
                         ProjectEditorField::Name => {}
                     }
                     self.project_editor = Some(editor);
@@ -3222,6 +3417,12 @@ impl App {
                     editor.suggestion_index = 0;
                     self.project_editor = Some(editor);
                 }
+                KeyCode::Char(character) if editor.focused_field == ProjectEditorField::Parent => {
+                    editor.parent_input.insert(editor.parent_cursor, character);
+                    editor.parent_cursor += character.len_utf8();
+                    editor.suggestion_index = 0;
+                    self.project_editor = Some(editor);
+                }
                 KeyCode::Down if editor.focused_field == ProjectEditorField::Name => {
                     if let Some((_, _, query)) =
                         self.active_project_query(editor.name_input.as_str(), editor.name_cursor)
@@ -3234,7 +3435,22 @@ impl App {
                     }
                     self.project_editor = Some(editor);
                 }
+                KeyCode::Down if editor.focused_field == ProjectEditorField::Parent => {
+                    if let Some(query) = self.active_parent_field_query(editor.parent_input.as_str())
+                    {
+                        let last_index = self
+                            .project_parent_suggestions(query, editor.project_id)
+                            .len()
+                            .saturating_sub(1);
+                        editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
+                    }
+                    self.project_editor = Some(editor);
+                }
                 KeyCode::Up if editor.focused_field == ProjectEditorField::Name => {
+                    editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::Up if editor.focused_field == ProjectEditorField::Parent => {
                     editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
                     self.project_editor = Some(editor);
                 }
@@ -3281,74 +3497,117 @@ impl App {
             match code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => {
+                    if editor.focused_field == TaskEditorField::Project {
+                        let query = editor.project_input.trim();
+                        if !query.is_empty() {
+                            let suggestions = self.project_suggestions(query);
+                            if let Some(project) = suggestions
+                                .get(
+                                    editor
+                                        .suggestion_index
+                                        .min(suggestions.len().saturating_sub(1)),
+                                )
+                                .copied()
+                            {
+                                let already_selected = editor.project_id == project.id
+                                    && editor
+                                        .project_input
+                                        .trim()
+                                        .eq_ignore_ascii_case(project.name.as_str());
+                                if !already_selected {
+                                    editor.project_id = project.id;
+                                    editor.project_input = project.name.clone();
+                                    editor.project_cursor = editor.project_input.len();
+                                    editor.suggestion_index = 0;
+                                    self.task_editor = Some(editor);
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                    }
                     return self.submit_task_editor(editor, now);
                 }
                 KeyCode::Tab => {
+                    if editor.focused_field == TaskEditorField::Project {
+                        let query = editor.project_input.trim();
+                        if !query.is_empty() {
+                            let suggestions = self.project_suggestions(query);
+                            if let Some(project) = suggestions
+                                .get(
+                                    editor
+                                        .suggestion_index
+                                        .min(suggestions.len().saturating_sub(1)),
+                                )
+                                .copied()
+                            {
+                                let already_selected = editor.project_id == project.id
+                                    && editor
+                                        .project_input
+                                        .trim()
+                                        .eq_ignore_ascii_case(project.name.as_str());
+                                if !already_selected {
+                                    editor.project_id = project.id;
+                                    editor.project_input = project.name.clone();
+                                    editor.project_cursor = editor.project_input.len();
+                                    editor.suggestion_index = 0;
+                                    self.task_editor = Some(editor);
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                    }
                     editor.focused_field = editor.focused_field.next();
+                    editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::BackTab => {
                     editor.focused_field = editor.focused_field.previous();
+                    editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(1) => {
                     Self::focus_editor_field(&mut editor, TaskEditorField::Title);
+                    editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(2) => {
                     Self::focus_editor_field(&mut editor, TaskEditorField::Project);
+                    editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(3) => {
                     Self::focus_editor_field(&mut editor, TaskEditorField::DueDate);
+                    editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(4) => {
                     Self::focus_editor_field(&mut editor, TaskEditorField::DueTime);
+                    editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(5) => {
                     Self::focus_editor_field(&mut editor, TaskEditorField::Recurrence);
+                    editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(7) => {
                     Self::clear_editor_due(&mut editor);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::Left | KeyCode::Char('h')
+                KeyCode::Down | KeyCode::Char('j')
                     if editor.focused_field == TaskEditorField::Project =>
                 {
-                    let project_ids = self.active_project_ids();
-                    if let Some(index) = project_ids
-                        .iter()
-                        .position(|project_id| *project_id == editor.project_id)
-                    {
-                        let next_index = index.saturating_sub(1);
-                        editor.project_id = project_ids[next_index];
-                        editor.project_input = self
-                            .project_name(editor.project_id)
-                            .unwrap_or("Inbox")
-                            .to_string();
-                        editor.project_cursor = editor.project_input.len();
-                    }
+                    let last_index = self
+                        .project_suggestions(editor.project_input.as_str())
+                        .len()
+                        .saturating_sub(1);
+                    editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::Right | KeyCode::Char('l')
+                KeyCode::Up | KeyCode::Char('k')
                     if editor.focused_field == TaskEditorField::Project =>
                 {
-                    let project_ids = self.active_project_ids();
-                    if let Some(index) = project_ids
-                        .iter()
-                        .position(|project_id| *project_id == editor.project_id)
-                    {
-                        let next_index = (index + 1).min(project_ids.len().saturating_sub(1));
-                        editor.project_id = project_ids[next_index];
-                        editor.project_input = self
-                            .project_name(editor.project_id)
-                            .unwrap_or("Inbox")
-                            .to_string();
-                        editor.project_cursor = editor.project_input.len();
-                    }
+                    editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(6) if editor.focused_field == TaskEditorField::DueDate => {
@@ -3373,10 +3632,12 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     Self::delete_editor_char_before_cursor(&mut editor, now.date_naive());
+                    editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::Char(character) => {
                     Self::insert_editor_char(&mut editor, character, now.date_naive());
+                    editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 _ => {
@@ -4481,6 +4742,7 @@ mod tests {
             project_input: "Inbox".to_string(),
             project_cursor: "Inbox".len(),
             project_id: ProjectId(1),
+            suggestion_index: 0,
             due_date_input: "2026-04-13".to_string(),
             due_date_cursor: "2026-04-13".len(),
             due_time_input: "09:00".to_string(),
@@ -4816,7 +5078,7 @@ mod tests {
         let editor = app
             .project_editor_view()
             .expect("project editor should be visible");
-        assert!(editor.focus.color);
+        assert!(editor.focus.parent);
 
         app.handle_key(crossterm::event::KeyCode::BackTab)
             .expect("focus should switch back");
@@ -4830,9 +5092,16 @@ mod tests {
         let editor = app
             .project_editor_view()
             .expect("project editor should be visible");
-        assert!(editor.focus.color);
+        assert!(editor.focus.parent);
 
         app.handle_key(crossterm::event::KeyCode::F(3))
+            .expect("focus should jump");
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert!(editor.focus.color);
+
+        app.handle_key(crossterm::event::KeyCode::F(4))
             .expect("focus should jump");
         let editor = app
             .project_editor_view()
@@ -4882,6 +5151,105 @@ mod tests {
             .find(|project| project.name == "Child Project 03")
             .expect("child project should exist");
         assert_eq!(created.parent_project_id, Some(parent.id));
+    }
+
+    #[test]
+    fn edit_project_popup_shows_parent_in_parent_field_not_name_field() {
+        let mut app = test_app();
+        let parent = app
+            .database
+            .project_repository()
+            .create(
+                "Parent A",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("parent should create");
+        let child = app
+            .database
+            .project_repository()
+            .create(
+                "Child A",
+                Some(parent.id),
+                ProjectColor::Charcoal,
+                false,
+                Local::now(),
+            )
+            .expect("child should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.selected_project_id = Some(child.id);
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("edit popup should open");
+
+        let editor = app
+            .project_editor_view()
+            .expect("project editor should be visible");
+        assert_eq!(editor.name_value, "Child A");
+        assert_eq!(editor.parent_value, "Parent A");
+    }
+
+    #[test]
+    fn task_editor_accepts_project_suggestion_without_hash() {
+        let mut app = test_app();
+        let target = app
+            .database
+            .project_repository()
+            .create(
+                "Website Revamp",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Refactor auth".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should create");
+
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::F(2))
+            .expect("project field should focus");
+        let editor = app.task_editor_view().expect("editor should stay open");
+        assert!(editor.focus.project);
+        assert_eq!(editor.project_value, "Inbox");
+        for _ in 0.."Inbox".len() {
+            app.handle_key(crossterm::event::KeyCode::Backspace)
+                .expect("project text should clear");
+        }
+        for character in "web".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        let editor = app.task_editor_view().expect("editor should stay open");
+        assert_eq!(editor.project_value, "web");
+        assert!(!app.project_suggestions("web").is_empty());
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should accept suggestion");
+        let editor = app.task_editor_view().expect("editor should stay open");
+        assert_eq!(editor.project_value, "Website Revamp");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should save");
+
+        assert_eq!(
+            app.selected_task().expect("task should exist").project_id,
+            target.id
+        );
     }
 
     #[test]

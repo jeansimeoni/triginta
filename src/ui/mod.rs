@@ -1363,10 +1363,14 @@ fn render_task_editor_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let area = centered_rect(frame.area(), 96, 17);
+    let area = centered_rect(frame.area(), 96, 21);
     frame.render_widget(Clear, area);
 
-    let block = Block::default()
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(14), Constraint::Length(6)])
+        .split(area);
+    let form_block = Block::default()
         .title(Span::styled(
             editor.title,
             Style::default()
@@ -1376,24 +1380,21 @@ fn render_task_editor_popup(
         .title_bottom(editor_shortcuts_line(symbols, palette))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.accent));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let sections = Layout::default()
+    let form_inner = form_block.inner(sections[0]);
+    frame.render_widget(form_block, sections[0]);
+    let form_rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(4),
             Constraint::Length(3),
-            Constraint::Length(4),
-            Constraint::Length(4),
-            Constraint::Min(0),
+            Constraint::Length(3),
+            Constraint::Length(3),
         ])
-        .split(inner);
+        .split(form_inner);
 
     render_editor_field(
         frame,
-        sections[0],
+        form_rows[0],
         "Title [F1]",
         &editor.title_value,
         editor.title_cursor,
@@ -1404,20 +1405,20 @@ fn render_task_editor_popup(
     );
     render_editor_field(
         frame,
-        sections[1],
+        form_rows[1],
         "Project [F2]",
         &editor.project_value,
         editor.project_cursor,
         editor.focus.project,
         symbols,
-        Some("h/l cycles projects"),
+        Some("type to fuzzy-match a project"),
         palette,
     );
 
     let due_row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-        .split(sections[2]);
+        .split(form_rows[2]);
     render_editor_field(
         frame,
         due_row[0],
@@ -1442,7 +1443,7 @@ fn render_task_editor_popup(
     );
     render_editor_field(
         frame,
-        sections[3],
+        form_rows[3],
         "Recurrence [F5]",
         &editor.recurrence_value,
         editor.recurrence_cursor,
@@ -1451,7 +1452,26 @@ fn render_task_editor_popup(
         Some("every monday at 9am"),
         palette,
     );
-    render_editor_due_preview_panel(frame, sections[4], editor, palette);
+    render_editor_due_preview_panel(frame, sections[1], editor, palette);
+
+    if editor.focus.project && !editor.project_suggestions.is_empty() {
+        let dropdown_height = editor.project_suggestions.len().min(4) as u16 + 2;
+        let visible_width = form_rows[1].width.saturating_sub(4) as usize;
+        let cursor_col = editor_cursor_display_column(
+            &editor.project_value,
+            editor.project_cursor,
+            visible_width,
+            symbols,
+        );
+        let dropdown_area = project_parent_dropdown_rect(
+            frame.area(),
+            form_rows[1],
+            cursor_col as u16,
+            project_parent_dropdown_width(editor.project_suggestions.as_slice()),
+            dropdown_height,
+        );
+        render_editor_project_suggestions(frame, dropdown_area, editor, palette);
+    }
 
     if let Some(calendar) = editor.calendar {
         let calendar_area = anchored_dropdown_rect(frame.area(), due_row[0], 24, 10);
@@ -1542,6 +1562,10 @@ fn render_editor_due_preview_panel(
 ) {
     let lines = if let Some(due_preview) = &editor.due_preview {
         let mut lines = vec![Line::from(vec![
+            Span::styled("Project: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(editor.project_value.clone(), Style::default().fg(palette.text)),
+        ])];
+        lines.push(Line::from(vec![
             Span::styled("Summary: ", Style::default().fg(palette.subtle_text)),
             Span::styled(
                 due_preview.string.clone(),
@@ -1549,7 +1573,7 @@ fn render_editor_due_preview_panel(
                     .fg(palette.text)
                     .add_modifier(Modifier::BOLD),
             ),
-        ])];
+        ]));
         lines.push(Line::from(vec![
             Span::styled("Date: ", Style::default().fg(palette.subtle_text)),
             Span::styled(
@@ -1579,22 +1603,102 @@ fn render_editor_due_preview_panel(
         ]));
         lines
     } else {
-        vec![Line::from(vec![
-            Span::styled("Summary: ", Style::default().fg(palette.subtle_text)),
-            Span::styled("no due date", Style::default().fg(palette.text)),
-        ])]
+        vec![
+            Line::from(vec![
+                Span::styled("Project: ", Style::default().fg(palette.subtle_text)),
+                Span::styled(editor.project_value.clone(), Style::default().fg(palette.text)),
+            ]),
+            Line::from(vec![
+                Span::styled("Summary: ", Style::default().fg(palette.subtle_text)),
+                Span::styled("no due date", Style::default().fg(palette.text)),
+            ]),
+        ]
     };
+    let mut lines = lines;
+    let tip_text = if editor.focus.title {
+        Some("Press # for selecting a project")
+    } else if editor.focus.project {
+        Some("Type in Project to fuzzy-match and use Enter/Tab to accept")
+    } else {
+        None
+    };
+    if let Some(tip_text) = tip_text {
+        let tip_line = Line::from(Span::styled(
+            tip_text,
+            Style::default()
+                .fg(palette.subtle_text)
+                .add_modifier(Modifier::DIM),
+        ));
+        let tip_slot = area.height.saturating_sub(3) as usize;
+        let spacer_slot = tip_slot.saturating_sub(1);
+        if lines.len() > spacer_slot {
+            lines.truncate(spacer_slot);
+        }
+        while lines.len() < spacer_slot {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(""));
+        lines.push(tip_line);
+    }
 
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
-                .title(Span::styled(
-                    "Due Preview",
-                    Style::default().fg(palette.accent),
-                ))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.accent)),
+                .border_style(Style::default().fg(palette.border)),
         ),
+        area,
+    );
+}
+
+fn render_editor_project_suggestions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &TaskEditorView,
+    palette: ThemePalette,
+) {
+    let content_width = area.width.saturating_sub(2) as usize;
+    let lines = editor
+        .project_suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let style = if index
+                == editor
+                    .selected_project_suggestion
+                    .min(editor.project_suggestions.len().saturating_sub(1))
+            {
+                Style::default()
+                    .fg(palette.text)
+                    .bg(palette.border)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            let value = ellipsize_end(suggestion, content_width);
+            let padding = " ".repeat(content_width.saturating_sub(value.width()));
+            Line::from(vec![Span::styled(format!("{value}{padding}"), style)])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        "Project",
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            )
+            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
         area,
     );
 }
@@ -1649,7 +1753,7 @@ fn render_editor_calendar(
 fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "h/l project  F6 calendar  F7 clear due  Enter save",
+            "↑/↓ project  F6 calendar  F7 clear due  Enter save",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
@@ -1779,12 +1883,13 @@ fn render_project_editor_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let show_parent_dropdown = editor.focus.name && !editor.parent_suggestions.is_empty();
-    let area = centered_rect(frame.area(), 72, 14);
+    let show_parent_dropdown = (editor.focus.name || editor.focus.parent)
+        && !editor.parent_suggestions.is_empty();
+    let area = centered_rect(frame.area(), 72, 17);
     frame.render_widget(Clear, area);
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Length(6)])
+        .constraints([Constraint::Length(11), Constraint::Length(6)])
         .split(area);
 
     let form_block = Block::default()
@@ -1804,7 +1909,7 @@ fn render_project_editor_popup(
         .constraints([
             Constraint::Length(3),
             Constraint::Length(3),
-            Constraint::Min(0),
+            Constraint::Length(3),
         ])
         .split(form_inner);
 
@@ -1819,7 +1924,18 @@ fn render_project_editor_popup(
         None,
         palette,
     );
-    let meta_row = form_rows[1];
+    render_editor_field(
+        frame,
+        form_rows[1],
+        "Parent [F2]",
+        &editor.parent_value,
+        editor.parent_cursor,
+        editor.focus.parent,
+        symbols,
+        Some("Type to fuzzy-match a parent project"),
+        palette,
+    );
+    let meta_row = form_rows[2];
     let meta_columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -1827,7 +1943,7 @@ fn render_project_editor_popup(
     render_project_value_field(
         frame,
         meta_columns[0],
-        "Color [F2]",
+        "Color [F3]",
         &editor.color_label,
         editor.focus.color,
         Some(Style::default().fg(palette.project_color(editor.color_value))),
@@ -1836,7 +1952,7 @@ fn render_project_editor_popup(
     render_project_value_field(
         frame,
         meta_columns[1],
-        "Favorite [F3]",
+        "Favorite [F4]",
         if editor.is_favorite { "yes" } else { "no" },
         editor.focus.favorite,
         None,
@@ -1847,16 +1963,21 @@ fn render_project_editor_popup(
 
     if show_parent_dropdown {
         let dropdown_height = editor.parent_suggestions.len().min(4) as u16 + 2;
-        let visible_width = form_rows[0].width.saturating_sub(4) as usize;
+        let (anchor, value, cursor) = if editor.focus.parent {
+            (form_rows[1], &editor.parent_value, editor.parent_cursor)
+        } else {
+            (form_rows[0], &editor.name_value, editor.name_cursor)
+        };
+        let visible_width = anchor.width.saturating_sub(4) as usize;
         let cursor_col = editor_cursor_display_column(
-            &editor.name_value,
-            editor.name_cursor,
+            value,
+            cursor,
             visible_width,
             symbols,
         );
         let dropdown_area = project_parent_dropdown_rect(
             frame.area(),
-            form_rows[0],
+            anchor,
             cursor_col as u16,
             project_parent_dropdown_width(editor.parent_suggestions.as_slice()),
             dropdown_height,
@@ -2165,7 +2286,7 @@ fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'s
 fn project_editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "Tab accept parent/next  F1-F3 field  h/l change  Enter save",
+            "Tab accept parent/next  F1-F4 field  h/l change  Enter save",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
@@ -2174,7 +2295,7 @@ fn project_editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Lin
     Line::from(vec![
         Span::styled("⇥", Style::default().fg(palette.subtle_text)),
         Span::raw(" parent/next  "),
-        Span::styled("F1-F3", Style::default().fg(palette.subtle_text)),
+        Span::styled("F1-F4", Style::default().fg(palette.subtle_text)),
         Span::raw(" field  "),
         Span::styled("←/→", Style::default().fg(palette.subtle_text)),
         Span::raw(" h/l  "),
