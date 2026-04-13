@@ -269,13 +269,13 @@ fn render_history_panel(
     let history = Paragraph::new(lines);
     frame.render_widget(history, content);
 
-    if let Some((content_length, position)) = right_indicator {
+    if let Some((content_length, scroll_offset)) = right_indicator {
         let viewport = inner.height as usize;
-        let max_position = content_length.saturating_sub(viewport);
+        let position = scrollbar_position_from_offset(scroll_offset, content_length, viewport);
         let mut scrollbar_state = ScrollbarState::default()
             .content_length(content_length)
             .viewport_content_length(viewport)
-            .position(position.min(max_position));
+            .position(position);
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
@@ -367,11 +367,11 @@ fn render_navigation_panel(
     );
 
     if lines.len() > viewport_lines {
-        let max_position = lines.len().saturating_sub(viewport_lines);
+        let selected_position = scrollbar_position_from_offset(scroll, lines.len(), viewport_lines);
         let mut scrollbar_state = ScrollbarState::default()
             .content_length(lines.len())
             .viewport_content_length(viewport_lines)
-            .position(scroll.min(max_position));
+            .position(selected_position);
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
@@ -393,6 +393,19 @@ fn panel_scroll_offset(total_lines: usize, viewport_lines: usize, selected_index
     selected
         .saturating_sub(viewport_lines / 2)
         .min(max_scroll)
+}
+
+fn scrollbar_position_from_offset(scroll_offset: usize, total_lines: usize, viewport_lines: usize) -> usize {
+    if total_lines == 0 {
+        return 0;
+    }
+    if total_lines <= viewport_lines || viewport_lines == 0 {
+        return scroll_offset.min(total_lines.saturating_sub(1));
+    }
+
+    let max_start = total_lines.saturating_sub(viewport_lines);
+    let clamped_start = scroll_offset.min(max_start);
+    clamped_start.saturating_mul(total_lines.saturating_sub(1)) / max_start.max(1)
 }
 
 fn render_favorites_panel(
@@ -1012,11 +1025,11 @@ fn render_help_dialog(frame: &mut Frame<'_>, app: &App, palette: ThemePalette) {
     frame.render_widget(popup, area);
 
     if lines.len() > visible_height {
-        let max_position = lines.len().saturating_sub(visible_height);
+        let position = scrollbar_position_from_offset(start, lines.len(), visible_height);
         let mut scrollbar_state = ScrollbarState::default()
             .content_length(lines.len())
             .viewport_content_length(visible_height)
-            .position(start.min(max_position));
+            .position(position);
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
