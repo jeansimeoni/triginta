@@ -300,36 +300,38 @@ fn render_navigation_panel(
     palette: ThemePalette,
 ) {
     let content_width = area.width.saturating_sub(2);
-    let (lines, selected_index) = match app.active_sidebar_tab() {
+    let (mut lines, selected_index) = match app.active_sidebar_tab() {
         SidebarTab::Navigation => (
-            TaskView::all()
-                .iter()
+            app.navigation_task_views()
+                .into_iter()
                 .map(|view| {
-                    let selected = app.active_task_view() == *view;
+                    let selected = app.active_task_view() == view;
                     selectable_count_line(
-                        &format!("{} {}", task_view_symbol(*view, symbols), view.label()),
-                        app.task_count_for_view(*view),
+                        &format!("{} {}", task_view_symbol(view, symbols), view.label()),
+                        app.task_count_for_view(view),
                         selected,
                         content_width,
                         palette,
                     )
                 })
                 .collect::<Vec<_>>(),
-            TaskView::all()
+            app.navigation_task_views()
                 .iter()
                 .position(|view| app.active_task_view() == *view),
         ),
         SidebarTab::FiltersTags => (
-            vec![
-                Line::from("Filters and tags are reserved here."),
-                Line::from("Project metadata now occupies the third tab."),
-            ],
+            app.filters_tags_lines()
+                .into_iter()
+                .map(Line::from)
+                .collect::<Vec<_>>(),
             None,
         ),
         SidebarTab::Projects => {
             let rows = app.project_tree_rows();
             let selected_index = rows.iter().position(|row| row.is_selected);
-            if rows.len() == 1 {
+            if rows.is_empty() {
+                (vec![Line::from("No matching projects.")], selected_index)
+            } else if rows.len() == 1 && !app.has_user_projects() {
                 (vec![Line::from("No projects yet.")], selected_index)
             } else {
                 (
@@ -341,6 +343,9 @@ fn render_navigation_panel(
             }
         }
     };
+    if lines.is_empty() {
+        lines = vec![Line::from("No matching results.")];
+    }
 
     let footer = match app.active_sidebar_tab() {
         SidebarTab::Projects => projects_sort_footer(app, symbols, palette),
@@ -471,6 +476,7 @@ fn render_task_list_panel(
     palette: ThemePalette,
 ) {
     let visible_tasks = app.visible_tasks();
+    let search_query = app.task_list_search_query().unwrap_or("");
     let footer = task_list_footer(app, symbols, palette);
     let footer_hints = task_list_footer_hints(
         app,
@@ -489,19 +495,23 @@ fn render_task_list_panel(
     frame.render_widget(block, area);
 
     if visible_tasks.is_empty() {
-        let lines = match app.active_task_view() {
-            TaskView::Today => vec![
-                Line::from("No tasks in Today yet."),
-                Line::from("Tasks due today will appear here."),
-            ],
-            TaskView::Soon => vec![
-                Line::from("No tasks in Soon yet."),
-                Line::from("Upcoming tasks will appear here."),
-            ],
-            TaskView::All | TaskView::Inbox => vec![
-                Line::from("No tasks yet."),
-                Line::from("Press c to create your first task."),
-            ],
+        let lines = if search_query.is_empty() {
+            match app.active_task_view() {
+                TaskView::Today => vec![
+                    Line::from("No tasks in Today yet."),
+                    Line::from("Tasks due today will appear here."),
+                ],
+                TaskView::Soon => vec![
+                    Line::from("No tasks in Soon yet."),
+                    Line::from("Upcoming tasks will appear here."),
+                ],
+                TaskView::All | TaskView::Inbox => vec![
+                    Line::from("No tasks yet."),
+                    Line::from("Press c to create your first task."),
+                ],
+            }
+        } else {
+            vec![Line::from("No matching tasks.")]
         };
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         return;
@@ -744,6 +754,34 @@ fn render_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect, palette: Them
     }
 
     let center_area = Rect::new(center_x, inner.y, center_width, 1);
+    if let Some(search) = app.focused_panel_search_status() {
+        if search.is_editing {
+            let query_width = center_width.saturating_sub(1) as usize;
+            let query_window = input_window_view(&search.query, search.cursor, query_width.max(1));
+            let text = format!("/{}", query_window.text);
+            frame.render_widget(
+                Paragraph::new(Line::from(ellipsize_end(&text, center_width as usize)))
+                    .style(Style::default().fg(palette.subtle_text)),
+                center_area,
+            );
+            let cursor_col = 1usize.saturating_add(query_window.cursor_col);
+            let x = center_area
+                .x
+                .saturating_add((cursor_col as u16).min(center_area.width.saturating_sub(1)));
+            frame.set_cursor_position((x, center_area.y));
+            return;
+        }
+        let locked_text = format!("SEARCH /{}  Esc clear", search.query);
+        frame.render_widget(
+            Paragraph::new(
+                Line::from(ellipsize_end(&locked_text, center_width as usize)).centered(),
+            )
+            .style(Style::default().fg(palette.subtle_text)),
+            center_area,
+        );
+        return;
+    }
+
     let center_text = footer_shortcuts_line(app, center_width as usize);
     if !center_text.is_empty() {
         frame.render_widget(

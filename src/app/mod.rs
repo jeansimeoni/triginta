@@ -96,27 +96,6 @@ impl TaskView {
             Self::Soon => "Soon",
         }
     }
-
-    fn index(self) -> usize {
-        match self {
-            Self::All => 0,
-            Self::Inbox => 1,
-            Self::Today => 2,
-            Self::Soon => 3,
-        }
-    }
-
-    fn from_index(index: usize) -> Self {
-        Self::ALL[index.min(Self::ALL.len().saturating_sub(1))]
-    }
-
-    fn next(self) -> Self {
-        Self::from_index((self.index() + 1).min(Self::ALL.len().saturating_sub(1)))
-    }
-
-    fn previous(self) -> Self {
-        Self::from_index(self.index().saturating_sub(1))
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,6 +522,35 @@ struct TaskSearchState {
     selected_index: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelSearchTarget {
+    NavigationViews,
+    FiltersTags,
+    Projects,
+    TaskList,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelSearchPhase {
+    Editing,
+    Locked,
+}
+
+#[derive(Debug, Clone)]
+struct PanelSearchState {
+    query: String,
+    cursor: usize,
+    phase: PanelSearchPhase,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PanelSearchStates {
+    navigation_views: Option<PanelSearchState>,
+    filters_tags: Option<PanelSearchState>,
+    projects: Option<PanelSearchState>,
+    task_list: Option<PanelSearchState>,
+}
+
 #[derive(Debug, Clone)]
 struct ProjectEditorState {
     project_id: Option<ProjectId>,
@@ -714,6 +722,13 @@ pub struct TaskSearchView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanelSearchStatusView {
+    pub query: String,
+    pub cursor: usize,
+    pub is_editing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectTreeRowView {
     pub project_id: Option<ProjectId>,
     pub name: String,
@@ -881,6 +896,10 @@ const NAVIGATION_SHORTCUTS: &[ShortcutTip] = &[
         keys: "Enter",
         description: "open task list",
     },
+    ShortcutTip {
+        keys: "/",
+        description: "search",
+    },
 ];
 
 const FILTERS_TAGS_SHORTCUTS: &[ShortcutTip] = &[
@@ -891,6 +910,10 @@ const FILTERS_TAGS_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "Enter",
         description: "open task list",
+    },
+    ShortcutTip {
+        keys: "/",
+        description: "search",
     },
 ];
 
@@ -935,6 +958,10 @@ const PROJECTS_SHORTCUTS: &[ShortcutTip] = &[
         keys: "Enter",
         description: "open task list",
     },
+    ShortcutTip {
+        keys: "/",
+        description: "search",
+    },
 ];
 
 const FAVORITES_SHORTCUTS: &[ShortcutTip] = &[ShortcutTip {
@@ -970,6 +997,10 @@ const TASKS_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "o/f",
         description: "sort/filter",
+    },
+    ShortcutTip {
+        keys: "/",
+        description: "search",
     },
 ];
 
@@ -1040,6 +1071,25 @@ const SEARCH_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "j/k or ↑/↓",
         description: "move result",
+    },
+    ShortcutTip {
+        keys: "Home/End",
+        description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "Backspace/Del",
+        description: "delete char",
+    },
+];
+
+const PANEL_SEARCH_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter",
+        description: "lock search",
+    },
+    ShortcutTip {
+        keys: "Esc",
+        description: "clear search",
     },
     ShortcutTip {
         keys: "Home/End",
@@ -1138,6 +1188,7 @@ pub struct App {
     task_editor: Option<TaskEditorState>,
     project_editor: Option<ProjectEditorState>,
     task_search: Option<TaskSearchState>,
+    panel_search_states: PanelSearchStates,
     task_sort_popup: Option<TaskSortPopupState>,
     project_sort_popup: Option<ProjectSortPopupState>,
     delete_confirmation: Option<TaskId>,
@@ -1196,6 +1247,7 @@ impl App {
             task_editor: None,
             project_editor: None,
             task_search: None,
+            panel_search_states: PanelSearchStates::default(),
             task_sort_popup: None,
             project_sort_popup: None,
             delete_confirmation: None,
@@ -1243,23 +1295,24 @@ impl App {
     }
 
     pub fn visible_tasks(&self) -> Vec<&Task> {
+        let query = self
+            .panel_search_query(PanelSearchTarget::TaskList)
+            .unwrap_or("");
         let mut tasks = self
             .screen_data
             .tasks
             .iter()
-            .filter(|task| self.task_is_visible(task))
+            .filter(|task| self.task_is_visible(task) && fuzzy_matches(query, task.title.as_str()))
             .collect::<Vec<_>>();
         tasks.sort_by(|left, right| self.compare_tasks(left, right));
         tasks
     }
 
     pub fn selected_task(&self) -> Option<&Task> {
-        self.selected_task_id.and_then(|task_id| {
-            self.screen_data
-                .tasks
-                .iter()
-                .find(|task| task.id == task_id && self.task_is_visible(task))
-        })
+        let selected_task_id = self.selected_task_id?;
+        self.visible_tasks()
+            .into_iter()
+            .find(|task| task.id == selected_task_id)
     }
 
     pub fn assigned_task(&self) -> Option<&Task> {
@@ -1280,6 +1333,32 @@ impl App {
             PanelFocus::History => self.selected_history_task(),
             _ => None,
         }
+    }
+
+    pub fn navigation_task_views(&self) -> Vec<TaskView> {
+        let query = self
+            .panel_search_query(PanelSearchTarget::NavigationViews)
+            .unwrap_or("");
+        TaskView::all()
+            .iter()
+            .copied()
+            .filter(|view| fuzzy_matches(query, view.label()))
+            .collect()
+    }
+
+    pub fn filters_tags_lines(&self) -> Vec<&'static str> {
+        const PLACEHOLDER_ROWS: &[&str] = &[
+            "Filters and tags are reserved here.",
+            "Project metadata now occupies the third tab.",
+        ];
+        let query = self
+            .panel_search_query(PanelSearchTarget::FiltersTags)
+            .unwrap_or("");
+        PLACEHOLDER_ROWS
+            .iter()
+            .copied()
+            .filter(|line| fuzzy_matches(query, line))
+            .collect()
     }
 
     pub fn task_input_view(&self) -> Option<TaskInputView> {
@@ -1693,6 +1772,9 @@ impl App {
     }
 
     pub fn project_tree_rows(&self) -> Vec<ProjectTreeRowView> {
+        let query = self
+            .panel_search_query(PanelSearchTarget::Projects)
+            .unwrap_or("");
         let mut rows = vec![ProjectTreeRowView {
             project_id: None,
             name: "All Projects".to_string(),
@@ -1704,7 +1786,17 @@ impl App {
             is_selected: self.selected_project_id.is_none(),
         }];
         self.append_project_tree_rows(&mut rows, None, 0, &[]);
+        if !query.is_empty() {
+            rows.retain(|row| fuzzy_matches(query, row.name.as_str()));
+        }
         rows
+    }
+
+    pub fn has_user_projects(&self) -> bool {
+        self.screen_data
+            .projects
+            .iter()
+            .any(|project| project.deleted_at.is_none() && !project.is_inbox)
     }
 
     pub fn task_count_for_view(&self, view: TaskView) -> usize {
@@ -1747,6 +1839,29 @@ impl App {
         "Donate"
     }
 
+    pub fn focused_panel_search_status(&self) -> Option<PanelSearchStatusView> {
+        let target = self.focused_panel_search_target()?;
+        let state = self.panel_search_state(target)?;
+        Some(PanelSearchStatusView {
+            query: state.query.clone(),
+            cursor: state.cursor,
+            is_editing: state.phase == PanelSearchPhase::Editing,
+        })
+    }
+
+    pub fn active_sidebar_search_query(&self) -> Option<&str> {
+        let target = match self.active_sidebar_tab {
+            SidebarTab::Navigation => PanelSearchTarget::NavigationViews,
+            SidebarTab::FiltersTags => PanelSearchTarget::FiltersTags,
+            SidebarTab::Projects => PanelSearchTarget::Projects,
+        };
+        self.panel_search_query(target)
+    }
+
+    pub fn task_list_search_query(&self) -> Option<&str> {
+        self.panel_search_query(PanelSearchTarget::TaskList)
+    }
+
     pub fn focused_panel_shortcuts(&self) -> &'static [ShortcutTip] {
         if self.task_sort_popup.is_some() || self.project_sort_popup.is_some() {
             return SORT_POPUP_SHORTCUTS;
@@ -1759,6 +1874,13 @@ impl App {
         }
         if self.task_input.is_some() {
             return INPUT_POPUP_SHORTCUTS;
+        }
+        if self
+            .focused_panel_search_target()
+            .and_then(|target| self.panel_search_state(target))
+            .is_some_and(|search| search.phase == PanelSearchPhase::Editing)
+        {
+            return PANEL_SEARCH_SHORTCUTS;
         }
         if self.project_delete_confirmation.is_some() {
             return PROJECT_DELETE_CONFIRMATION_SHORTCUTS;
@@ -1841,6 +1963,12 @@ impl App {
             sections.push(ShortcutSection {
                 title: "Task Search Popup",
                 tips: SEARCH_POPUP_SHORTCUTS,
+            });
+        }
+        if self.any_panel_search_editing() {
+            sections.push(ShortcutSection {
+                title: "Panel Search",
+                tips: PANEL_SEARCH_SHORTCUTS,
             });
         }
         if self.task_sort_popup.is_some() {
@@ -2034,6 +2162,136 @@ impl App {
             && self.task_matches_active_view(task)
             && self.task_matches_selected_project(task)
             && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
+    }
+
+    fn focused_panel_search_target(&self) -> Option<PanelSearchTarget> {
+        match self.focused_panel {
+            PanelFocus::Navigation => match self.active_sidebar_tab {
+                SidebarTab::Navigation => Some(PanelSearchTarget::NavigationViews),
+                SidebarTab::FiltersTags => Some(PanelSearchTarget::FiltersTags),
+                SidebarTab::Projects => Some(PanelSearchTarget::Projects),
+            },
+            PanelFocus::RightPane if self.active_right_panel_tab == RightPanelTab::Tasks => {
+                Some(PanelSearchTarget::TaskList)
+            }
+            _ => None,
+        }
+    }
+
+    fn panel_search_state(&self, target: PanelSearchTarget) -> Option<&PanelSearchState> {
+        match target {
+            PanelSearchTarget::NavigationViews => {
+                self.panel_search_states.navigation_views.as_ref()
+            }
+            PanelSearchTarget::FiltersTags => self.panel_search_states.filters_tags.as_ref(),
+            PanelSearchTarget::Projects => self.panel_search_states.projects.as_ref(),
+            PanelSearchTarget::TaskList => self.panel_search_states.task_list.as_ref(),
+        }
+    }
+
+    fn panel_search_state_mut(
+        &mut self,
+        target: PanelSearchTarget,
+    ) -> Option<&mut PanelSearchState> {
+        match target {
+            PanelSearchTarget::NavigationViews => {
+                self.panel_search_states.navigation_views.as_mut()
+            }
+            PanelSearchTarget::FiltersTags => self.panel_search_states.filters_tags.as_mut(),
+            PanelSearchTarget::Projects => self.panel_search_states.projects.as_mut(),
+            PanelSearchTarget::TaskList => self.panel_search_states.task_list.as_mut(),
+        }
+    }
+
+    fn set_panel_search_state(
+        &mut self,
+        target: PanelSearchTarget,
+        state: Option<PanelSearchState>,
+    ) {
+        match target {
+            PanelSearchTarget::NavigationViews => self.panel_search_states.navigation_views = state,
+            PanelSearchTarget::FiltersTags => self.panel_search_states.filters_tags = state,
+            PanelSearchTarget::Projects => self.panel_search_states.projects = state,
+            PanelSearchTarget::TaskList => self.panel_search_states.task_list = state,
+        }
+    }
+
+    fn panel_search_query(&self, target: PanelSearchTarget) -> Option<&str> {
+        self.panel_search_state(target)
+            .map(|search| search.query.as_str())
+    }
+
+    fn any_panel_search_editing(&self) -> bool {
+        [
+            PanelSearchTarget::NavigationViews,
+            PanelSearchTarget::FiltersTags,
+            PanelSearchTarget::Projects,
+            PanelSearchTarget::TaskList,
+        ]
+        .into_iter()
+        .any(|target| {
+            self.panel_search_state(target)
+                .is_some_and(|search| search.phase == PanelSearchPhase::Editing)
+        })
+    }
+
+    fn open_panel_search(&mut self, target: PanelSearchTarget) {
+        if let Some(search) = self.panel_search_state_mut(target) {
+            search.phase = PanelSearchPhase::Editing;
+            search.cursor = search.cursor.min(search.query.len());
+        } else {
+            self.set_panel_search_state(
+                target,
+                Some(PanelSearchState {
+                    query: String::new(),
+                    cursor: 0,
+                    phase: PanelSearchPhase::Editing,
+                }),
+            );
+        }
+        self.sync_selection_for_panel_search(target);
+    }
+
+    fn lock_panel_search(&mut self, target: PanelSearchTarget) {
+        if let Some(search) = self.panel_search_state_mut(target) {
+            search.phase = PanelSearchPhase::Locked;
+        }
+    }
+
+    fn clear_panel_search(&mut self, target: PanelSearchTarget) {
+        self.set_panel_search_state(target, None);
+        self.sync_selection_for_panel_search(target);
+    }
+
+    fn sync_selection_for_panel_search(&mut self, target: PanelSearchTarget) {
+        match target {
+            PanelSearchTarget::NavigationViews => {
+                let filtered = self.navigation_task_views();
+                if let Some(first) = filtered.first().copied() {
+                    if !filtered.contains(&self.active_task_view) {
+                        self.active_task_view = first;
+                    }
+                }
+                self.sync_task_selection();
+            }
+            PanelSearchTarget::Projects => {
+                let filtered_ids = self
+                    .project_tree_rows()
+                    .into_iter()
+                    .map(|row| row.project_id)
+                    .collect::<Vec<_>>();
+                if let Some(first) = filtered_ids.first().copied() {
+                    if !filtered_ids.contains(&self.selected_project_id) {
+                        self.selected_project_id = first;
+                    }
+                }
+                self.sync_task_selection();
+            }
+            PanelSearchTarget::TaskList => {
+                self.sync_task_selection();
+            }
+            PanelSearchTarget::FiltersTags => {}
+        }
     }
 
     fn task_matches_selected_project(&self, task: &Task) -> bool {
@@ -2619,15 +2877,15 @@ impl App {
     }
 
     fn select_next_task_view(&mut self) {
-        self.set_active_task_view(self.active_task_view.next());
+        self.move_task_view_selection(1);
     }
 
     fn select_previous_task_view(&mut self) {
-        self.set_active_task_view(self.active_task_view.previous());
+        self.move_task_view_selection(-1);
     }
 
     fn move_task_view_selection(&mut self, offset: isize) {
-        let all = TaskView::all();
+        let all = self.navigation_task_views();
         if all.is_empty() {
             return;
         }
@@ -2638,6 +2896,18 @@ impl App {
         let next_index = (current_index as isize + offset)
             .clamp(0, all.len().saturating_sub(1) as isize) as usize;
         self.set_active_task_view(all[next_index]);
+    }
+
+    fn select_first_navigation_task_view(&mut self) {
+        if let Some(first) = self.navigation_task_views().first().copied() {
+            self.set_active_task_view(first);
+        }
+    }
+
+    fn select_last_navigation_task_view(&mut self) {
+        if let Some(last) = self.navigation_task_views().last().copied() {
+            self.set_active_task_view(last);
+        }
     }
 
     fn move_task_selection(&mut self, offset: isize) {
@@ -3151,6 +3421,9 @@ impl App {
         let Some(project) = self.project_by_id(project_id).cloned() else {
             return;
         };
+        if project.is_inbox {
+            return;
+        }
         let color_index = ProjectColor::all()
             .iter()
             .position(|color| *color == project.color)
@@ -4234,6 +4507,135 @@ impl App {
         search.query.drain(search.cursor..next_index);
     }
 
+    fn move_panel_search_cursor_home(search: &mut PanelSearchState) {
+        search.cursor = 0;
+    }
+
+    fn move_panel_search_cursor_left(search: &mut PanelSearchState) {
+        if search.cursor == 0 {
+            return;
+        }
+        search.cursor = search.query[..search.cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+    }
+
+    fn move_panel_search_cursor_right(search: &mut PanelSearchState) {
+        if search.cursor >= search.query.len() {
+            return;
+        }
+        search.cursor = search.query[search.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(offset, _)| search.cursor + offset)
+            .unwrap_or(search.query.len());
+    }
+
+    fn move_panel_search_cursor_end(search: &mut PanelSearchState) {
+        search.cursor = search.query.len();
+    }
+
+    fn insert_panel_search_char(search: &mut PanelSearchState, character: char) {
+        search.query.insert(search.cursor, character);
+        search.cursor += character.len_utf8();
+    }
+
+    fn delete_panel_search_char_before_cursor(search: &mut PanelSearchState) {
+        if search.cursor == 0 {
+            return;
+        }
+
+        let previous_index = search.query[..search.cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        search.query.drain(previous_index..search.cursor);
+        search.cursor = previous_index;
+    }
+
+    fn delete_panel_search_char_at_cursor(search: &mut PanelSearchState) {
+        if search.cursor >= search.query.len() {
+            return;
+        }
+
+        let next_index = search.query[search.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(offset, _)| search.cursor + offset)
+            .unwrap_or(search.query.len());
+        search.query.drain(search.cursor..next_index);
+    }
+
+    fn handle_panel_search_key(&mut self, code: KeyCode) -> bool {
+        let Some(target) = self.focused_panel_search_target() else {
+            return false;
+        };
+
+        if matches!(code, KeyCode::Char('/')) {
+            self.open_panel_search(target);
+            return true;
+        }
+
+        let phase = self.panel_search_state(target).map(|search| search.phase);
+        match phase {
+            Some(PanelSearchPhase::Locked) => {
+                if code == KeyCode::Esc {
+                    self.clear_panel_search(target);
+                    return true;
+                }
+                false
+            }
+            Some(PanelSearchPhase::Editing) => {
+                if code == KeyCode::Esc {
+                    self.clear_panel_search(target);
+                    return true;
+                }
+                if code == KeyCode::Enter {
+                    self.lock_panel_search(target);
+                    return true;
+                }
+                let mut should_sync = false;
+                if let Some(search) = self.panel_search_state_mut(target) {
+                    match code {
+                        KeyCode::Backspace => {
+                            Self::delete_panel_search_char_before_cursor(search);
+                            should_sync = true;
+                        }
+                        KeyCode::Delete => {
+                            Self::delete_panel_search_char_at_cursor(search);
+                            should_sync = true;
+                        }
+                        KeyCode::Home => {
+                            Self::move_panel_search_cursor_home(search);
+                        }
+                        KeyCode::Left => {
+                            Self::move_panel_search_cursor_left(search);
+                        }
+                        KeyCode::Right => {
+                            Self::move_panel_search_cursor_right(search);
+                        }
+                        KeyCode::End => {
+                            Self::move_panel_search_cursor_end(search);
+                        }
+                        KeyCode::Char(character) => {
+                            Self::insert_panel_search_char(search, character);
+                            should_sync = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if should_sync {
+                    self.sync_selection_for_panel_search(target);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn handle_key(&mut self, code: KeyCode) -> Result<()> {
         self.handle_key_at(code, Local::now())
     }
@@ -4275,6 +4677,10 @@ impl App {
                 }
                 _ => {}
             }
+            return Ok(());
+        }
+
+        if self.handle_panel_search_key(code) {
             return Ok(());
         }
 
@@ -4395,14 +4801,19 @@ impl App {
             }
             KeyCode::Home if self.focused_panel == PanelFocus::Navigation => {
                 match self.active_sidebar_tab {
-                    SidebarTab::Navigation => self.set_active_task_view(TaskView::All),
+                    SidebarTab::Navigation => self.select_first_navigation_task_view(),
                     SidebarTab::FiltersTags => {}
-                    SidebarTab::Projects => self.selected_project_id = None,
+                    SidebarTab::Projects => {
+                        self.selected_project_id = self
+                            .project_tree_rows()
+                            .first()
+                            .and_then(|row| row.project_id)
+                    }
                 }
             }
             KeyCode::End if self.focused_panel == PanelFocus::Navigation => {
                 match self.active_sidebar_tab {
-                    SidebarTab::Navigation => self.set_active_task_view(TaskView::Soon),
+                    SidebarTab::Navigation => self.select_last_navigation_task_view(),
                     SidebarTab::FiltersTags => {}
                     SidebarTab::Projects => {
                         self.selected_project_id = self
@@ -6378,6 +6789,20 @@ mod tests {
     }
 
     #[test]
+    fn inbox_project_cannot_open_edit_popup() {
+        let mut app = test_app();
+        let inbox_id = app.inbox_project_id();
+        app.selected_project_id = Some(inbox_id);
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("edit key should be handled");
+
+        assert!(app.project_editor_view().is_none());
+    }
+
+    #[test]
     fn project_tree_rows_render_clear_branch_prefixes_for_nested_projects() {
         let mut app = test_app();
         let test_parent = app
@@ -6681,6 +7106,155 @@ mod tests {
             .map(|task| task.title.as_str())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["Completed task"]);
+    }
+
+    #[test]
+    fn panel_search_opens_locks_and_clears_for_navigation_views() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('3'))
+            .expect("focus should switch");
+
+        app.handle_key(crossterm::event::KeyCode::Char('/'))
+            .expect("search should open");
+        app.handle_key(crossterm::event::KeyCode::Char('s'))
+            .expect("typing should filter");
+        app.handle_key(crossterm::event::KeyCode::Char('o'))
+            .expect("typing should filter");
+
+        let filtered = app.navigation_task_views();
+        assert_eq!(filtered, vec![TaskView::Soon]);
+        assert_eq!(app.active_task_view(), TaskView::Soon);
+        assert!(
+            app.focused_panel_search_status()
+                .expect("search should be visible")
+                .is_editing
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should lock");
+        assert!(
+            !app.focused_panel_search_status()
+                .expect("search should stay visible")
+                .is_editing
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Esc)
+            .expect("esc should clear");
+        assert!(app.focused_panel_search_status().is_none());
+    }
+
+    #[test]
+    fn task_list_panel_search_filters_tasks_and_esc_restores_list() {
+        let mut app = test_app();
+        let repository = app.database.task_repository();
+        let inbox_project_id = app.inbox_project_id();
+        let now = Local::now();
+        repository
+            .create("Alpha", inbox_project_id, None, now)
+            .expect("task should create");
+        repository
+            .create("Beta", inbox_project_id, None, now)
+            .expect("task should create");
+        repository
+            .create("Bravo", inbox_project_id, None, now)
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('/'))
+            .expect("search should open");
+        app.handle_key(crossterm::event::KeyCode::Char('b'))
+            .expect("typing should filter");
+        app.handle_key(crossterm::event::KeyCode::Char('r'))
+            .expect("typing should filter");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should lock");
+
+        let filtered_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(filtered_titles, vec!["Bravo"]);
+        assert_eq!(
+            app.selected_task().map(|task| task.title.as_str()),
+            Some("Bravo")
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Esc)
+            .expect("esc should clear");
+        let restored_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(restored_titles.len(), 3);
+    }
+
+    #[test]
+    fn navigation_view_search_constrains_navigation_until_cleared() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('3'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('/'))
+            .expect("search should open");
+        app.handle_key(crossterm::event::KeyCode::Char('i'))
+            .expect("typing should filter");
+        app.handle_key(crossterm::event::KeyCode::Char('n'))
+            .expect("typing should filter");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should lock");
+
+        assert_eq!(app.navigation_task_views(), vec![TaskView::Inbox]);
+        app.handle_key(crossterm::event::KeyCode::Char('j'))
+            .expect("navigation should stay constrained");
+        assert_eq!(app.active_task_view(), TaskView::Inbox);
+
+        app.handle_key(crossterm::event::KeyCode::Esc)
+            .expect("esc should clear");
+        app.handle_key(crossterm::event::KeyCode::Char('j'))
+            .expect("navigation should resume");
+        assert_eq!(app.active_task_view(), TaskView::Today);
+    }
+
+    #[test]
+    fn project_search_stays_active_when_focus_changes() {
+        let mut app = test_app();
+        app.database
+            .project_repository()
+            .create("Alpha", None, ProjectColor::Blue, false, Local::now())
+            .expect("project should create");
+        app.database
+            .project_repository()
+            .create("Beta", None, ProjectColor::Teal, false, Local::now())
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('/'))
+            .expect("search should open");
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("typing should filter");
+        app.handle_key(crossterm::event::KeyCode::Char('l'))
+            .expect("typing should filter");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should lock");
+
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+
+        let rows = app.project_tree_rows();
+        assert!(rows.iter().any(|row| row.name == "Alpha"));
+        assert!(!rows.iter().any(|row| row.name == "Beta"));
+        assert!(
+            !app.focused_panel_search_status()
+                .expect("search indicator should remain")
+                .is_editing
+        );
     }
 
     #[test]
