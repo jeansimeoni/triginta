@@ -415,6 +415,7 @@ struct TaskInputState {
     value: String,
     cursor: usize,
     project_id: ProjectId,
+    suggestion_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,6 +553,7 @@ pub struct TaskInputView {
     pub cursor: usize,
     pub project_name: String,
     pub project_suggestions: Vec<String>,
+    pub selected_project_suggestion: usize,
     pub due_preview: Option<TaskDuePreviewView>,
 }
 
@@ -648,6 +650,7 @@ pub struct ProjectEditorView {
     pub title: &'static str,
     pub name_value: String,
     pub name_cursor: usize,
+    pub parsed_name: String,
     pub parent_label: String,
     pub parent_suggestions: Vec<String>,
     pub selected_parent_suggestion: usize,
@@ -1134,6 +1137,16 @@ impl App {
 
     pub fn task_input_view(&self) -> Option<TaskInputView> {
         self.task_input.as_ref().map(|input| {
+            let project_suggestions = self
+                .active_project_query(input.value.as_str(), input.cursor)
+                .map(|(_, _, query)| {
+                    self.project_suggestions(query.as_str())
+                        .into_iter()
+                        .take(4)
+                        .map(|project| project.name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             let due_preview = self
                 .task_input_parse(input.value.as_str(), input.project_id)
                 .due
@@ -1152,16 +1165,10 @@ impl App {
                     .project_name(input.project_id)
                     .unwrap_or("Inbox")
                     .to_string(),
-                project_suggestions: self
-                    .active_project_query(input.value.as_str(), input.cursor)
-                    .map(|(_, _, query)| {
-                        self.project_suggestions(query.as_str())
-                            .into_iter()
-                            .take(3)
-                            .map(|project| project.name.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                project_suggestions: project_suggestions.clone(),
+                selected_project_suggestion: input
+                    .suggestion_index
+                    .min(project_suggestions.len().saturating_sub(1)),
                 due_preview,
             }
         })
@@ -1204,7 +1211,7 @@ impl App {
             .active_project_query(editor.name_input.as_str(), editor.name_cursor)
             .map(|(_, _, query)| query)
             .unwrap_or_default();
-        let (_, extracted_parent_id) =
+        let (parsed_name, extracted_parent_id) =
             self.extract_project_reference(editor.name_input.as_str(), ProjectId(0));
         let resolved_parent_id = if extracted_parent_id == ProjectId(0) {
             None
@@ -1228,6 +1235,7 @@ impl App {
             },
             name_value: editor.name_input.clone(),
             name_cursor: editor.name_cursor,
+            parsed_name,
             parent_label,
             parent_suggestions: self
                 .project_parent_suggestions(inline_parent_query.as_str(), editor.project_id)
@@ -1962,7 +1970,15 @@ impl App {
         else {
             return false;
         };
-        let Some(project) = self.project_suggestions(query.as_str()).into_iter().next() else {
+        let suggestions = self.project_suggestions(query.as_str());
+        let Some(project) = suggestions
+            .get(
+                input
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        else {
             return false;
         };
 
@@ -1971,6 +1987,7 @@ impl App {
             .value
             .replace_range(start..end, format!("#{} ", project.name).as_str());
         input.cursor = (start + project.name.len() + 2).min(input.value.len());
+        input.suggestion_index = 0;
         while input.cursor < input.value.len() && input.value[input.cursor..].starts_with(' ') {
             input.value.remove(input.cursor);
         }
@@ -2180,6 +2197,7 @@ impl App {
             project_id: self
                 .selected_project_id
                 .unwrap_or_else(|| self.inbox_project_id()),
+            suggestion_index: 0,
         });
     }
 
@@ -3364,6 +3382,22 @@ impl App {
                 let _ = self.accept_task_input_project_suggestion(&mut input);
                 self.task_input = Some(input);
             }
+            KeyCode::Down => {
+                if let Some((_, _, query)) =
+                    self.active_project_query(input.value.as_str(), input.cursor)
+                {
+                    let last_index = self
+                        .project_suggestions(query.as_str())
+                        .len()
+                        .saturating_sub(1);
+                    input.suggestion_index = (input.suggestion_index + 1).min(last_index);
+                }
+                self.task_input = Some(input);
+            }
+            KeyCode::Up => {
+                input.suggestion_index = input.suggestion_index.saturating_sub(1);
+                self.task_input = Some(input);
+            }
             KeyCode::Enter => {
                 let parsed = self.task_input_parse(input.value.as_str(), input.project_id);
                 if parsed.cleaned_title.is_empty() {
@@ -3382,26 +3416,32 @@ impl App {
             }
             KeyCode::Backspace => {
                 Self::delete_input_char_before_cursor(&mut input);
+                input.suggestion_index = 0;
                 self.task_input = Some(input);
             }
             KeyCode::Home => {
                 Self::move_input_cursor_home(&mut input);
+                input.suggestion_index = 0;
                 self.task_input = Some(input);
             }
             KeyCode::Left => {
                 Self::move_input_cursor_left(&mut input);
+                input.suggestion_index = 0;
                 self.task_input = Some(input);
             }
             KeyCode::Right => {
                 Self::move_input_cursor_right(&mut input);
+                input.suggestion_index = 0;
                 self.task_input = Some(input);
             }
             KeyCode::End => {
                 Self::move_input_cursor_end(&mut input);
+                input.suggestion_index = 0;
                 self.task_input = Some(input);
             }
             KeyCode::Char(character) => {
                 Self::insert_input_char(&mut input, character);
+                input.suggestion_index = 0;
                 self.task_input = Some(input);
             }
             _ => {
@@ -5151,12 +5191,24 @@ mod tests {
         let child_a = app
             .database
             .project_repository()
-            .create("Child A", Some(root.id), ProjectColor::Teal, false, Local::now())
+            .create(
+                "Child A",
+                Some(root.id),
+                ProjectColor::Teal,
+                false,
+                Local::now(),
+            )
             .expect("child A should create");
         let _child_b = app
             .database
             .project_repository()
-            .create("Child B", Some(root.id), ProjectColor::SkyBlue, false, Local::now())
+            .create(
+                "Child B",
+                Some(root.id),
+                ProjectColor::SkyBlue,
+                false,
+                Local::now(),
+            )
             .expect("child B should create");
         let grand_a = app
             .database

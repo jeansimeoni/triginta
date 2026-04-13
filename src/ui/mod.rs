@@ -1076,15 +1076,32 @@ fn render_task_input_popup(
     let area = centered_rect(frame.area(), 72, total_height);
     frame.render_widget(Clear, area);
 
-    if show_details {
+    let input_area = if show_details {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Length(8)])
             .split(area);
         render_task_input_box(frame, sections[0], input, symbols, palette);
         render_task_due_preview(frame, sections[1], input, palette);
+        sections[0]
     } else {
         render_task_input_box(frame, area, input, symbols, palette);
+        area
+    };
+
+    if !input.project_suggestions.is_empty() {
+        let dropdown_height = input.project_suggestions.len().min(4) as u16 + 2;
+        let visible_width = input_area.width.saturating_sub(4) as usize;
+        let cursor_col =
+            editor_cursor_display_column(&input.value, input.cursor, visible_width, symbols);
+        let dropdown_area = project_parent_dropdown_rect(
+            frame.area(),
+            input_area,
+            cursor_col as u16,
+            project_parent_dropdown_width(input.project_suggestions.as_slice()),
+            dropdown_height,
+        );
+        render_task_project_suggestions(frame, dropdown_area, input, palette);
     }
 }
 
@@ -1124,19 +1141,20 @@ fn render_task_due_preview(
     palette: ThemePalette,
 ) {
     let Some(due_preview) = &input.due_preview else {
-        let lines = task_input_meta_lines(input, None, palette);
+        let mut lines = task_input_meta_lines(input, palette);
+        append_task_preview_tip(&mut lines, area, palette);
         frame.render_widget(
             Paragraph::new(lines).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.accent)),
+                    .border_style(Style::default().fg(palette.border)),
             ),
             area,
         );
         return;
     };
 
-    let mut lines = task_input_meta_lines(input, Some(due_preview), palette);
+    let mut lines = task_input_meta_lines(input, palette);
     lines.push(Line::from(vec![
         Span::styled("Due Date: ", Style::default().fg(palette.subtle_text)),
         Span::styled(
@@ -1188,51 +1206,38 @@ fn render_task_due_preview(
             ),
         ]));
     }
+    append_task_preview_tip(&mut lines, area, palette);
 
     let panel = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.accent)),
+            .border_style(Style::default().fg(palette.border)),
     );
 
     frame.render_widget(panel, area);
 }
 
-fn task_input_meta_lines(
-    input: &TaskInputView,
-    due_preview: Option<&crate::app::TaskDuePreviewView>,
-    palette: ThemePalette,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
+fn task_input_meta_lines(input: &TaskInputView, palette: ThemePalette) -> Vec<Line<'static>> {
+    vec![Line::from(vec![
         Span::styled("Project: ", Style::default().fg(palette.subtle_text)),
         Span::styled(
             input.project_name.clone(),
             Style::default().fg(palette.text),
         ),
-    ])];
-    if !input.project_suggestions.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("Match: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(
-                input.project_suggestions.join(", "),
-                Style::default().fg(palette.accent),
-            ),
-        ]));
-        lines.push(Line::from(Span::styled(
-            "Tab accepts the top project suggestion",
-            Style::default()
-                .fg(palette.subtle_text)
-                .add_modifier(Modifier::DIM),
-        )));
-    }
-    if due_preview.is_none() {
+    ])]
+}
+
+fn append_task_preview_tip(lines: &mut Vec<Line<'static>>, area: Rect, palette: ThemePalette) {
+    let target_tip_index = area.height.saturating_sub(3) as usize;
+    while lines.len() < target_tip_index {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Type # to fuzzy-match a project",
-            Style::default().fg(palette.subtle_text),
-        )));
     }
-    lines
+    lines.push(Line::from(Span::styled(
+        "Press # for selecting a project",
+        Style::default()
+            .fg(palette.subtle_text)
+            .add_modifier(Modifier::DIM),
+    )));
 }
 
 fn task_list_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
@@ -1702,11 +1707,15 @@ fn render_project_editor_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let show_parent_label = editor.parent_label != "No Parent";
     let show_parent_dropdown = editor.focus.name && !editor.parent_suggestions.is_empty();
-    let area = centered_rect(frame.area(), 72, if show_parent_label { 11 } else { 8 });
+    let area = centered_rect(frame.area(), 72, 14);
     frame.render_widget(Clear, area);
-    let block = Block::default()
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(8), Constraint::Length(6)])
+        .split(area);
+
+    let form_block = Block::default()
         .title(Span::styled(
             editor.title,
             Style::default()
@@ -1716,30 +1725,20 @@ fn render_project_editor_popup(
         .title_bottom(project_editor_shortcuts_line(symbols, palette))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.accent));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let constraints = if show_parent_label {
-        vec![
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(0),
-        ]
-    } else {
-        vec![
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(0),
-        ]
-    };
-    let sections = Layout::default()
+    let form_inner = form_block.inner(sections[0]);
+    frame.render_widget(form_block, sections[0]);
+    let form_rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(inner);
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .split(form_inner);
 
     render_editor_field(
         frame,
-        sections[0],
+        form_rows[0],
         "Name [F1]",
         &editor.name_value,
         editor.name_cursor,
@@ -1748,7 +1747,7 @@ fn render_project_editor_popup(
         None,
         palette,
     );
-    let meta_row = sections[1];
+    let meta_row = form_rows[1];
     let meta_columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -1772,27 +1771,11 @@ fn render_project_editor_popup(
         palette,
     );
 
-    if show_parent_label {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("Parent: ", Style::default().fg(palette.subtle_text)),
-                Span::styled(
-                    editor.parent_label.clone(),
-                    Style::default().fg(palette.text),
-                ),
-            ]))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.border)),
-            ),
-            sections[2],
-        );
-    }
+    render_project_preview_panel(frame, sections[1], editor, palette);
 
     if show_parent_dropdown {
         let dropdown_height = editor.parent_suggestions.len().min(4) as u16 + 2;
-        let visible_width = sections[0].width.saturating_sub(4) as usize;
+        let visible_width = form_rows[0].width.saturating_sub(4) as usize;
         let cursor_col = editor_cursor_display_column(
             &editor.name_value,
             editor.name_cursor,
@@ -1801,13 +1784,61 @@ fn render_project_editor_popup(
         );
         let dropdown_area = project_parent_dropdown_rect(
             frame.area(),
-            sections[0],
+            form_rows[0],
             cursor_col as u16,
             project_parent_dropdown_width(editor.parent_suggestions.as_slice()),
             dropdown_height,
         );
         render_project_parent_suggestions(frame, dropdown_area, editor, palette);
     }
+}
+
+fn render_project_preview_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &ProjectEditorView,
+    palette: ThemePalette,
+) {
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Parent: ", Style::default().fg(palette.subtle_text)),
+        Span::styled(
+            editor.parent_label.clone(),
+            Style::default().fg(palette.text),
+        ),
+    ])];
+
+    if !editor.parent_suggestions.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Matches: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                editor.parent_suggestions.join(", "),
+                Style::default().fg(palette.accent),
+            ),
+        ]));
+    }
+
+    let tip_line = Line::from(Span::styled(
+        "Press # for selecting a parent project",
+        Style::default()
+            .fg(palette.subtle_text)
+            .add_modifier(Modifier::DIM),
+    ));
+    let target_tip_index = area.height.saturating_sub(3) as usize;
+    while lines.len() < target_tip_index {
+        lines.push(Line::from(""));
+    }
+    lines.push(tip_line);
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.border)),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn render_project_parent_suggestions(
@@ -1845,6 +1876,56 @@ fn render_project_parent_suggestions(
             Block::default()
                 .title(Span::styled(
                     "Parent Project",
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        ),
+        area,
+    );
+}
+
+fn render_task_project_suggestions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    input: &TaskInputView,
+    palette: ThemePalette,
+) {
+    let lines = input
+        .project_suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let style = if index
+                == input
+                    .selected_project_suggestion
+                    .min(input.project_suggestions.len().saturating_sub(1))
+            {
+                Style::default()
+                    .fg(palette.text)
+                    .bg(palette.border)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            Line::from(vec![Span::styled(
+                ellipsize_end(suggestion, area.width.saturating_sub(2) as usize),
+                style,
+            )])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(Span::styled(
+                    "Project",
                     Style::default()
                         .fg(palette.accent)
                         .add_modifier(Modifier::BOLD),
@@ -1994,13 +2075,15 @@ fn render_task_sort_popup(
 fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "Tab accept project  Enter save  Esc cancel",
+            "↑/↓ move  Tab accept project  Enter save  Esc cancel",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
     }
 
     Line::from(vec![
+        Span::styled("↑/↓", Style::default().fg(palette.subtle_text)),
+        Span::raw(" move  "),
         Span::styled("⇥", Style::default().fg(palette.subtle_text)),
         Span::raw(" project  "),
         Span::styled("󰌑", Style::default().fg(palette.subtle_text)),
