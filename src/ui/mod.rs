@@ -1215,8 +1215,7 @@ fn render_task_input_popup(
     if !input.project_suggestions.is_empty() {
         let dropdown_height = input.project_suggestions.len().min(4) as u16 + 2;
         let visible_width = input_area.width.saturating_sub(4) as usize;
-        let cursor_col =
-            editor_cursor_display_column(&input.value, input.cursor, visible_width, symbols);
+        let cursor_col = editor_cursor_display_column(&input.value, input.cursor, visible_width);
         let dropdown_area = project_parent_dropdown_rect(
             frame.area(),
             input_area,
@@ -1236,11 +1235,8 @@ fn render_task_input_box(
     palette: ThemePalette,
 ) {
     let visible_width = area.width.saturating_sub(4) as usize;
-    let lines = vec![Line::from(input_window_text(
-        &input.value,
-        input.cursor,
-        visible_width,
-    ))];
+    let window = input_window_view(&input.value, input.cursor, visible_width);
+    let lines = vec![Line::from(window.text)];
     let popup = Paragraph::new(lines).block(
         Block::default()
             .title(Span::styled(
@@ -1255,6 +1251,7 @@ fn render_task_input_box(
     );
 
     frame.render_widget(popup, area);
+    set_single_line_input_cursor(frame, area, window.cursor_col);
 }
 
 fn task_list_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
@@ -1357,7 +1354,6 @@ fn render_task_editor_popup(
         &editor.title_value,
         editor.title_cursor,
         editor.focus.title,
-        symbols,
         None,
         palette,
     );
@@ -1368,7 +1364,6 @@ fn render_task_editor_popup(
         &editor.project_value,
         editor.project_cursor,
         editor.focus.project,
-        symbols,
         Some("type to fuzzy-match a project"),
         palette,
     );
@@ -1384,7 +1379,6 @@ fn render_task_editor_popup(
         &editor.due_date_value,
         editor.due_date_cursor,
         editor.focus.due_date,
-        symbols,
         Some("YYYY-MM-DD"),
         palette,
     );
@@ -1395,7 +1389,6 @@ fn render_task_editor_popup(
         &editor.due_time_value,
         editor.due_time_cursor,
         editor.focus.due_time,
-        symbols,
         Some("HH:MM"),
         palette,
     );
@@ -1406,7 +1399,6 @@ fn render_task_editor_popup(
         &editor.recurrence_value,
         editor.recurrence_cursor,
         editor.focus.recurrence,
-        symbols,
         Some("every monday at 9am"),
         palette,
     );
@@ -1419,7 +1411,6 @@ fn render_task_editor_popup(
             &editor.project_value,
             editor.project_cursor,
             visible_width,
-            symbols,
         );
         let dropdown_area = project_parent_dropdown_rect(
             frame.area(),
@@ -1444,7 +1435,6 @@ fn render_editor_field(
     value: &str,
     cursor: usize,
     focused: bool,
-    symbols: Symbols,
     placeholder: Option<&str>,
     palette: ThemePalette,
 ) {
@@ -1455,13 +1445,12 @@ fn render_editor_field(
     } else {
         Style::default().fg(palette.subtle_text)
     };
+    let visible_width = area.width.saturating_sub(4) as usize;
+    let window = input_window_view(value, cursor, visible_width);
     let text = if focused {
-        vec![Line::from(editor_input_text(
-            value,
-            cursor,
-            area.width.saturating_sub(4) as usize,
-            symbols,
-            palette,
+        vec![Line::from(Span::styled(
+            window.text.clone(),
+            Style::default().fg(palette.text),
         ))]
     } else if value.is_empty() {
         vec![Line::from(Span::styled(
@@ -1473,14 +1462,10 @@ fn render_editor_field(
     } else if area.height > 3 {
         vec![Line::from(ellipsize_end(
             value,
-            area.width.saturating_sub(4) as usize,
+            visible_width,
         ))]
     } else {
-        vec![Line::from(input_window_text(
-            value,
-            cursor,
-            area.width.saturating_sub(4) as usize,
-        ))]
+        vec![Line::from(window.text)]
     };
     let widget = Paragraph::new(text).wrap(Wrap { trim: false }).block(
         Block::default()
@@ -1489,27 +1474,9 @@ fn render_editor_field(
             .border_style(border_style),
     );
     frame.render_widget(widget, area);
-}
-
-fn editor_input_text(
-    value: &str,
-    cursor: usize,
-    max_width: usize,
-    symbols: Symbols,
-    palette: ThemePalette,
-) -> Span<'static> {
-    let cursor_symbol = if symbols.tasks == "#" { "|" } else { "▏" };
-    let safe_cursor = cursor.min(value.len());
-    let mut with_cursor = value.to_string();
-    with_cursor.insert_str(safe_cursor, cursor_symbol);
-    Span::styled(
-        input_window_text(
-            with_cursor.as_str(),
-            safe_cursor + cursor_symbol.len(),
-            max_width,
-        ),
-        Style::default().fg(palette.text),
-    )
+    if focused {
+        set_single_line_input_cursor(frame, area, window.cursor_col);
+    }
 }
 
 fn render_editor_project_suggestions(
@@ -1781,7 +1748,6 @@ fn render_project_editor_popup(
         &editor.name_value,
         editor.name_cursor,
         editor.focus.name,
-        symbols,
         None,
         palette,
     );
@@ -1792,7 +1758,6 @@ fn render_project_editor_popup(
         &editor.parent_value,
         editor.parent_cursor,
         editor.focus.parent,
-        symbols,
         Some("Type to fuzzy-match a parent project"),
         palette,
     );
@@ -1830,7 +1795,7 @@ fn render_project_editor_popup(
             (form_rows[0], &editor.name_value, editor.name_cursor)
         };
         let visible_width = anchor.width.saturating_sub(4) as usize;
-        let cursor_col = editor_cursor_display_column(value, cursor, visible_width, symbols);
+        let cursor_col = editor_cursor_display_column(value, cursor, visible_width);
         let dropdown_area = project_parent_dropdown_rect(
             frame.area(),
             anchor,
@@ -2071,11 +2036,8 @@ fn render_task_search_popup(
     frame.render_widget(Clear, area);
 
     let visible_width = area.width.saturating_sub(4) as usize;
-    let mut lines = vec![Line::from(input_window_text(
-        &search.query,
-        search.cursor,
-        visible_width,
-    ))];
+    let query_window = input_window_view(&search.query, search.cursor, visible_width);
+    let mut lines = vec![Line::from(query_window.text)];
     lines.push(Line::from(""));
 
     if search.results.is_empty() {
@@ -2111,6 +2073,7 @@ fn render_task_search_popup(
     );
 
     frame.render_widget(popup, area);
+    set_single_line_input_cursor(frame, area, query_window.cursor_col);
 }
 
 fn render_task_sort_popup(
@@ -2251,21 +2214,8 @@ fn editor_cursor_display_column(
     value: &str,
     cursor: usize,
     max_width: usize,
-    symbols: Symbols,
 ) -> usize {
-    let cursor_symbol = if symbols.tasks == "#" { "|" } else { "▏" };
-    let safe_cursor = cursor.min(value.len());
-    let mut with_cursor = value.to_string();
-    with_cursor.insert_str(safe_cursor, cursor_symbol);
-    let rendered = input_window_text(
-        with_cursor.as_str(),
-        safe_cursor + cursor_symbol.len(),
-        max_width,
-    );
-    rendered
-        .find(cursor_symbol)
-        .map(|index| UnicodeWidthStr::width(&rendered[..index]))
-        .unwrap_or_else(|| max_width.saturating_sub(1))
+    input_window_view(value, cursor, max_width).cursor_col
 }
 
 fn search_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
@@ -2827,57 +2777,64 @@ fn ellipsize_end(text: &str, max_width: usize) -> String {
     output
 }
 
-fn tail_visible_text(text: &str, max_width: usize) -> String {
-    const ELLIPSIS: &str = "…";
-
-    if max_width == 0 {
-        return String::new();
-    }
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_string();
-    }
-    if max_width == 1 {
-        return ELLIPSIS.to_string();
-    }
-
-    let mut width = 1;
-    let mut chars = Vec::new();
-    for character in text.chars().rev() {
-        let char_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if width + char_width > max_width {
-            break;
-        }
-        width += char_width;
-        chars.push(character);
-    }
-    chars.reverse();
-
-    let mut output = String::from(ELLIPSIS);
-    for character in chars {
-        output.push(character);
-    }
-    output
+#[derive(Debug, Clone)]
+struct InputWindowView {
+    text: String,
+    cursor_col: usize,
 }
 
-fn input_window_text(text: &str, cursor: usize, max_width: usize) -> String {
+fn input_window_view(text: &str, cursor: usize, max_width: usize) -> InputWindowView {
     const ELLIPSIS: &str = "…";
 
     if max_width == 0 {
-        return String::new();
+        return InputWindowView {
+            text: String::new(),
+            cursor_col: 0,
+        };
     }
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_string();
-    }
-
     let safe_cursor = cursor.min(text.len());
     let before = &text[..safe_cursor];
+
+    if UnicodeWidthStr::width(text) <= max_width {
+        return InputWindowView {
+            text: text.to_string(),
+            cursor_col: UnicodeWidthStr::width(before).min(max_width.saturating_sub(1)),
+        };
+    }
+
     let after = &text[safe_cursor..];
 
     if UnicodeWidthStr::width(before) <= max_width / 2 {
-        return ellipsize_end(text, max_width);
+        let rendered = ellipsize_end(text, max_width);
+        let cursor_col = UnicodeWidthStr::width(before).min(max_width.saturating_sub(1));
+        return InputWindowView {
+            text: rendered,
+            cursor_col,
+        };
     }
     if UnicodeWidthStr::width(after) <= max_width / 2 {
-        return tail_visible_text(text, max_width);
+        let mut suffix_start = text.len();
+        let mut suffix_width = 1;
+        for (index, character) in text.char_indices().rev() {
+            let char_width = UnicodeWidthChar::width(character).unwrap_or(0);
+            if suffix_width + char_width > max_width {
+                break;
+            }
+            suffix_width += char_width;
+            suffix_start = index;
+        }
+        let suffix = &text[suffix_start..];
+        let rendered = format!("{ELLIPSIS}{suffix}");
+        let before_suffix = if safe_cursor <= suffix_start {
+            ""
+        } else {
+            &text[suffix_start..safe_cursor]
+        };
+        let cursor_col = 1 + UnicodeWidthStr::width(before_suffix);
+        return InputWindowView {
+            text: rendered,
+            cursor_col: cursor_col.min(max_width.saturating_sub(1)),
+        };
     }
 
     let left_budget = max_width.saturating_sub(2) / 2;
@@ -2914,7 +2871,63 @@ fn input_window_text(text: &str, cursor: usize, max_width: usize) -> String {
         output.push(character);
     }
     output.push_str(ELLIPSIS);
-    output
+
+    InputWindowView {
+        text: output,
+        cursor_col: (1 + left_width).min(max_width.saturating_sub(1)),
+    }
+}
+
+fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: usize) {
+    if area.width <= 2 || area.height <= 2 {
+        return;
+    }
+    let content_width = area.width.saturating_sub(2);
+    let x = area.x.saturating_add(1).saturating_add(
+        (cursor_col as u16).min(content_width.saturating_sub(1)),
+    );
+    let y = area.y.saturating_add(1);
+    frame.set_cursor_position((x, y));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::input_window_view;
+
+    #[test]
+    fn input_window_view_keeps_full_text_when_it_fits() {
+        let view = input_window_view("hello", 2, 10);
+        assert_eq!(view.text, "hello");
+        assert_eq!(view.cursor_col, 2);
+    }
+
+    #[test]
+    fn input_window_view_ellipsizes_end_when_cursor_is_near_start() {
+        let view = input_window_view("abcdefghijklmnop", 3, 8);
+        assert_eq!(view.text, "abcdefg…");
+        assert_eq!(view.cursor_col, 3);
+    }
+
+    #[test]
+    fn input_window_view_ellipsizes_start_when_cursor_is_near_end() {
+        let view = input_window_view("abcdefghijklmnop", 15, 8);
+        assert_eq!(view.text, "…jklmnop");
+        assert_eq!(view.cursor_col, 7);
+    }
+
+    #[test]
+    fn input_window_view_centers_cursor_when_text_is_long_on_both_sides() {
+        let view = input_window_view("abcdefghijklmnop", 8, 8);
+        assert_eq!(view.text, "…fghijk…");
+        assert_eq!(view.cursor_col, 4);
+    }
+
+    #[test]
+    fn input_window_view_clamps_cursor_for_out_of_bounds_index() {
+        let view = input_window_view("abc", 10, 5);
+        assert_eq!(view.text, "abc");
+        assert_eq!(view.cursor_col, 3);
+    }
 }
 
 fn progress_meta_line(

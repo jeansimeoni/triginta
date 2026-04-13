@@ -940,7 +940,7 @@ const INPUT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "move cursor",
     },
     ShortcutTip {
-        keys: "Backspace",
+        keys: "Backspace/Del",
         description: "delete char",
     },
 ];
@@ -994,7 +994,7 @@ const SEARCH_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "move cursor",
     },
     ShortcutTip {
-        keys: "Backspace",
+        keys: "Backspace/Del",
         description: "delete char",
     },
 ];
@@ -2649,6 +2649,19 @@ impl App {
         input.cursor = previous_index;
     }
 
+    fn delete_input_char_at_cursor(input: &mut TaskInputState) {
+        if input.cursor >= input.value.len() {
+            return;
+        }
+
+        let next_index = input.value[input.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(offset, _)| input.cursor + offset)
+            .unwrap_or(input.value.len());
+        input.value.drain(input.cursor..next_index);
+    }
+
     fn editor_value_mut(editor: &mut TaskEditorState) -> (&mut String, &mut usize) {
         match editor.focused_field {
             TaskEditorField::Title => (&mut editor.title_input, &mut editor.title_cursor),
@@ -2719,6 +2732,21 @@ impl App {
             .unwrap_or(0);
         value.drain(previous_index..*cursor);
         *cursor = previous_index;
+        Self::after_editor_text_change(editor, reference_date);
+    }
+
+    fn delete_editor_char_at_cursor(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+        let (value, cursor) = Self::editor_value_mut(editor);
+        if *cursor >= value.len() {
+            return;
+        }
+
+        let next_index = value[*cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(offset, _)| *cursor + offset)
+            .unwrap_or(value.len());
+        value.drain(*cursor..next_index);
         Self::after_editor_text_change(editor, reference_date);
     }
 
@@ -3351,6 +3379,11 @@ impl App {
                     search.selected_index = 0;
                     self.task_search = Some(search);
                 }
+                KeyCode::Delete => {
+                    Self::delete_search_char_at_cursor(&mut search);
+                    search.selected_index = 0;
+                    self.task_search = Some(search);
+                }
                 KeyCode::Home => {
                     Self::move_search_cursor_home(&mut search);
                     self.task_search = Some(search);
@@ -3492,6 +3525,28 @@ impl App {
                             .unwrap_or(0);
                         value.drain(previous_index..*cursor);
                         *cursor = previous_index;
+                    }
+                    editor.suggestion_index = 0;
+                    self.project_editor = Some(editor);
+                }
+                KeyCode::Delete
+                    if matches!(
+                        editor.focused_field,
+                        ProjectEditorField::Name | ProjectEditorField::Parent
+                    ) =>
+                {
+                    let (value, cursor) = if editor.focused_field == ProjectEditorField::Name {
+                        (&mut editor.name_input, &mut editor.name_cursor)
+                    } else {
+                        (&mut editor.parent_input, &mut editor.parent_cursor)
+                    };
+                    if *cursor < value.len() {
+                        let next_index = value[*cursor..]
+                            .char_indices()
+                            .nth(1)
+                            .map(|(offset, _)| *cursor + offset)
+                            .unwrap_or(value.len());
+                        value.drain(*cursor..next_index);
                     }
                     editor.suggestion_index = 0;
                     self.project_editor = Some(editor);
@@ -3838,6 +3893,11 @@ impl App {
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
+                KeyCode::Delete => {
+                    Self::delete_editor_char_at_cursor(&mut editor, now.date_naive());
+                    editor.suggestion_index = 0;
+                    self.task_editor = Some(editor);
+                }
                 KeyCode::Char(character) => {
                     Self::insert_editor_char(&mut editor, character, now.date_naive());
                     editor.suggestion_index = 0;
@@ -3898,6 +3958,11 @@ impl App {
             }
             KeyCode::Backspace => {
                 Self::delete_input_char_before_cursor(&mut input);
+                input.suggestion_index = 0;
+                self.task_input = Some(input);
+            }
+            KeyCode::Delete => {
+                Self::delete_input_char_at_cursor(&mut input);
                 input.suggestion_index = 0;
                 self.task_input = Some(input);
             }
@@ -3981,6 +4046,19 @@ impl App {
             .unwrap_or(0);
         search.query.drain(previous_index..search.cursor);
         search.cursor = previous_index;
+    }
+
+    fn delete_search_char_at_cursor(search: &mut TaskSearchState) {
+        if search.cursor >= search.query.len() {
+            return;
+        }
+
+        let next_index = search.query[search.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(offset, _)| search.cursor + offset)
+            .unwrap_or(search.query.len());
+        search.query.drain(search.cursor..next_index);
     }
 
     pub fn handle_key(&mut self, code: KeyCode) -> Result<()> {
@@ -5093,6 +5171,36 @@ mod tests {
     }
 
     #[test]
+    fn task_editor_delete_key_edits_at_cursor_position() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "abxd".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should create");
+
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::Home)
+            .expect("home should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Right)
+            .expect("right should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Right)
+            .expect("right should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Delete)
+            .expect("delete should remove char at cursor");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("edit should submit");
+
+        assert_eq!(app.selected_task().expect("task should exist").title, "abd");
+    }
+
+    #[test]
     fn input_popup_home_and_end_edit_at_cursor_position() {
         let mut app = test_app();
         app.handle_key(crossterm::event::KeyCode::Char('c'))
@@ -5115,6 +5223,27 @@ mod tests {
             .expect("submit should succeed");
 
         assert_eq!(app.screen_data.tasks[0].title, "Hello World!");
+    }
+
+    #[test]
+    fn input_popup_delete_key_edits_at_cursor_position() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "abxd".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Left)
+            .expect("left should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Left)
+            .expect("left should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Delete)
+            .expect("delete should remove char at cursor");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+
+        assert_eq!(app.screen_data.tasks[0].title, "abd");
     }
 
     #[test]
@@ -5289,6 +5418,35 @@ mod tests {
             editor.preview_panel.tips,
             vec!["Use ←/→ or h/l to toggle favorite".to_string()]
         );
+    }
+
+    #[test]
+    fn project_editor_delete_key_edits_at_cursor_position() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('5'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("project editor should open");
+        for character in "abxd".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Home)
+            .expect("home should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Right)
+            .expect("right should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Right)
+            .expect("right should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Delete)
+            .expect("delete should remove char at cursor");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("project should save");
+
+        assert!(app
+            .screen_data
+            .projects
+            .iter()
+            .any(|project| project.name == "abd"));
     }
 
     #[test]
@@ -6591,6 +6749,31 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Char('u'))
             .expect("clear should succeed");
         assert!(app.assigned_task().is_none());
+    }
+
+    #[test]
+    fn task_search_delete_key_edits_at_cursor_position() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('1'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("search should open");
+        for character in "abxd".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Home)
+            .expect("home should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Right)
+            .expect("right should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Right)
+            .expect("right should move cursor");
+        app.handle_key(crossterm::event::KeyCode::Delete)
+            .expect("delete should remove char at cursor");
+
+        let search = app.task_search_view().expect("search should stay open");
+        assert_eq!(search.query, "abd");
+        assert_eq!(search.cursor, 2);
     }
 
     #[test]
