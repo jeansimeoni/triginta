@@ -526,8 +526,8 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
         let current = self
             .load_project(project_id)?
             .context("project to update does not exist")?;
-        if current.is_inbox && update.parent_project_id.is_some() {
-            bail!("inbox project cannot have a parent");
+        if current.is_inbox {
+            bail!("inbox project cannot be edited");
         }
         self.validate_parent(Some(project_id), update.parent_project_id)?;
         let child_order = if current.parent_project_id == update.parent_project_id {
@@ -1213,6 +1213,28 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ordered_ids, vec![alpha.id, charlie.id, bravo.id]);
+        Ok(())
+    }
+
+    #[test]
+    fn project_repository_rejects_inbox_updates() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let projects = database.project_repository();
+        let inbox_id = projects.inbox_project_id()?;
+
+        let error = projects
+            .update(
+                inbox_id,
+                &ProjectUpdate {
+                    name: "Renamed Inbox".to_string(),
+                    parent_project_id: None,
+                    color: ProjectColor::Blue,
+                    is_favorite: true,
+                },
+            )
+            .expect_err("inbox update should fail");
+
+        assert!(error.to_string().contains("inbox project cannot be edited"));
         Ok(())
     }
 }
