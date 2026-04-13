@@ -464,7 +464,6 @@ fn render_task_list_panel(
     palette: ThemePalette,
 ) {
     let visible_tasks = app.visible_tasks();
-    let content_width = area.width.saturating_sub(2);
     let footer = task_list_footer(app, symbols, palette);
     let footer_hints = task_list_footer_hints(
         app,
@@ -502,6 +501,10 @@ fn render_task_list_panel(
     }
 
     let viewport_task_rows = (inner.height as usize / 2).max(1);
+    let has_scrollbar = visible_tasks.len() > viewport_task_rows;
+    let content_width = inner
+        .width
+        .saturating_sub(if has_scrollbar { 1 } else { 0 });
     let selected_index = app.selected_task().and_then(|selected| {
         visible_tasks
             .iter()
@@ -537,7 +540,7 @@ fn render_task_list_panel(
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 
-    if visible_tasks.len() > viewport_task_rows {
+    if has_scrollbar {
         let position =
             scrollbar_position_from_offset(task_scroll, visible_tasks.len(), viewport_task_rows);
         let mut scrollbar_state = ScrollbarState::default()
@@ -843,31 +846,47 @@ fn task_project_line(
     let (project_name, project_color) = project_meta_for_task(data, task)
         .map(|(name, color)| (name, palette.project_color(color)))
         .unwrap_or(("Inbox", palette.subtle_text));
-    let glyph_style = if selected {
-        Style::default().fg(palette.subtle_text)
-    } else {
-        Style::default().fg(project_color)
-    };
-    let name_style = if selected {
+    let status_marker = task_status_symbol(task.status, symbols);
+    let leading_padding = 2usize
+        .saturating_add(status_marker.width())
+        .saturating_add(1);
+    let base_style = if selected {
         Style::default()
-            .fg(project_color)
+            .fg(palette.text)
+            .bg(palette.border)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(project_color)
+        Style::default()
     };
+    let glyph_style = base_style.patch(if selected {
+        Style::default().fg(palette.text)
+    } else {
+        Style::default().fg(project_color)
+    });
+    let name_style = base_style.patch(if selected {
+        Style::default().fg(palette.text)
+    } else {
+        Style::default().fg(project_color)
+    });
     let mut spans = vec![
-        Span::styled("  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(" ".repeat(leading_padding), base_style),
         Span::styled(symbols.project, glyph_style),
-        Span::styled(" ", Style::default().fg(palette.subtle_text)),
+        Span::styled(" ", base_style.patch(Style::default().fg(palette.subtle_text))),
         Span::styled(
-            ellipsize_end(project_name, width.saturating_sub(4) as usize),
+            ellipsize_end(
+                project_name,
+                width
+                    .saturating_sub(leading_padding as u16)
+                    .saturating_sub(symbols.project.width() as u16)
+                    .saturating_sub(1) as usize,
+            ),
             name_style,
         ),
     ];
     let current_width = Line::from(spans.clone()).width();
     let padding = (width as usize).saturating_sub(current_width);
     if padding > 0 {
-        spans.push(Span::styled(" ".repeat(padding), Style::default()));
+        spans.push(Span::styled(" ".repeat(padding), base_style));
     }
     Line::from(spans)
 }
@@ -2998,13 +3017,13 @@ fn task_row_style(
     selected: bool,
     now: chrono::DateTime<Local>,
 ) -> Style {
-    let base = if selected {
-        Style::default()
+    if selected {
+        return Style::default()
+            .fg(palette.text)
             .bg(palette.border)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
+            .add_modifier(Modifier::BOLD);
+    }
+    let base = Style::default();
 
     match task.status {
         TaskStatus::Done => base.fg(palette.subtle_text).add_modifier(Modifier::DIM),
@@ -3019,13 +3038,13 @@ fn task_due_style(
     selected: bool,
     now: chrono::DateTime<Local>,
 ) -> Style {
-    let base = if selected {
-        Style::default()
+    if selected {
+        return Style::default()
+            .fg(palette.text)
             .bg(palette.border)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
+            .add_modifier(Modifier::BOLD);
+    }
+    let base = Style::default();
 
     if task_is_overdue(task, now) {
         base.fg(palette.error)
@@ -3042,13 +3061,13 @@ fn task_recurring_style(
     selected: bool,
     now: chrono::DateTime<Local>,
 ) -> Style {
-    let base = if selected {
-        Style::default()
+    if selected {
+        return Style::default()
+            .fg(palette.text)
             .bg(palette.border)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
+            .add_modifier(Modifier::BOLD);
+    }
+    let base = Style::default();
 
     if task_is_overdue(task, now) {
         base.fg(palette.error)
