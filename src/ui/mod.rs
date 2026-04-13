@@ -1218,13 +1218,17 @@ fn render_task_due_preview(
 }
 
 fn task_input_meta_lines(input: &TaskInputView, palette: ThemePalette) -> Vec<Line<'static>> {
-    vec![Line::from(vec![
-        Span::styled("Project: ", Style::default().fg(palette.subtle_text)),
-        Span::styled(
-            input.project_name.clone(),
-            Style::default().fg(palette.text),
-        ),
-    ])]
+    if input.show_project_assignment {
+        vec![Line::from(vec![
+            Span::styled("Project: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                input.project_name.clone(),
+                Style::default().fg(palette.text),
+            ),
+        ])]
+    } else {
+        Vec::new()
+    }
 }
 
 fn append_task_preview_tip(lines: &mut Vec<Line<'static>>, area: Rect, palette: ThemePalette) {
@@ -1799,22 +1803,14 @@ fn render_project_preview_panel(
     editor: &ProjectEditorView,
     palette: ThemePalette,
 ) {
-    let mut lines = vec![Line::from(vec![
-        Span::styled("Parent: ", Style::default().fg(palette.subtle_text)),
-        Span::styled(
-            editor.parent_label.clone(),
+    let mut lines = Vec::new();
+    if let Some(parent_label) = &editor.parent_label {
+        let content_width = area.width.saturating_sub(4) as usize;
+        let parent_text = format!("Parent: {parent_label}");
+        lines.push(Line::from(Span::styled(
+            ellipsize_end(parent_text.as_str(), content_width),
             Style::default().fg(palette.text),
-        ),
-    ])];
-
-    if !editor.parent_suggestions.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("Matches: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(
-                editor.parent_suggestions.join(", "),
-                Style::default().fg(palette.accent),
-            ),
-        ]));
+        )));
     }
 
     let tip_line = Line::from(Span::styled(
@@ -1836,7 +1832,7 @@ fn render_project_preview_panel(
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(palette.border)),
             )
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: true }),
         area,
     );
 }
@@ -1847,6 +1843,7 @@ fn render_project_parent_suggestions(
     editor: &ProjectEditorView,
     palette: ThemePalette,
 ) {
+    let content_width = area.width.saturating_sub(2) as usize;
     let lines = editor
         .parent_suggestions
         .iter()
@@ -1864,29 +1861,30 @@ fn render_project_parent_suggestions(
             } else {
                 Style::default().fg(palette.text)
             };
-            Line::from(vec![Span::styled(
-                ellipsize_end(suggestion, area.width.saturating_sub(2) as usize),
-                style,
-            )])
+            let value = ellipsize_end(suggestion, content_width);
+            let padding = " ".repeat(content_width.saturating_sub(value.width()));
+            Line::from(vec![Span::styled(format!("{value}{padding}"), style)])
         })
         .collect::<Vec<_>>();
 
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .title(Span::styled(
-                    "Parent Project",
-                    Style::default()
-                        .fg(palette.accent)
-                        .add_modifier(Modifier::BOLD),
-                ))
-                .borders(Borders::ALL)
-                .border_style(
-                    Style::default()
-                        .fg(palette.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-        ),
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        "Parent Project",
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            )
+            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
         area,
     );
 }
@@ -1897,6 +1895,7 @@ fn render_task_project_suggestions(
     input: &TaskInputView,
     palette: ThemePalette,
 ) {
+    let content_width = area.width.saturating_sub(2) as usize;
     let lines = input
         .project_suggestions
         .iter()
@@ -1914,29 +1913,30 @@ fn render_task_project_suggestions(
             } else {
                 Style::default().fg(palette.text)
             };
-            Line::from(vec![Span::styled(
-                ellipsize_end(suggestion, area.width.saturating_sub(2) as usize),
-                style,
-            )])
+            let value = ellipsize_end(suggestion, content_width);
+            let padding = " ".repeat(content_width.saturating_sub(value.width()));
+            Line::from(vec![Span::styled(format!("{value}{padding}"), style)])
         })
         .collect::<Vec<_>>();
 
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .title(Span::styled(
-                    "Project",
-                    Style::default()
-                        .fg(palette.accent)
-                        .add_modifier(Modifier::BOLD),
-                ))
-                .borders(Borders::ALL)
-                .border_style(
-                    Style::default()
-                        .fg(palette.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-        ),
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        "Project",
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            )
+            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
         area,
     );
 }
@@ -2156,7 +2156,7 @@ fn project_parent_dropdown_width(suggestions: &[String]) -> u16 {
         .max()
         .unwrap_or(16)
         .saturating_add(2);
-    (content as u16).clamp(18, 40)
+    (content as u16).clamp(22, 56)
 }
 
 fn editor_cursor_display_column(

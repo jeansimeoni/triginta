@@ -552,6 +552,7 @@ pub struct TaskInputView {
     pub value: String,
     pub cursor: usize,
     pub project_name: String,
+    pub show_project_assignment: bool,
     pub project_suggestions: Vec<String>,
     pub selected_project_suggestion: usize,
     pub due_preview: Option<TaskDuePreviewView>,
@@ -651,7 +652,7 @@ pub struct ProjectEditorView {
     pub name_value: String,
     pub name_cursor: usize,
     pub parsed_name: String,
-    pub parent_label: String,
+    pub parent_label: Option<String>,
     pub parent_suggestions: Vec<String>,
     pub selected_parent_suggestion: usize,
     pub color_label: String,
@@ -1165,6 +1166,7 @@ impl App {
                     .project_name(input.project_id)
                     .unwrap_or("Inbox")
                     .to_string(),
+                show_project_assignment: input.project_id != self.inbox_project_id(),
                 project_suggestions: project_suggestions.clone(),
                 selected_project_suggestion: input
                     .suggestion_index
@@ -1218,10 +1220,8 @@ impl App {
         } else {
             Some(extracted_parent_id)
         };
-        let parent_label = resolved_parent_id
-            .and_then(|project_id| self.project_name(project_id))
-            .unwrap_or("No Parent")
-            .to_string();
+        let parent_label =
+            resolved_parent_id.and_then(|project_id| self.project_name(project_id).map(str::to_string));
         let color = ProjectColor::all()
             .get(editor.color_index)
             .copied()
@@ -1991,6 +1991,32 @@ impl App {
         while input.cursor < input.value.len() && input.value[input.cursor..].starts_with(' ') {
             input.value.remove(input.cursor);
         }
+        true
+    }
+
+    fn accept_project_editor_parent_suggestion(&self, editor: &mut ProjectEditorState) -> bool {
+        let Some((start, end, query)) =
+            self.active_project_query(editor.name_input.as_str(), editor.name_cursor)
+        else {
+            return false;
+        };
+        let suggestions = self.project_parent_suggestions(query.as_str(), editor.project_id);
+        let Some(project) = suggestions
+            .get(
+                editor
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        else {
+            return false;
+        };
+
+        editor
+            .name_input
+            .replace_range(start..end, format!("#{} ", project.name).as_str());
+        editor.name_cursor = (start + project.name.len() + 2).min(editor.name_input.len());
+        editor.suggestion_index = 0;
         true
     }
 
@@ -3042,53 +3068,19 @@ impl App {
             match code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => {
-                    if editor.focused_field == ProjectEditorField::Name {
-                        if let Some((start, end, query)) = self
-                            .active_project_query(editor.name_input.as_str(), editor.name_cursor)
-                        {
-                            let suggestions =
-                                self.project_parent_suggestions(query.as_str(), editor.project_id);
-                            if let Some(project) = suggestions.get(
-                                editor
-                                    .suggestion_index
-                                    .min(suggestions.len().saturating_sub(1)),
-                            ) {
-                                editor.name_input.replace_range(
-                                    start..end,
-                                    format!("#{} ", project.name).as_str(),
-                                );
-                                editor.name_cursor =
-                                    (start + project.name.len() + 2).min(editor.name_input.len());
-                                editor.suggestion_index = 0;
-                                self.project_editor = Some(editor);
-                                return Ok(true);
-                            }
-                        }
+                    if editor.focused_field == ProjectEditorField::Name
+                        && self.accept_project_editor_parent_suggestion(&mut editor)
+                    {
+                        self.project_editor = Some(editor);
+                        return Ok(true);
                     }
                     self.submit_project_editor(editor, now)?;
                 }
                 KeyCode::Tab => {
                     if editor.focused_field == ProjectEditorField::Name {
-                        if let Some((start, end, query)) = self
-                            .active_project_query(editor.name_input.as_str(), editor.name_cursor)
-                        {
-                            let suggestions =
-                                self.project_parent_suggestions(query.as_str(), editor.project_id);
-                            if let Some(project) = suggestions.get(
-                                editor
-                                    .suggestion_index
-                                    .min(suggestions.len().saturating_sub(1)),
-                            ) {
-                                editor.name_input.replace_range(
-                                    start..end,
-                                    format!("#{} ", project.name).as_str(),
-                                );
-                                editor.name_cursor =
-                                    (start + project.name.len() + 2).min(editor.name_input.len());
-                                editor.suggestion_index = 0;
-                                self.project_editor = Some(editor);
-                                return Ok(true);
-                            }
+                        if self.accept_project_editor_parent_suggestion(&mut editor) {
+                            self.project_editor = Some(editor);
+                            return Ok(true);
                         }
                         if self.project_editor_has_parent_without_name(&editor) {
                             if !editor.name_input.ends_with(' ') {
@@ -3399,6 +3391,10 @@ impl App {
                 self.task_input = Some(input);
             }
             KeyCode::Enter => {
+                if self.accept_task_input_project_suggestion(&mut input) {
+                    self.task_input = Some(input);
+                    return Ok(true);
+                }
                 let parsed = self.task_input_parse(input.value.as_str(), input.project_id);
                 if parsed.cleaned_title.is_empty() {
                     self.task_input = Some(input);
@@ -4613,6 +4609,47 @@ mod tests {
     }
 
     #[test]
+    fn create_popup_enter_accepts_project_suggestion_before_submitting_task() {
+        let mut app = test_app();
+        let project = app
+            .database
+            .project_repository()
+            .create(
+                "Child Project 02",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Draft spec #Chi".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let input = app.task_input_view().expect("input popup should be open");
+        assert!(!input.project_suggestions.is_empty());
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should accept suggestion first");
+        let input = app
+            .task_input_view()
+            .expect("input popup should stay open after suggestion accept");
+        assert_eq!(input.project_name, "Child Project 02");
+        assert_eq!(app.visible_tasks().len(), 0);
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("second enter should submit task");
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "Draft spec");
+        assert_eq!(task.project_id, project.id);
+    }
+
+    #[test]
     fn task_views_filter_by_due_date() {
         let mut app = test_app();
         let today = app.today();
@@ -4796,7 +4833,7 @@ mod tests {
         let editor = app
             .project_editor_view()
             .expect("project editor should remain visible");
-        assert_eq!(editor.parent_label, "Test Project 01");
+        assert_eq!(editor.parent_label.as_deref(), Some("Test Project 01"));
         app.handle_key(crossterm::event::KeyCode::Enter)
             .expect("project should be created");
 
