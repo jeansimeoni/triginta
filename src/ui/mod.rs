@@ -847,7 +847,6 @@ fn task_summary_line(
         TaskStatus::Done => symbols.done,
     };
     let now = Local::now();
-    let priority_indicator = task_priority_indicator(task.priority, symbols);
     let due_text = task
         .due
         .as_ref()
@@ -869,39 +868,19 @@ fn task_summary_line(
                     .unwrap_or(0)
         })
         .unwrap_or(0);
-    let marker_width = marker.width();
-    let priority_width = priority_indicator
-        .as_ref()
-        .map(|value| value.width() + 1)
-        .unwrap_or(0);
     let left_width = (width as usize)
         .saturating_sub(leading_padding)
         .saturating_sub(due_meta_width)
         .saturating_sub(due_gap);
-    let title_width = left_width
-        .saturating_sub(marker_width)
-        .saturating_sub(1)
-        .saturating_sub(priority_width);
-    let title_text = ellipsize_end(&task.title, title_width);
+    let title_text = ellipsize_end(&format!("{marker} {}", task.title), left_width);
 
     let row_style = task_row_style(task, palette, selected, now);
     let due_style = task_due_style(task, palette, selected, now);
     let recurring_style = task_recurring_style(task, palette, selected, now);
-    let priority_style = if selected {
-        row_style
-    } else {
-        Style::default()
-            .fg(priority_color(task.priority, palette))
-            .add_modifier(Modifier::BOLD)
-    };
-    let mut spans = vec![Span::styled(" ".repeat(leading_padding), row_style)];
-    spans.push(Span::styled(marker.to_string(), row_style));
-    spans.push(Span::styled(" ".to_string(), row_style));
-    if let Some(priority_indicator) = priority_indicator {
-        spans.push(Span::styled(priority_indicator, priority_style));
-        spans.push(Span::styled(" ".to_string(), row_style));
-    }
-    spans.push(Span::styled(title_text, row_style));
+    let mut spans = vec![
+        Span::styled(" ".repeat(leading_padding), row_style),
+        Span::styled(title_text, row_style),
+    ];
 
     if due_meta_width > 0 {
         let current_width = Line::from(spans.clone()).width();
@@ -945,17 +924,26 @@ fn task_project_line(
     let (project_name, project_color) = project_meta_for_task(data, task)
         .map(|(name, color)| (name, palette.project_color(color)))
         .unwrap_or(("Inbox", palette.subtle_text));
+    let priority_indicator = task_priority_indicator(task.priority, symbols);
+    let priority_meta_width = priority_indicator
+        .as_ref()
+        .map(|value| value.width())
+        .unwrap_or(0);
     let tags =
         format_task_tags_for_row(task_tags_for_task(data, task.id).as_slice(), width, symbols);
     let tags_width = task_tag_segments_width(tags.as_slice(), symbols);
     let status_marker = task_status_symbol(task.status, symbols);
-    let priority_width = task_priority_indicator(task.priority, symbols)
-        .map(|value| value.width() + 1)
-        .unwrap_or(0);
     let leading_padding = 2usize
         .saturating_add(status_marker.width())
-        .saturating_add(1)
-        .saturating_add(priority_width);
+        .saturating_add(1);
+    let has_right_meta = priority_indicator.is_some() || !tags.is_empty();
+    let right_meta_width = priority_meta_width
+        .saturating_add(tags_width)
+        .saturating_add(if priority_indicator.is_some() && !tags.is_empty() {
+            1
+        } else {
+            0
+        });
     let base_style = if selected {
         Style::default()
             .fg(palette.text)
@@ -988,20 +976,40 @@ fn task_project_line(
                     .saturating_sub(leading_padding as u16)
                     .saturating_sub(symbols.project.width() as u16)
                     .saturating_sub(1)
-                    .saturating_sub(tags_width as u16)
-                    .saturating_sub(if tags.is_empty() { 0 } else { 2 }) as usize,
+                    .saturating_sub(right_meta_width as u16)
+                    .saturating_sub(if has_right_meta { 2 } else { 0 }) as usize,
             ),
             name_style,
         ),
     ];
-    if !tags.is_empty() {
+    if has_right_meta {
         let current_width = Line::from(spans.clone()).width();
         let min_gap = 2usize;
         let available_for_gap = (width as usize)
             .saturating_sub(current_width)
-            .saturating_sub(tags_width);
+            .saturating_sub(right_meta_width);
         let gap = available_for_gap.max(min_gap);
         spans.push(Span::styled(" ".repeat(gap), base_style));
+    }
+
+    if let Some(priority_indicator) = priority_indicator.as_ref() {
+        let priority_style = if selected {
+            base_style.patch(
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Style::default()
+                .fg(priority_color(task.priority, palette))
+                .add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(priority_indicator.clone(), priority_style));
+        if !tags.is_empty() {
+            spans.push(Span::styled(" ".to_string(), base_style));
+        }
+    }
+    if !tags.is_empty() {
         spans.extend(task_tag_segments_spans(
             tags.as_slice(),
             base_style,
