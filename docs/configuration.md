@@ -237,10 +237,19 @@ Theme files support these keys:
 - `priority_1`
 - `priority_2`
 - `priority_3`
+- `markdown_h1`
+- `markdown_h2`
+- `markdown_h3`
+- `markdown_h4`
+- `markdown_h5`
+- `markdown_h6`
 
 Each value must be a 6-digit hex color like `"#cdd6f4"`.
 If `priority_1..priority_3` are omitted, Triginta uses Catppuccin-compatible
 defaults that approximate Todoist's red/orange/blue priority colors.
+If `markdown_h1..markdown_h6` are omitted, Triginta derives them from the
+current theme: `h1=priority_1`, `h2=priority_2`, `h3=priority_3`,
+`h4=accent`, `h5=timer_short_break`, `h6=subtle_text`.
 
 Example:
 
@@ -257,6 +266,12 @@ error = "#dd6677"
 priority_1 = "#f38ba8"
 priority_2 = "#fab387"
 priority_3 = "#89b4fa"
+markdown_h1 = "#f38ba8"
+markdown_h2 = "#fab387"
+markdown_h3 = "#89b4fa"
+markdown_h4 = "#cba6f7"
+markdown_h5 = "#89dceb"
+markdown_h6 = "#a6adc8"
 ```
 
 ## Timer

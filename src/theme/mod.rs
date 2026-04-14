@@ -21,6 +21,12 @@ pub struct ThemePalette {
     pub priority_1: Color,
     pub priority_2: Color,
     pub priority_3: Color,
+    pub markdown_h1: Color,
+    pub markdown_h2: Color,
+    pub markdown_h3: Color,
+    pub markdown_h4: Color,
+    pub markdown_h5: Color,
+    pub markdown_h6: Color,
     pub project_colors: ProjectColorPalette,
 }
 
@@ -131,6 +137,18 @@ struct ThemeFile {
     #[serde(default)]
     priority_3: Option<String>,
     #[serde(default)]
+    markdown_h1: Option<String>,
+    #[serde(default)]
+    markdown_h2: Option<String>,
+    #[serde(default)]
+    markdown_h3: Option<String>,
+    #[serde(default)]
+    markdown_h4: Option<String>,
+    #[serde(default)]
+    markdown_h5: Option<String>,
+    #[serde(default)]
+    markdown_h6: Option<String>,
+    #[serde(default)]
     project_colors: Option<ProjectColorFile>,
 }
 
@@ -171,38 +189,87 @@ impl ThemeFile {
             .project_colors
             .unwrap_or_else(default_project_color_file);
         let default_priority_colors = default_priority_color_file();
+        let text = parse_hex_color(&self.text).context("invalid theme color for text")?;
+        let subtle_text =
+            parse_hex_color(&self.subtle_text).context("invalid theme color for subtle_text")?;
+        let border = parse_hex_color(&self.border).context("invalid theme color for border")?;
+        let accent = parse_hex_color(&self.accent).context("invalid theme color for accent")?;
+        let timer_work =
+            parse_hex_color(&self.timer_work).context("invalid theme color for timer_work")?;
+        let timer_short_break = parse_hex_color(&self.timer_short_break)
+            .context("invalid theme color for timer_short_break")?;
+        let timer_long_break = parse_hex_color(&self.timer_long_break)
+            .context("invalid theme color for timer_long_break")?;
+        let success = parse_hex_color(&self.success).context("invalid theme color for success")?;
+        let error = parse_hex_color(&self.error).context("invalid theme color for error")?;
+        let priority_1 = parse_hex_color(
+            self.priority_1
+                .as_deref()
+                .unwrap_or(default_priority_colors.priority_1.as_str()),
+        )
+        .context("invalid theme color for priority_1")?;
+        let priority_2 = parse_hex_color(
+            self.priority_2
+                .as_deref()
+                .unwrap_or(default_priority_colors.priority_2.as_str()),
+        )
+        .context("invalid theme color for priority_2")?;
+        let priority_3 = parse_hex_color(
+            self.priority_3
+                .as_deref()
+                .unwrap_or(default_priority_colors.priority_3.as_str()),
+        )
+        .context("invalid theme color for priority_3")?;
+        let markdown_h1 = if let Some(value) = self.markdown_h1.as_deref() {
+            parse_hex_color(value).context("invalid theme color for markdown_h1")?
+        } else {
+            priority_1
+        };
+        let markdown_h2 = if let Some(value) = self.markdown_h2.as_deref() {
+            parse_hex_color(value).context("invalid theme color for markdown_h2")?
+        } else {
+            priority_2
+        };
+        let markdown_h3 = if let Some(value) = self.markdown_h3.as_deref() {
+            parse_hex_color(value).context("invalid theme color for markdown_h3")?
+        } else {
+            priority_3
+        };
+        let markdown_h4 = if let Some(value) = self.markdown_h4.as_deref() {
+            parse_hex_color(value).context("invalid theme color for markdown_h4")?
+        } else {
+            accent
+        };
+        let markdown_h5 = if let Some(value) = self.markdown_h5.as_deref() {
+            parse_hex_color(value).context("invalid theme color for markdown_h5")?
+        } else {
+            timer_short_break
+        };
+        let markdown_h6 = if let Some(value) = self.markdown_h6.as_deref() {
+            parse_hex_color(value).context("invalid theme color for markdown_h6")?
+        } else {
+            subtle_text
+        };
+
         Ok(ThemePalette {
-            text: parse_hex_color(&self.text).context("invalid theme color for text")?,
-            subtle_text: parse_hex_color(&self.subtle_text)
-                .context("invalid theme color for subtle_text")?,
-            border: parse_hex_color(&self.border).context("invalid theme color for border")?,
-            accent: parse_hex_color(&self.accent).context("invalid theme color for accent")?,
-            timer_work: parse_hex_color(&self.timer_work)
-                .context("invalid theme color for timer_work")?,
-            timer_short_break: parse_hex_color(&self.timer_short_break)
-                .context("invalid theme color for timer_short_break")?,
-            timer_long_break: parse_hex_color(&self.timer_long_break)
-                .context("invalid theme color for timer_long_break")?,
-            success: parse_hex_color(&self.success).context("invalid theme color for success")?,
-            error: parse_hex_color(&self.error).context("invalid theme color for error")?,
-            priority_1: parse_hex_color(
-                self.priority_1
-                    .as_deref()
-                    .unwrap_or(default_priority_colors.priority_1.as_str()),
-            )
-            .context("invalid theme color for priority_1")?,
-            priority_2: parse_hex_color(
-                self.priority_2
-                    .as_deref()
-                    .unwrap_or(default_priority_colors.priority_2.as_str()),
-            )
-            .context("invalid theme color for priority_2")?,
-            priority_3: parse_hex_color(
-                self.priority_3
-                    .as_deref()
-                    .unwrap_or(default_priority_colors.priority_3.as_str()),
-            )
-            .context("invalid theme color for priority_3")?,
+            text,
+            subtle_text,
+            border,
+            accent,
+            timer_work,
+            timer_short_break,
+            timer_long_break,
+            success,
+            error,
+            priority_1,
+            priority_2,
+            priority_3,
+            markdown_h1,
+            markdown_h2,
+            markdown_h3,
+            markdown_h4,
+            markdown_h5,
+            markdown_h6,
             project_colors: ProjectColorPalette {
                 berry_red: parse_hex_color(&project_colors.berry_red)
                     .context("invalid project color for berry_red")?,
@@ -264,6 +331,12 @@ fn builtin_theme(name: &str) -> Option<ThemePalette> {
             priority_1: rgb(210, 15, 57),
             priority_2: rgb(223, 142, 29),
             priority_3: rgb(30, 102, 245),
+            markdown_h1: rgb(210, 15, 57),
+            markdown_h2: rgb(223, 142, 29),
+            markdown_h3: rgb(30, 102, 245),
+            markdown_h4: rgb(136, 57, 239),
+            markdown_h5: rgb(4, 165, 229),
+            markdown_h6: rgb(124, 127, 147),
             project_colors: default_project_colors(),
         }),
         "catppuccin-frappe" => Some(ThemePalette {
@@ -279,6 +352,12 @@ fn builtin_theme(name: &str) -> Option<ThemePalette> {
             priority_1: rgb(231, 130, 132),
             priority_2: rgb(239, 159, 118),
             priority_3: rgb(140, 170, 238),
+            markdown_h1: rgb(231, 130, 132),
+            markdown_h2: rgb(239, 159, 118),
+            markdown_h3: rgb(140, 170, 238),
+            markdown_h4: rgb(202, 158, 230),
+            markdown_h5: rgb(153, 209, 219),
+            markdown_h6: rgb(165, 173, 206),
             project_colors: default_project_colors(),
         }),
         "catppuccin-macchiato" => Some(ThemePalette {
@@ -294,6 +373,12 @@ fn builtin_theme(name: &str) -> Option<ThemePalette> {
             priority_1: rgb(237, 135, 150),
             priority_2: rgb(245, 169, 127),
             priority_3: rgb(138, 173, 244),
+            markdown_h1: rgb(237, 135, 150),
+            markdown_h2: rgb(245, 169, 127),
+            markdown_h3: rgb(138, 173, 244),
+            markdown_h4: rgb(198, 160, 246),
+            markdown_h5: rgb(145, 215, 227),
+            markdown_h6: rgb(165, 173, 203),
             project_colors: default_project_colors(),
         }),
         "catppuccin-mocha" => Some(ThemePalette {
@@ -309,6 +394,12 @@ fn builtin_theme(name: &str) -> Option<ThemePalette> {
             priority_1: rgb(243, 139, 168),
             priority_2: rgb(250, 179, 135),
             priority_3: rgb(137, 180, 250),
+            markdown_h1: rgb(243, 139, 168),
+            markdown_h2: rgb(250, 179, 135),
+            markdown_h3: rgb(137, 180, 250),
+            markdown_h4: rgb(203, 166, 247),
+            markdown_h5: rgb(137, 220, 235),
+            markdown_h6: rgb(166, 173, 200),
             project_colors: default_project_colors(),
         }),
         _ => None,
@@ -434,6 +525,7 @@ timer_short_break = "#66cccc"
 timer_long_break = "#4488cc"
 success = "#66dd88"
 error = "#dd6677"
+markdown_h2 = "#22aaee"
 "##,
         )
         .expect("theme should be written");
@@ -441,5 +533,7 @@ error = "#dd6677"
         let palette = ThemePalette::load(&paths, "forest").expect("custom theme should load");
         assert_eq!(palette.border, Color::Rgb(85, 119, 85));
         assert_eq!(palette.error, Color::Rgb(221, 102, 119));
+        assert_eq!(palette.markdown_h2, Color::Rgb(34, 170, 238));
+        assert_eq!(palette.markdown_h1, palette.priority_1);
     }
 }

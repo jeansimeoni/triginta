@@ -792,14 +792,15 @@ fn markdown_to_lines(markdown: &str, palette: ThemePalette) -> Vec<MarkdownRende
             .count();
         if heading_level > 0 && start_trimmed.chars().nth(heading_level) == Some(' ') {
             let content = start_trimmed[heading_level + 1..].trim_start();
+            let heading_color = markdown_heading_color(heading_level, palette);
             let heading_prefix = Span::styled(
                 format!("{} ", "▌".repeat(heading_level.min(3))),
-                Style::default().fg(palette.accent),
+                Style::default().fg(heading_color),
             );
             let mut line = markdown_line_with_prefix(heading_prefix, content, palette);
             line.line = line.line.style(
                 Style::default()
-                    .fg(palette.accent)
+                    .fg(heading_color)
                     .add_modifier(Modifier::BOLD),
             );
             lines.push(
@@ -1090,6 +1091,17 @@ fn markdown_inline_spans(input: &str, palette: ThemePalette) -> MarkdownInlineRe
         &mut col,
     );
     MarkdownInlineRender { spans, hyperlinks }
+}
+
+fn markdown_heading_color(level: usize, palette: ThemePalette) -> Color {
+    match level {
+        1 => palette.markdown_h1,
+        2 => palette.markdown_h2,
+        3 => palette.markdown_h3,
+        4 => palette.markdown_h4,
+        5 => palette.markdown_h5,
+        _ => palette.markdown_h6,
+    }
 }
 
 #[derive(Debug)]
@@ -4908,6 +4920,12 @@ mod tests {
             priority_1: Color::Red,
             priority_2: Color::Yellow,
             priority_3: Color::Blue,
+            markdown_h1: Color::Red,
+            markdown_h2: Color::Yellow,
+            markdown_h3: Color::Blue,
+            markdown_h4: Color::Cyan,
+            markdown_h5: Color::Cyan,
+            markdown_h6: Color::Gray,
             project_colors: ProjectColorPalette {
                 berry_red: Color::Rgb(178, 67, 79),
                 red: Color::Red,
