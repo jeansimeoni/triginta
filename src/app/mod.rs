@@ -3582,12 +3582,6 @@ impl App {
             return false;
         };
         let suggestions = self.priority_suggestions(query.as_str());
-        if Self::parse_priority_input(query.as_str()).is_some()
-            && suggestions.len() == 1
-            && suggestions[0].eq_ignore_ascii_case(query.trim())
-        {
-            return false;
-        }
         let Some(priority) = suggestions
             .get(
                 input
@@ -8720,6 +8714,40 @@ mod tests {
     }
 
     #[test]
+    fn create_popup_priority_suggestion_moves_with_arrow_keys() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Draft docs p".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("down should move priority suggestion");
+        let input = app.task_input_view().expect("input popup should be open");
+        assert_eq!(input.selected_priority_suggestion, 1);
+    }
+
+    #[test]
+    fn create_popup_enter_with_exact_priority_token_accepts_before_submit() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Draft docs p2".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should accept priority token first");
+        let input = app
+            .task_input_view()
+            .expect("input popup should stay open after priority acceptance");
+        assert_eq!(input.value, "Draft docs p2 ");
+    }
+
+    #[test]
     fn task_views_filter_by_due_date() {
         let mut app = test_app();
         let today = app.today();
@@ -9806,7 +9834,9 @@ mod tests {
                 .expect("typing should succeed");
         }
         app.handle_key(crossterm::event::KeyCode::Enter)
-            .expect("task should be created");
+            .expect("enter should accept priority suggestion first");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("second enter should create task");
 
         let task = app.selected_task().expect("task should be selected");
         assert_eq!(task.title, "Ship report");
