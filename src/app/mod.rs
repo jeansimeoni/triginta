@@ -4326,7 +4326,9 @@ impl App {
                 Self::sync_editor_due_from_title(editor, reference_date);
                 Self::sync_editor_priority_from_title(editor);
             }
-            TaskEditorField::Project => {}
+            TaskEditorField::Project => {
+                Self::sync_editor_title_from_project_field(editor);
+            }
             TaskEditorField::Tags => {}
             TaskEditorField::Priority => {
                 Self::sync_editor_title_from_priority_field(editor, reference_date);
@@ -4381,6 +4383,16 @@ impl App {
         editor.priority_cursor = editor.priority_input.len();
     }
 
+    fn sync_editor_title_from_project_field(editor: &mut TaskEditorState) {
+        let (cleaned_title, _) =
+            Self::extract_project_reference_for_title_cleanup(editor.title_input.as_str());
+        if cleaned_title == editor.title_input {
+            return;
+        }
+        editor.title_input = cleaned_title;
+        editor.title_cursor = editor.title_cursor.min(editor.title_input.len());
+    }
+
     fn sync_editor_title_from_priority_field(
         editor: &mut TaskEditorState,
         reference_date: NaiveDate,
@@ -4392,6 +4404,22 @@ impl App {
         editor.title_input = cleaned_title;
         editor.title_cursor = editor.title_cursor.min(editor.title_input.len());
         Self::sync_editor_due_from_title(editor, reference_date);
+    }
+
+    fn extract_project_reference_for_title_cleanup(raw: &str) -> (String, Option<String>) {
+        let Some(start) = raw.rfind('#') else {
+            return (raw.trim().to_string(), None);
+        };
+        if start > 0 && !raw[..start].chars().last().is_some_and(char::is_whitespace) {
+            return (raw.trim().to_string(), None);
+        }
+        let query = raw[start + 1..].trim();
+        if query.is_empty() {
+            return (raw.trim().to_string(), None);
+        }
+
+        let cleaned = raw[..start].trim_end().to_string();
+        (cleaned, Some(query.to_string()))
     }
 
     fn sync_editor_due_from_recurrence(editor: &mut TaskEditorState, reference_date: NaiveDate) {
@@ -7978,6 +8006,52 @@ mod tests {
         assert_eq!(editor.priority_value, "p3");
         assert_eq!(editor.title_value, "Prepare deck");
         assert_key_value_preview_line(&editor.preview_panel.preview_lines[2], "Priority", "P3");
+    }
+
+    #[test]
+    fn task_editor_project_field_edit_clears_project_tokens_from_title() {
+        let mut app = test_app();
+        app.database
+            .project_repository()
+            .create(
+                "Another Project",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Prepare deck".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+
+        app.handle_key(crossterm::event::KeyCode::F(1))
+            .expect("focus should switch to title");
+        for character in " #Another Project".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::F(2))
+            .expect("focus should switch to project");
+        app.handle_key(crossterm::event::KeyCode::Backspace)
+            .expect("project edit should succeed");
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_ne!(editor.project_value, "Inbox");
+        assert_eq!(editor.title_value, "Prepare deck");
+        assert!(!editor.title_value.contains('#'));
     }
 
     #[test]
