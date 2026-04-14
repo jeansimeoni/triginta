@@ -2101,7 +2101,7 @@ fn render_task_editor_popup(
     render_editor_multiline_field(
         frame,
         form_rows[1],
-        "Description [F8]",
+        "Description [F2]",
         &editor.description_value,
         editor.description_cursor,
         editor.description_scroll,
@@ -2112,7 +2112,7 @@ fn render_task_editor_popup(
     render_editor_field(
         frame,
         form_rows[2],
-        "Project [F2]",
+        "Project [F3]",
         &editor.project_value,
         editor.project_cursor,
         editor.focus.project,
@@ -2123,7 +2123,7 @@ fn render_task_editor_popup(
     render_editor_field(
         frame,
         form_rows[3],
-        "Tags [F3]",
+        "Tags [F4]",
         &editor.tags_value,
         editor.tags_cursor,
         editor.focus.tags,
@@ -2142,7 +2142,7 @@ fn render_task_editor_popup(
     render_editor_field(
         frame,
         due_row[0],
-        "Due Date [F4]",
+        "Due Date [F5]",
         &editor.due_date_value,
         editor.due_date_cursor,
         editor.focus.due_date,
@@ -2152,7 +2152,7 @@ fn render_task_editor_popup(
     render_editor_field(
         frame,
         due_row[1],
-        "Priority [F5]",
+        "Priority [F6]",
         &editor.priority_value,
         editor.priority_cursor,
         editor.focus.priority,
@@ -2162,7 +2162,7 @@ fn render_task_editor_popup(
     render_editor_field(
         frame,
         due_row[2],
-        "Due Time [F6]",
+        "Due Time [F7]",
         &editor.due_time_value,
         editor.due_time_cursor,
         editor.focus.due_time,
@@ -2172,7 +2172,7 @@ fn render_task_editor_popup(
     render_editor_field(
         frame,
         form_rows[5],
-        "Recurrence [F7]",
+        "Recurrence [F8]",
         &editor.recurrence_value,
         editor.recurrence_cursor,
         editor.focus.recurrence,
@@ -2610,7 +2610,7 @@ fn render_editor_calendar(
 fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "F1-F8 fields  Ctrl+Enter save  Ctrl+E ext editor  F8/F9 calendar  F9 clear due",
+            "F1-F8 fields  Ctrl+Enter save  Ctrl+E ext editor  F8 recurrence  F9 cal  F10 clear",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
@@ -2623,10 +2623,12 @@ fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'stati
         Span::raw(" save  "),
         Span::styled("Ctrl+e", Style::default().fg(palette.subtle_text)),
         Span::raw(" ext  "),
-        Span::styled("F8/F9", Style::default().fg(palette.subtle_text)),
-        Span::raw(" 󰃭  "),
+        Span::styled("F8", Style::default().fg(palette.subtle_text)),
+        Span::raw(" recur  "),
         Span::styled("F9", Style::default().fg(palette.subtle_text)),
-        Span::raw(" due  "),
+        Span::raw(" cal  "),
+        Span::styled("F10", Style::default().fg(palette.subtle_text)),
+        Span::raw(" clear  "),
         Span::styled("󰄬", Style::default().fg(palette.subtle_text)),
         Span::raw(" ↵  "),
         Span::styled(

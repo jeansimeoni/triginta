@@ -1249,14 +1249,14 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     },
     ShortcutTip {
         keys: "F8/F9",
-        description: "open calendar",
+        description: "recurrence/calendar",
     },
     ShortcutTip {
         keys: "j/k or ↑/↓",
         description: "suggestions",
     },
     ShortcutTip {
-        keys: "F9",
+        keys: "F10",
         description: "clear due",
     },
 ];
@@ -2079,7 +2079,7 @@ impl App {
                 vec!["Type @ for selecting tags and use Enter/Tab to accept".to_string()]
             }
             TaskEditorField::DueDate => {
-                vec!["Type YYYY-MM-DD or use F8 to pick from calendar".to_string()]
+                vec!["Type YYYY-MM-DD or use F9 to pick from calendar".to_string()]
             }
             TaskEditorField::Priority => {
                 vec!["Type p1-p4 and use Enter/Tab to accept suggestion".to_string()]
@@ -6333,36 +6333,36 @@ impl App {
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(2) => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::Project);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Description);
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(3) => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::Tags);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Project);
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(4) => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::DueDate);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Tags);
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(5) => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::Priority);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::DueDate);
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(6) => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::DueTime);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Priority);
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(7) => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::Recurrence);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::DueTime);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::F(8) if editor.focused_field != TaskEditorField::DueDate => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::Description);
+                KeyCode::F(8) => {
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Recurrence);
                     self.task_editor = Some(editor);
                 }
                 KeyCode::Down | KeyCode::Char('j')
@@ -6469,16 +6469,12 @@ impl App {
                     editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::F(8) if editor.focused_field == TaskEditorField::DueDate => {
+                KeyCode::F(9) if editor.focused_field == TaskEditorField::DueDate => {
                     Self::open_editor_calendar(&mut editor, now.date_naive());
                     self.task_editor = Some(editor);
                 }
-                KeyCode::F(9) => {
-                    if editor.focused_field == TaskEditorField::DueDate {
-                        Self::open_editor_calendar(&mut editor, now.date_naive());
-                    } else {
-                        Self::clear_editor_due(&mut editor);
-                    }
+                KeyCode::F(10) => {
+                    Self::clear_editor_due(&mut editor);
                     self.task_editor = Some(editor);
                 }
                 KeyCode::Home => {
@@ -8070,7 +8066,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(9))
+        app.handle_key(crossterm::event::KeyCode::F(10))
             .expect("clear due should succeed");
         app.handle_key(crossterm::event::KeyCode::Enter)
             .expect("edit should submit");
@@ -8096,9 +8092,9 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(4))
+        app.handle_key(crossterm::event::KeyCode::F(5))
             .expect("focus should switch to due date");
-        app.handle_key(crossterm::event::KeyCode::F(8))
+        app.handle_key(crossterm::event::KeyCode::F(9))
             .expect("calendar should open");
         assert!(
             app.task_editor_view()
@@ -8147,7 +8143,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(7))
+        app.handle_key(crossterm::event::KeyCode::F(8))
             .expect("focus should switch to recurrence");
         for character in "every monday at 9am".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))
@@ -8219,7 +8215,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(4))
+        app.handle_key(crossterm::event::KeyCode::F(5))
             .expect("focus should switch to due date");
         for _ in 0.."YYYY-MM-DD".len() {
             app.handle_key(crossterm::event::KeyCode::Backspace).ok();
@@ -8228,7 +8224,7 @@ mod tests {
             app.handle_key(crossterm::event::KeyCode::Char(character))
                 .expect("date typing should succeed");
         }
-        app.handle_key(crossterm::event::KeyCode::F(6))
+        app.handle_key(crossterm::event::KeyCode::F(7))
             .expect("focus should switch to due time");
         for character in "3pm".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))
@@ -8489,15 +8485,15 @@ mod tests {
             vec!["Press # for selecting a project".to_string()]
         );
 
-        app.handle_key(crossterm::event::KeyCode::F(4))
+        app.handle_key(crossterm::event::KeyCode::F(5))
             .expect("focus should switch");
         let editor = app.task_editor_view().expect("editor should be visible");
         assert_eq!(
             editor.preview_panel.tips,
-            vec!["Type YYYY-MM-DD or use F8 to pick from calendar".to_string()]
+            vec!["Type YYYY-MM-DD or use F9 to pick from calendar".to_string()]
         );
 
-        app.handle_key(crossterm::event::KeyCode::F(7))
+        app.handle_key(crossterm::event::KeyCode::F(8))
             .expect("focus should switch");
         let editor = app.task_editor_view().expect("editor should be visible");
         assert_eq!(
@@ -8522,7 +8518,7 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
 
-        app.handle_key(crossterm::event::KeyCode::F(5))
+        app.handle_key(crossterm::event::KeyCode::F(6))
             .expect("focus should switch to priority");
         app.handle_key(crossterm::event::KeyCode::Backspace)
             .expect("priority edit should succeed");
@@ -8597,7 +8593,7 @@ mod tests {
                 .expect("typing should succeed");
         }
 
-        app.handle_key(crossterm::event::KeyCode::F(5))
+        app.handle_key(crossterm::event::KeyCode::F(6))
             .expect("focus should switch to priority");
         app.handle_key(crossterm::event::KeyCode::Backspace)
             .expect("priority edit should succeed");
@@ -8643,7 +8639,7 @@ mod tests {
             None
         );
 
-        app.handle_key(crossterm::event::KeyCode::F(3))
+        app.handle_key(crossterm::event::KeyCode::F(4))
             .expect("focus should switch to tags");
         for character in "@work".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))
@@ -8702,7 +8698,7 @@ mod tests {
                 .expect("typing should succeed");
         }
 
-        app.handle_key(crossterm::event::KeyCode::F(2))
+        app.handle_key(crossterm::event::KeyCode::F(3))
             .expect("focus should switch to project");
         app.handle_key(crossterm::event::KeyCode::Backspace)
             .expect("project edit should succeed");
@@ -9597,7 +9593,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(2))
+        app.handle_key(crossterm::event::KeyCode::F(3))
             .expect("project field should focus");
         let editor = app.task_editor_view().expect("editor should stay open");
         assert!(editor.focus.project);
@@ -10442,7 +10438,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(5))
+        app.handle_key(crossterm::event::KeyCode::F(6))
             .expect("focus should switch to priority");
         app.handle_key(crossterm::event::KeyCode::Backspace)
             .expect("backspace should edit priority");
@@ -10820,7 +10816,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(7))
+        app.handle_key(crossterm::event::KeyCode::F(8))
             .expect("focus should switch to recurrence");
         for character in "every day".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))
