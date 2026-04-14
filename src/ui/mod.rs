@@ -1676,6 +1676,18 @@ fn render_task_input_popup(
             dropdown_height,
         );
         render_task_project_suggestions(frame, dropdown_area, input, palette);
+    } else if !input.priority_suggestions.is_empty() {
+        let dropdown_height = input.priority_suggestions.len().min(4) as u16 + 2;
+        let visible_width = input_area.width.saturating_sub(4) as usize;
+        let cursor_col = editor_cursor_display_column(&input.value, input.cursor, visible_width);
+        let dropdown_area = project_parent_dropdown_rect(
+            frame.area(),
+            input_area,
+            cursor_col as u16,
+            project_parent_dropdown_width(input.priority_suggestions.as_slice()),
+            dropdown_height,
+        );
+        render_task_priority_suggestions(frame, dropdown_area, input, palette);
     }
 }
 
@@ -2788,6 +2800,58 @@ fn render_task_tag_suggestions(
                 Block::default()
                     .title(Span::styled(
                         "Tag",
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            )
+            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+        area,
+    );
+}
+
+fn render_task_priority_suggestions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    input: &TaskInputView,
+    palette: ThemePalette,
+) {
+    let content_width = area.width.saturating_sub(2) as usize;
+    let lines = input
+        .priority_suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let style = if index
+                == input
+                    .selected_priority_suggestion
+                    .min(input.priority_suggestions.len().saturating_sub(1))
+            {
+                Style::default()
+                    .fg(palette.text)
+                    .bg(palette.border)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            let value = ellipsize_end(suggestion, content_width);
+            let padding = " ".repeat(content_width.saturating_sub(value.width()));
+            Line::from(vec![Span::styled(format!("{value}{padding}"), style)])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        "Priority",
                         Style::default()
                             .fg(palette.accent)
                             .add_modifier(Modifier::BOLD),

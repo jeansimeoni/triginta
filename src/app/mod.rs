@@ -610,6 +610,8 @@ pub struct TaskInputView {
     pub selected_project_suggestion: usize,
     pub tag_suggestions: Vec<String>,
     pub selected_tag_suggestion: usize,
+    pub priority_suggestions: Vec<String>,
+    pub selected_priority_suggestion: usize,
     pub due_preview: Option<TaskDuePreviewView>,
     pub preview_panel: FormPreviewPanelView,
 }
@@ -1603,6 +1605,16 @@ impl App {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let priority_suggestions = self
+                .active_priority_query(input.value.as_str(), input.cursor)
+                .map(|(_, _, query)| {
+                    self.priority_suggestions(query.as_str())
+                        .into_iter()
+                        .take(4)
+                        .map(|priority| priority.to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             let due_preview = self
                 .task_input_parse(input.value.as_str(), input.project_id)
                 .due
@@ -1632,6 +1644,10 @@ impl App {
                 selected_tag_suggestion: input
                     .tag_suggestion_index
                     .min(tag_suggestions.len().saturating_sub(1)),
+                priority_suggestions: priority_suggestions.clone(),
+                selected_priority_suggestion: input
+                    .suggestion_index
+                    .min(priority_suggestions.len().saturating_sub(1)),
                 due_preview: due_preview.clone(),
                 preview_panel: Self::task_input_preview_panel(
                     show_project_assignment,
@@ -2941,6 +2957,12 @@ impl App {
             return false;
         }
         let suggestions = self.priority_suggestions(editor.priority_input.as_str());
+        if Self::parse_priority_input(editor.priority_input.as_str()).is_some()
+            && suggestions.len() == 1
+            && suggestions[0].eq_ignore_ascii_case(editor.priority_input.trim())
+        {
+            return false;
+        }
         let Some(priority) = suggestions
             .get(
                 editor
@@ -3553,6 +3575,38 @@ impl App {
         true
     }
 
+    fn accept_task_input_priority_suggestion(&self, input: &mut TaskInputState) -> bool {
+        let Some((start, end, query)) =
+            self.active_priority_query(input.value.as_str(), input.cursor)
+        else {
+            return false;
+        };
+        let suggestions = self.priority_suggestions(query.as_str());
+        if Self::parse_priority_input(query.as_str()).is_some()
+            && suggestions.len() == 1
+            && suggestions[0].eq_ignore_ascii_case(query.trim())
+        {
+            return false;
+        }
+        let Some(priority) = suggestions
+            .get(
+                input
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        else {
+            return false;
+        };
+
+        input
+            .value
+            .replace_range(start..end, format!("{priority} ").as_str());
+        input.cursor = (start + priority.len() + 1).min(input.value.len());
+        input.suggestion_index = 0;
+        true
+    }
+
     fn accept_task_editor_title_project_suggestion(
         &self,
         editor: &mut TaskEditorState,
@@ -3729,6 +3783,12 @@ impl App {
             return false;
         };
         let suggestions = self.priority_suggestions(query.as_str());
+        if Self::parse_priority_input(query.as_str()).is_some()
+            && suggestions.len() == 1
+            && suggestions[0].eq_ignore_ascii_case(query.trim())
+        {
+            return false;
+        }
         let Some(priority) = suggestions
             .get(
                 editor
@@ -6065,7 +6125,12 @@ impl App {
                 } else {
                     self.accept_or_create_task_input_tag_token(&mut input, now)?
                 };
-                let _ = accepted_project || accepted_tag;
+                let accepted_priority = if accepted_project || accepted_tag {
+                    false
+                } else {
+                    self.accept_task_input_priority_suggestion(&mut input)
+                };
+                let _ = accepted_project || accepted_tag || accepted_priority;
                 self.task_input = Some(input);
             }
             KeyCode::Down => {
@@ -6082,6 +6147,14 @@ impl App {
                 {
                     let last_index = self.tag_suggestions(query.as_str()).len().saturating_sub(1);
                     input.tag_suggestion_index = (input.tag_suggestion_index + 1).min(last_index);
+                } else if let Some((_, _, query)) =
+                    self.active_priority_query(input.value.as_str(), input.cursor)
+                {
+                    let last_index = self
+                        .priority_suggestions(query.as_str())
+                        .len()
+                        .saturating_sub(1);
+                    input.suggestion_index = (input.suggestion_index + 1).min(last_index);
                 }
                 self.task_input = Some(input);
             }
@@ -6096,6 +6169,11 @@ impl App {
                     .is_some()
                 {
                     input.tag_suggestion_index = input.tag_suggestion_index.saturating_sub(1);
+                } else if self
+                    .active_priority_query(input.value.as_str(), input.cursor)
+                    .is_some()
+                {
+                    input.suggestion_index = input.suggestion_index.saturating_sub(1);
                 }
                 self.task_input = Some(input);
             }
@@ -6112,6 +6190,10 @@ impl App {
                     })
                     && self.accept_or_create_task_input_tag_token(&mut input, now)?
                 {
+                    self.task_input = Some(input);
+                    return Ok(true);
+                }
+                if self.accept_task_input_priority_suggestion(&mut input) {
                     self.task_input = Some(input);
                     return Ok(true);
                 }
@@ -8597,6 +8679,44 @@ mod tests {
             .task_input_view()
             .expect("input popup should stay open after tag acceptance");
         assert_eq!(input.value, "@Work @Next Action ");
+    }
+
+    #[test]
+    fn create_popup_title_p_query_shows_priority_suggestions() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Draft docs p".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let input = app.task_input_view().expect("input popup should be open");
+        assert!(!input.priority_suggestions.is_empty());
+    }
+
+    #[test]
+    fn create_popup_enter_accepts_priority_suggestion_before_submitting_task() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Draft docs p".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should accept priority suggestion first");
+        let input = app
+            .task_input_view()
+            .expect("input popup should stay open after priority acceptance");
+        assert_eq!(input.value, "Draft docs p1 ");
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("second enter should submit task");
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "Draft docs");
+        assert_eq!(task.priority, TaskPriority::P1);
     }
 
     #[test]
