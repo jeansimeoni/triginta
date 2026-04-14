@@ -1193,6 +1193,10 @@ const TASKS_SHORTCUTS: &[ShortcutTip] = &[
         description: "sort/filter",
     },
     ShortcutTip {
+        keys: "PgUp/PgDn",
+        description: "details scroll",
+    },
+    ShortcutTip {
         keys: "/",
         description: "search",
     },
@@ -7182,20 +7186,6 @@ impl App {
                     && self.active_right_panel_tab == RightPanelTab::Tasks =>
             {
                 self.move_task_selection(-1);
-            }
-            KeyCode::Char('j')
-                if modifiers.contains(KeyModifiers::CONTROL)
-                    && self.focused_panel == PanelFocus::RightPane
-                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
-            {
-                self.scroll_task_details(1);
-            }
-            KeyCode::Char('k')
-                if modifiers.contains(KeyModifiers::CONTROL)
-                    && self.focused_panel == PanelFocus::RightPane
-                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
-            {
-                self.scroll_task_details(-1);
             }
             KeyCode::PageDown
                 if self.focused_panel == PanelFocus::RightPane

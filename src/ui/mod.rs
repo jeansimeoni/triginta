@@ -601,6 +601,7 @@ fn render_task_details_panel(
             format!("{} Task Details", symbols.details),
             Style::default().fg(palette.accent),
         ))
+        .title_bottom(task_details_footer_hints(palette))
         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
         .border_style(Style::default().fg(palette.border));
     let inner = block.inner(area);
@@ -708,6 +709,14 @@ fn render_task_details_panel(
             .thumb_style(Style::default().fg(palette.subtle_text));
         frame.render_stateful_widget(scrollbar, sections[1], &mut scrollbar_state);
     }
+}
+
+fn task_details_footer_hints(palette: ThemePalette) -> Line<'static> {
+    Line::from(vec![Span::styled(
+        "PgUp/PgDn scroll",
+        Style::default().fg(palette.subtle_text),
+    )])
+    .right_aligned()
 }
 
 fn task_status_symbol(status: TaskStatus, symbols: Symbols) -> &'static str {
