@@ -5,9 +5,9 @@ use chrono::{DateTime, Local};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
-    DayHistorySummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate, SessionEntry,
-    SessionKind, SessionOutcome, Tag, TagColor, TagId, TagUpdate, Task, TaskDue, TaskId,
-    TaskPriority, TaskStatus, TaskUpdate,
+    DayHistorySummary, Filter, FilterColor, FilterId, FilterUpdate, HistoryStats, Project,
+    ProjectColor, ProjectId, ProjectUpdate, SessionEntry, SessionKind, SessionOutcome, Tag,
+    TagColor, TagId, TagUpdate, Task, TaskDue, TaskId, TaskPriority, TaskStatus, TaskUpdate,
 };
 
 // Keeping the schema as a string literal makes bootstrap simple for this early
@@ -56,6 +56,21 @@ CREATE TABLE IF NOT EXISTS tags (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name_active
     ON tags(lower(name))
+    WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS filters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    query TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT 'charcoal',
+    is_favorite INTEGER NOT NULL DEFAULT 0,
+    item_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_filters_name_active
+    ON filters(lower(name))
     WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS task_tags (
@@ -145,6 +160,21 @@ pub trait TagRepository {
     fn delete(&self, tag_id: TagId, now: DateTime<Local>) -> Result<()>;
     fn list_task_tag_links(&self) -> Result<Vec<(TaskId, TagId)>>;
     fn replace_task_tags(&self, task_id: TaskId, tag_ids: &[TagId]) -> Result<()>;
+}
+
+pub trait FilterRepository {
+    fn list_all(&self) -> Result<Vec<Filter>>;
+    fn create(
+        &self,
+        name: &str,
+        query: &str,
+        color: FilterColor,
+        is_favorite: bool,
+        now: DateTime<Local>,
+    ) -> Result<Filter>;
+    fn update(&self, filter_id: FilterId, update: &FilterUpdate) -> Result<Filter>;
+    fn move_within_list(&self, filter_id: FilterId, direction: isize) -> Result<()>;
+    fn delete(&self, filter_id: FilterId, now: DateTime<Local>) -> Result<()>;
 }
 
 pub trait PomodoroRepository {
@@ -292,6 +322,12 @@ impl Database {
 
     pub fn tag_repository(&self) -> SqliteTagRepository<'_> {
         SqliteTagRepository {
+            connection: &self.connection,
+        }
+    }
+
+    pub fn filter_repository(&self) -> SqliteFilterRepository<'_> {
+        SqliteFilterRepository {
             connection: &self.connection,
         }
     }
@@ -1012,6 +1048,188 @@ impl SqliteTagRepository<'_> {
     }
 }
 
+pub struct SqliteFilterRepository<'a> {
+    connection: &'a Connection,
+}
+
+impl FilterRepository for SqliteFilterRepository<'_> {
+    fn list_all(&self) -> Result<Vec<Filter>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, query, color, is_favorite, item_order, created_at, deleted_at
+             FROM filters
+             ORDER BY item_order ASC, name COLLATE NOCASE ASC, id ASC",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(Filter {
+                id: FilterId(row.get(0)?),
+                name: row.get(1)?,
+                query: row.get(2)?,
+                color: FilterColor::from_db(row.get::<_, String>(3)?.as_str()),
+                is_favorite: row.get::<_, i64>(4)? != 0,
+                item_order: row.get(5)?,
+                created_at: row.get(6)?,
+                deleted_at: row.get(7)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load filters")
+    }
+
+    fn create(
+        &self,
+        name: &str,
+        query: &str,
+        color: FilterColor,
+        is_favorite: bool,
+        now: DateTime<Local>,
+    ) -> Result<Filter> {
+        let item_order = self.next_item_order()?;
+        self.connection
+            .execute(
+                "INSERT INTO filters(name, query, color, is_favorite, item_order, created_at, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+                params![
+                    name,
+                    query,
+                    color.as_str(),
+                    if is_favorite { 1_i64 } else { 0_i64 },
+                    item_order,
+                    now
+                ],
+            )
+            .context("failed to create filter")?;
+        self.load_filter(FilterId(self.connection.last_insert_rowid()))?
+            .context("created filter could not be reloaded")
+    }
+
+    fn update(&self, filter_id: FilterId, update: &FilterUpdate) -> Result<Filter> {
+        let current = self
+            .load_filter(filter_id)?
+            .context("filter to update does not exist")?;
+        if current.deleted_at.is_some() {
+            bail!("filter is deleted");
+        }
+
+        self.connection
+            .execute(
+                "UPDATE filters
+                 SET name = ?1, query = ?2, color = ?3, is_favorite = ?4
+                 WHERE id = ?5",
+                params![
+                    update.name,
+                    update.query,
+                    update.color.as_str(),
+                    if update.is_favorite { 1_i64 } else { 0_i64 },
+                    filter_id.0
+                ],
+            )
+            .with_context(|| format!("failed to update filter {}", filter_id.0))?;
+
+        self.load_filter(filter_id)?
+            .context("updated filter could not be reloaded")
+    }
+
+    fn move_within_list(&self, filter_id: FilterId, direction: isize) -> Result<()> {
+        if direction == 0 {
+            return Ok(());
+        }
+        let Some(filter) = self.load_filter(filter_id)? else {
+            return Ok(());
+        };
+        if filter.deleted_at.is_some() {
+            return Ok(());
+        }
+
+        let mut ids = self.active_filter_ids()?;
+        let Some(current_index) = ids.iter().position(|id| *id == filter_id) else {
+            return Ok(());
+        };
+        let target_index = (current_index as isize + direction)
+            .clamp(0, ids.len().saturating_sub(1) as isize) as usize;
+        if target_index == current_index {
+            return Ok(());
+        }
+
+        ids.remove(current_index);
+        ids.insert(target_index, filter_id);
+        let mut statement = self
+            .connection
+            .prepare("UPDATE filters SET item_order = ?1 WHERE id = ?2")?;
+        for (index, id) in ids.iter().enumerate() {
+            statement.execute(params![index as i64 + 1, id.0])?;
+        }
+        Ok(())
+    }
+
+    fn delete(&self, filter_id: FilterId, now: DateTime<Local>) -> Result<()> {
+        let filter = self
+            .load_filter(filter_id)?
+            .context("filter to delete does not exist")?;
+        if filter.deleted_at.is_some() {
+            return Ok(());
+        }
+        self.connection
+            .execute(
+                "UPDATE filters SET deleted_at = ?1 WHERE id = ?2",
+                params![now, filter_id.0],
+            )
+            .with_context(|| format!("failed to soft-delete filter {}", filter_id.0))?;
+        Ok(())
+    }
+}
+
+impl SqliteFilterRepository<'_> {
+    fn load_filter(&self, filter_id: FilterId) -> Result<Option<Filter>> {
+        self.connection
+            .query_row(
+                "SELECT id, name, query, color, is_favorite, item_order, created_at, deleted_at
+                 FROM filters
+                 WHERE id = ?1",
+                params![filter_id.0],
+                |row| {
+                    Ok(Filter {
+                        id: FilterId(row.get(0)?),
+                        name: row.get(1)?,
+                        query: row.get(2)?,
+                        color: FilterColor::from_db(row.get::<_, String>(3)?.as_str()),
+                        is_favorite: row.get::<_, i64>(4)? != 0,
+                        item_order: row.get(5)?,
+                        created_at: row.get(6)?,
+                        deleted_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load filter")
+    }
+
+    fn next_item_order(&self) -> Result<i64> {
+        self.connection
+            .query_row(
+                "SELECT COALESCE(MAX(item_order), -1) + 1
+                 FROM filters
+                 WHERE deleted_at IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to calculate next filter order")
+    }
+
+    fn active_filter_ids(&self) -> Result<Vec<FilterId>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id
+             FROM filters
+             WHERE deleted_at IS NULL
+             ORDER BY item_order ASC, name COLLATE NOCASE ASC, id ASC",
+        )?;
+        let rows = statement.query_map([], |row| Ok(FilterId(row.get(0)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load active filter ids")
+    }
+}
+
 pub struct SqlitePomodoroRepository<'a> {
     connection: &'a Connection,
 }
@@ -1219,11 +1437,14 @@ mod tests {
     use chrono::{Local, NaiveDate};
 
     use crate::domain::{
-        ProjectColor, ProjectUpdate, TagColor, TagUpdate, TaskDue, TaskPriority, TaskStatus,
-        TaskUpdate,
+        FilterColor, FilterUpdate, ProjectColor, ProjectUpdate, TagColor, TagUpdate, TaskDue,
+        TaskPriority, TaskStatus, TaskUpdate,
     };
 
-    use super::{Database, PomodoroRepository, ProjectRepository, TagRepository, TaskRepository};
+    use super::{
+        Database, FilterRepository, PomodoroRepository, ProjectRepository, TagRepository,
+        TaskRepository,
+    };
 
     #[test]
     fn in_memory_database_bootstraps_empty_state() -> Result<()> {
@@ -1566,6 +1787,54 @@ mod tests {
         tags.delete(beta.id, Local::now())?;
         let links_after_delete = tags.list_task_tag_links()?;
         assert_eq!(links_after_delete, vec![(task.id, alpha.id)]);
+        Ok(())
+    }
+
+    #[test]
+    fn filter_repository_supports_crud_and_reorder() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let filters = database.filter_repository();
+
+        let alpha = filters.create("alpha", "@work", FilterColor::Blue, false, Local::now())?;
+        let beta = filters.create(
+            "beta",
+            "today & !@personal",
+            FilterColor::Red,
+            true,
+            Local::now(),
+        )?;
+
+        let updated = filters.update(
+            beta.id,
+            &FilterUpdate {
+                name: "beta-updated".to_string(),
+                query: "p1 | overdue".to_string(),
+                color: FilterColor::Green,
+                is_favorite: false,
+            },
+        )?;
+        assert_eq!(updated.name, "beta-updated");
+        assert_eq!(updated.query, "p1 | overdue");
+        assert_eq!(updated.color, FilterColor::Green);
+        assert!(!updated.is_favorite);
+
+        filters.move_within_list(beta.id, -1)?;
+        let ordered = filters
+            .list_all()?
+            .into_iter()
+            .filter(|filter| filter.deleted_at.is_none())
+            .map(|filter| filter.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, vec![beta.id, alpha.id]);
+
+        filters.delete(beta.id, Local::now())?;
+        let active = filters
+            .list_all()?
+            .into_iter()
+            .filter(|filter| filter.deleted_at.is_none())
+            .map(|filter| filter.id)
+            .collect::<Vec<_>>();
+        assert_eq!(active, vec![alpha.id]);
         Ok(())
     }
 }

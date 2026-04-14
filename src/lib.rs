@@ -5,6 +5,7 @@
 pub mod app;
 pub mod config;
 pub mod domain;
+pub mod filters;
 pub mod integrations;
 pub mod storage;
 pub mod task_nlp;
