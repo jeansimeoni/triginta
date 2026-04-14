@@ -33,6 +33,8 @@ project_list_sort = "manual"
 persist_project_list_sort = false
 tag_list_sort = "manual"
 persist_tag_list_sort = false
+filter_list_sort = "manual"
+persist_filter_list_sort = false
 hide_completed_tasks = true
 
 [timer]
@@ -53,6 +55,8 @@ ui:
   persist_project_list_sort: false
   tag_list_sort: manual
   persist_tag_list_sort: false
+  filter_list_sort: manual
+  persist_filter_list_sort: false
   hide_completed_tasks: true
 
 timer:
@@ -147,8 +151,8 @@ Default:
 
 - `false`
 
-`ui.tag_list_sort` controls the default tag-list ordering used in panel 4
-(Filters & Tags tab in the Navigation panel).
+`ui.tag_list_sort` controls the default tag-list ordering used in panel 5
+(Tags tab in the Navigation panel).
 
 Allowed values:
 
@@ -164,8 +168,37 @@ Default:
 
 `ui.persist_tag_list_sort` controls startup behavior for tag sorting.
 When `false` (default), Triginta always starts with `manual` sorting in the
-Filters & Tags tab, regardless of the previously selected sort. When `true`,
+Tags tab, regardless of the previously selected sort. When `true`,
 Triginta persists and restores the selected tag sort order.
+
+Allowed values:
+
+- `true`
+- `false`
+
+Default:
+
+- `false`
+
+`ui.filter_list_sort` controls the default filter-list ordering used in panel 6
+(Filters tab in the Navigation panel).
+
+Allowed values:
+
+- `name-asc`
+- `name-desc`
+- `task-count-asc`
+- `task-count-desc`
+- `manual`
+
+Default:
+
+- `manual`
+
+`ui.persist_filter_list_sort` controls startup behavior for filter sorting.
+When `false` (default), Triginta always starts with `manual` sorting in the
+Filters tab, regardless of the previously selected sort. When `true`,
+Triginta persists and restores the selected filter sort order.
 
 Allowed values:
 
@@ -281,3 +314,15 @@ You can combine both debug overrides:
 ```bash
 mise exec -- cargo run -- --ascii --short-timer
 ```
+
+### Reset local debug data
+
+```bash
+mise exec -- cargo run -- --reset-data
+```
+
+This removes the local debug SQLite files before startup:
+
+- `triginta-dbg.sqlite3`
+- `triginta-dbg.sqlite3-wal`
+- `triginta-dbg.sqlite3-shm`

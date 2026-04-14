@@ -12,9 +12,11 @@ fn debug_run_options() -> triginta::app::RunOptions {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let force_ascii = args.iter().any(|arg| arg == "--ascii");
     let force_short_timer = args.iter().any(|arg| arg == "--short-timer");
+    let reset_data = args.iter().any(|arg| arg == "--reset-data");
     triginta::app::RunOptions {
         force_ascii,
         force_short_timer,
+        reset_data,
     }
 }
 

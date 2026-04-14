@@ -42,7 +42,7 @@ impl AppPaths {
         Ok(Self {
             config_dir: config_dir.to_path_buf(),
             data_dir: data_dir.to_path_buf(),
-            db_path: data_dir.join("triginta.sqlite3"),
+            db_path: data_dir.join(db_filename()),
             log_path: data_dir.join("logs").join("triginta.log"),
             config_toml_path: config_dir.join("config.toml"),
             config_yaml_path: config_dir.join("config.yaml"),
@@ -82,6 +82,16 @@ impl AppPaths {
             self.config_yml_path.clone(),
         ]
     }
+}
+
+#[cfg(debug_assertions)]
+const fn db_filename() -> &'static str {
+    "triginta-dbg.sqlite3"
+}
+
+#[cfg(not(debug_assertions))]
+const fn db_filename() -> &'static str {
+    "triginta.sqlite3"
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -239,6 +249,51 @@ impl TagSortOrder {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilterSortOrder {
+    NameAsc,
+    NameDesc,
+    TaskCountAsc,
+    TaskCountDesc,
+    #[default]
+    Manual,
+}
+
+impl FilterSortOrder {
+    const ALL: [Self; 5] = [
+        Self::NameAsc,
+        Self::NameDesc,
+        Self::TaskCountAsc,
+        Self::TaskCountDesc,
+        Self::Manual,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NameAsc => "Name A-Z",
+            Self::NameDesc => "Name Z-A",
+            Self::TaskCountAsc => "Task Count ↑",
+            Self::TaskCountDesc => "Task Count ↓",
+            Self::Manual => "Manual",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::NameAsc => "name ↑",
+            Self::NameDesc => "name ↓",
+            Self::TaskCountAsc => "tasks ↑",
+            Self::TaskCountDesc => "tasks ↓",
+            Self::Manual => "manual",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimerSettings {
     pub pomodoro_length: Duration,
@@ -310,6 +365,8 @@ pub struct UiConfig {
     pub persist_project_list_sort: bool,
     pub tag_list_sort: TagSortOrder,
     pub persist_tag_list_sort: bool,
+    pub filter_list_sort: FilterSortOrder,
+    pub persist_filter_list_sort: bool,
     pub hide_completed_tasks: bool,
 }
 
@@ -323,6 +380,8 @@ impl Default for UiConfig {
             persist_project_list_sort: false,
             tag_list_sort: TagSortOrder::default(),
             persist_tag_list_sort: false,
+            filter_list_sort: FilterSortOrder::default(),
+            persist_filter_list_sort: false,
             hide_completed_tasks: true,
         }
     }
@@ -602,7 +661,7 @@ mod tests {
 
     use super::{
         AppConfig, AppPaths, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings,
-        load_app_config, parse_duration_string, save_app_config,
+        db_filename, load_app_config, parse_duration_string, save_app_config,
     };
 
     #[test]
@@ -614,7 +673,7 @@ mod tests {
         assert_eq!(paths.config_dir, PathBuf::from("/tmp/triginta-test/config"));
         assert_eq!(
             paths.db_path,
-            PathBuf::from("/tmp/triginta-test/triginta.sqlite3")
+            PathBuf::from(format!("/tmp/triginta-test/{}", db_filename()))
         );
         assert_eq!(
             paths.log_path,

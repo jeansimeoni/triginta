@@ -95,7 +95,7 @@ Current key bindings:
 
 - `Tab`, `l`, or `Right Arrow`: next right-side tab
 - `Shift+Tab`, `h`, or `Left Arrow`: previous right-side tab
-- `1` through `5`: focus a panel
+- `1` through `8`: focus a panel/tab target
 - `s`, `Space`, or `Enter`: start or resume the timer when the timer panel is focused
 - `p`: pause the timer when the timer panel is focused
 - `x` or `Esc`: void the current timer when the timer panel is focused
@@ -105,6 +105,13 @@ Current layout:
 
 - Left column: timer, daily history, navigation, favorites
 - Right column: tasks/details tab or statistics tab
+
+Navigation sidebar tabs:
+
+- `[3]` Navigation
+- `[4]` Projects
+- `[5]` Tags
+- `[6]` Filters
 
 ## Data And Logging
 
@@ -120,7 +127,8 @@ When `TRIGINTA_DATA_DIR` is set, Triginta uses this layout:
 - Data directory: `$TRIGINTA_DATA_DIR`
 - Config directory: `$TRIGINTA_DATA_DIR/config`
 - App config file: `$TRIGINTA_DATA_DIR/config/config.toml` or YAML equivalent
-- SQLite database: `$TRIGINTA_DATA_DIR/triginta.sqlite3`
+- SQLite database (release builds): `$TRIGINTA_DATA_DIR/triginta.sqlite3`
+- SQLite database (debug builds): `$TRIGINTA_DATA_DIR/triginta-dbg.sqlite3`
 - Log file: `$TRIGINTA_DATA_DIR/logs/triginta.log`
 
 Example:
@@ -157,6 +165,7 @@ Debug-only overrides:
 
 - `--ascii`: force ASCII glyphs regardless of config
 - `--short-timer`: force `30s/10s/20s` timer lengths for testing
+- `--reset-data`: delete local debug SQLite data files before startup
 
 ## Project Layout
 
