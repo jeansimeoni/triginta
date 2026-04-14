@@ -1615,15 +1615,19 @@ impl App {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let due_preview = self
-                .task_input_parse(input.value.as_str(), input.project_id)
-                .due
-                .map(|due| TaskDuePreviewView {
-                    date: due.date,
-                    datetime: due.datetime,
-                    string: due.string,
-                    is_recurring: due.is_recurring,
-                });
+            let parsed_draft = self.task_input_parse(input.value.as_str(), input.project_id);
+            let ParsedTaskDraft {
+                due,
+                tag_queries,
+                priority,
+                ..
+            } = parsed_draft;
+            let due_preview = due.map(|due| TaskDuePreviewView {
+                date: due.date,
+                datetime: due.datetime,
+                string: due.string,
+                is_recurring: due.is_recurring,
+            });
             let project_name = self
                 .project_name(input.project_id)
                 .unwrap_or("Inbox")
@@ -1652,6 +1656,8 @@ impl App {
                 preview_panel: Self::task_input_preview_panel(
                     show_project_assignment,
                     project_name.as_str(),
+                    tag_queries.as_slice(),
+                    priority,
                     due_preview.as_ref(),
                 ),
             }
@@ -1883,11 +1889,24 @@ impl App {
     fn task_input_preview_panel(
         show_project_assignment: bool,
         project_name: &str,
+        tag_queries: &[String],
+        priority: TaskPriority,
         due_preview: Option<&TaskDuePreviewView>,
     ) -> FormPreviewPanelView {
         let mut preview_lines = Vec::new();
         if show_project_assignment {
             preview_lines.push(PreviewLineView::key_value("Project", project_name));
+        }
+        if !tag_queries.is_empty() {
+            let tags = tag_queries
+                .iter()
+                .map(|query| format!("@{}", query.trim()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            preview_lines.push(PreviewLineView::key_value("Tags", tags));
+        }
+        if priority != TaskPriority::P4 {
+            preview_lines.push(PreviewLineView::key_value("Priority", priority.label()));
         }
         if let Some(due) = due_preview {
             preview_lines.push(PreviewLineView::key_value(
@@ -1936,15 +1955,15 @@ impl App {
         focused_field: TaskEditorField,
     ) -> FormPreviewPanelView {
         let mut preview_lines = vec![PreviewLineView::key_value("Project", project_value)];
-        preview_lines.push(PreviewLineView::key_value(
-            "Tags",
-            if tags_value.trim().is_empty() {
-                "-".to_string()
-            } else {
-                tags_value.trim().to_string()
-            },
-        ));
-        preview_lines.push(PreviewLineView::key_value("Priority", priority.label()));
+        if !tags_value.trim().is_empty() {
+            preview_lines.push(PreviewLineView::key_value(
+                "Tags",
+                tags_value.trim().to_string(),
+            ));
+        }
+        if priority != TaskPriority::P4 {
+            preview_lines.push(PreviewLineView::key_value("Priority", priority.label()));
+        }
         if let Some(due) = due_preview {
             preview_lines.push(PreviewLineView::emphasized_key_value(
                 "Summary",
@@ -7219,6 +7238,17 @@ mod tests {
         }
     }
 
+    fn preview_value_for_label<'a>(lines: &'a [PreviewLineView], label: &str) -> Option<&'a str> {
+        lines.iter().find_map(|line| match line {
+            PreviewLineView::KeyValue {
+                label: line_label,
+                value,
+                ..
+            } if line_label == label => Some(value.as_str()),
+            _ => None,
+        })
+    }
+
     fn test_app() -> App {
         let config = AppConfig::default();
         let database = Database::open_in_memory().expect("in-memory database should open");
@@ -7941,6 +7971,51 @@ mod tests {
     }
 
     #[test]
+    fn task_input_preview_panel_shows_tags_and_priority_only_when_set() {
+        let mut app = test_app();
+        app.database
+            .tag_repository()
+            .create("work", TagColor::Blue, false, Local::now())
+            .expect("tag should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Ship report p2 @work tomorrow".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let input = app.task_input_view().expect("input popup should be open");
+        assert_eq!(
+            preview_value_for_label(&input.preview_panel.preview_lines, "Tags"),
+            Some("@work")
+        );
+        assert_eq!(
+            preview_value_for_label(&input.preview_panel.preview_lines, "Priority"),
+            Some("P2")
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Esc)
+            .expect("popup should close");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Ship report tomorrow".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        let input = app.task_input_view().expect("input popup should be open");
+        assert_eq!(
+            preview_value_for_label(&input.preview_panel.preview_lines, "Tags"),
+            None
+        );
+        assert_eq!(
+            preview_value_for_label(&input.preview_panel.preview_lines, "Priority"),
+            None
+        );
+    }
+
+    #[test]
     fn task_editor_preview_panel_switches_tip_by_active_field() {
         let mut app = test_app();
         app.handle_key(crossterm::event::KeyCode::Char('7'))
@@ -8014,7 +8089,10 @@ mod tests {
         }
 
         let editor = app.task_editor_view().expect("editor should be visible");
-        assert_key_value_preview_line(&editor.preview_panel.preview_lines[2], "Priority", "P2");
+        assert_eq!(
+            preview_value_for_label(&editor.preview_panel.preview_lines, "Priority"),
+            Some("P2")
+        );
     }
 
     #[test]
@@ -8081,7 +8159,60 @@ mod tests {
         let editor = app.task_editor_view().expect("editor should be visible");
         assert_eq!(editor.priority_value, "p3");
         assert_eq!(editor.title_value, "Prepare deck");
-        assert_key_value_preview_line(&editor.preview_panel.preview_lines[2], "Priority", "P3");
+        assert_eq!(
+            preview_value_for_label(&editor.preview_panel.preview_lines, "Priority"),
+            Some("P3")
+        );
+    }
+
+    #[test]
+    fn task_editor_preview_hides_empty_tags_and_default_priority() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Prepare deck".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_eq!(
+            preview_value_for_label(&editor.preview_panel.preview_lines, "Tags"),
+            None
+        );
+        assert_eq!(
+            preview_value_for_label(&editor.preview_panel.preview_lines, "Priority"),
+            None
+        );
+
+        app.handle_key(crossterm::event::KeyCode::F(3))
+            .expect("focus should switch to tags");
+        for character in "@work".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::F(1))
+            .expect("focus should switch to title");
+        for character in " p1".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_eq!(
+            preview_value_for_label(&editor.preview_panel.preview_lines, "Tags"),
+            Some("@work")
+        );
+        assert_eq!(
+            preview_value_for_label(&editor.preview_panel.preview_lines, "Priority"),
+            Some("P1")
+        );
     }
 
     #[test]

@@ -1640,13 +1640,19 @@ fn render_task_input_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let total_height = 11;
-    let area = centered_rect(frame.area(), 72, total_height);
+    let base_total_height = 11;
+    let input_height = 3;
+    let preview_height = preview_panel_required_height(&input.preview_panel, 3);
+    let total_height = input_height + preview_height;
+    let area = anchored_form_rect(frame.area(), 72, base_total_height, total_height);
     frame.render_widget(Clear, area);
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Length(8)])
+        .constraints([
+            Constraint::Length(input_height),
+            Constraint::Length(preview_height),
+        ])
         .split(area);
     render_task_input_box(frame, sections[0], input, symbols, palette);
     render_form_preview_panel(frame, sections[1], &input.preview_panel, palette);
@@ -1782,12 +1788,23 @@ fn render_task_editor_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let area = centered_rect(frame.area(), 96, 24);
+    let base_total_height = 24;
+    let form_height = 17;
+    let preview_height = preview_panel_required_height(&editor.preview_panel, 3);
+    let area = anchored_form_rect(
+        frame.area(),
+        96,
+        base_total_height,
+        form_height + preview_height,
+    );
     frame.render_widget(Clear, area);
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(17), Constraint::Length(6)])
+        .constraints([
+            Constraint::Length(form_height),
+            Constraint::Length(preview_height),
+        ])
         .split(area);
     let form_block = Block::default()
         .title(Span::styled(
@@ -2381,11 +2398,22 @@ fn render_project_editor_popup(
 ) {
     let show_parent_dropdown =
         (editor.focus.name || editor.focus.parent) && !editor.parent_suggestions.is_empty();
-    let area = centered_rect(frame.area(), 72, 17);
+    let base_total_height = 17;
+    let form_height = 11;
+    let preview_height = preview_panel_required_height(&editor.preview_panel, 3);
+    let area = anchored_form_rect(
+        frame.area(),
+        72,
+        base_total_height,
+        form_height + preview_height,
+    );
     frame.render_widget(Clear, area);
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(11), Constraint::Length(6)])
+        .constraints([
+            Constraint::Length(form_height),
+            Constraint::Length(preview_height),
+        ])
         .split(area);
 
     let form_block = Block::default()
@@ -2481,11 +2509,22 @@ fn render_tag_editor_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let area = centered_rect(frame.area(), 64, 14);
+    let base_total_height = 14;
+    let form_height = 8;
+    let preview_height = preview_panel_required_height(&editor.preview_panel, 3);
+    let area = anchored_form_rect(
+        frame.area(),
+        64,
+        base_total_height,
+        form_height + preview_height,
+    );
     frame.render_widget(Clear, area);
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Length(6)])
+        .constraints([
+            Constraint::Length(form_height),
+            Constraint::Length(preview_height),
+        ])
         .split(area);
 
     let form_block = Block::default()
@@ -2584,33 +2623,84 @@ fn render_form_preview_panel(
     palette: ThemePalette,
 ) {
     let content_width = area.width.saturating_sub(4) as usize;
-    let mut lines = Vec::new();
-    for preview_line in &preview_panel.preview_lines {
-        lines.push(render_preview_line(preview_line, content_width, palette));
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let lines = preview_panel_lines(preview_panel, content_width, inner_height, palette);
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.border)),
+        ),
+        area,
+    );
+}
+
+fn preview_panel_required_height(
+    preview_panel: &FormPreviewPanelView,
+    min_inner_height: u16,
+) -> u16 {
+    let info_lines = preview_panel.preview_lines.len() as u16;
+    let tips_lines = preview_panel.tips.len() as u16;
+    let required_inner = if tips_lines > 0 {
+        info_lines.saturating_add(1).saturating_add(tips_lines)
+    } else {
+        info_lines.max(1)
+    };
+    required_inner.max(min_inner_height).saturating_add(2)
+}
+
+fn preview_panel_lines(
+    preview_panel: &FormPreviewPanelView,
+    content_width: usize,
+    inner_height: usize,
+    palette: ThemePalette,
+) -> Vec<Line<'static>> {
+    if inner_height == 0 {
+        return Vec::new();
     }
 
-    if !preview_panel.tips.is_empty() {
-        lines.push(Line::from(""));
-        for tip in &preview_panel.tips {
-            lines.push(Line::from(Span::styled(
+    let info_lines = preview_panel
+        .preview_lines
+        .iter()
+        .map(|preview_line| render_preview_line(preview_line, content_width, palette))
+        .collect::<Vec<_>>();
+    let tip_lines = preview_panel
+        .tips
+        .iter()
+        .map(|tip| {
+            Line::from(Span::styled(
                 ellipsize_end(tip, content_width),
                 Style::default()
                     .fg(palette.subtle_text)
                     .add_modifier(Modifier::DIM),
-            )));
-        }
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    if tip_lines.is_empty() {
+        return info_lines.into_iter().take(inner_height).collect();
     }
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.border)),
-            )
-            .wrap(Wrap { trim: true }),
-        area,
-    );
+    let shown_tip_count = tip_lines.len().min(inner_height.saturating_sub(1));
+    let reserve_separator = inner_height > shown_tip_count;
+    let info_capacity = inner_height
+        .saturating_sub(shown_tip_count)
+        .saturating_sub(if reserve_separator { 1 } else { 0 });
+    let mut lines = info_lines
+        .into_iter()
+        .take(info_capacity)
+        .collect::<Vec<_>>();
+
+    if reserve_separator {
+        lines.push(Line::from(""));
+    }
+    let spacer_lines = inner_height
+        .saturating_sub(lines.len())
+        .saturating_sub(shown_tip_count);
+    lines.extend((0..spacer_lines).map(|_| Line::from("")));
+    lines.extend(tip_lines.into_iter().take(shown_tip_count));
+    lines
 }
 
 fn render_preview_line(
@@ -3226,6 +3316,15 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     let x = area.x + area.width.saturating_sub(popup_width) / 2;
     let y = area.y + area.height.saturating_sub(popup_height) / 2;
     Rect::new(x, y, popup_width, popup_height)
+}
+
+fn anchored_form_rect(area: Rect, width: u16, base_height: u16, actual_height: u16) -> Rect {
+    let popup_width = width.min(area.width.saturating_sub(2)).max(1);
+    let centered_base = centered_rect(area, width, base_height);
+    let popup_height = actual_height.min(area.height.saturating_sub(2)).max(1);
+    let max_y = area.y + area.height.saturating_sub(popup_height);
+    let y = centered_base.y.min(max_y);
+    Rect::new(centered_base.x, y, popup_width, popup_height)
 }
 
 #[derive(Debug, Clone)]
@@ -3903,9 +4002,54 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 
 #[cfg(test)]
 mod tests {
-    use super::{Symbols, TaskTagRowSegment, format_task_tags_for_row, input_window_view};
+    use super::{
+        FormPreviewPanelView, PreviewLineView, Symbols, TaskTagRowSegment,
+        format_task_tags_for_row, input_window_view, preview_panel_lines,
+        preview_panel_required_height,
+    };
     use crate::config::GlyphMode;
     use crate::domain::TagColor;
+    use crate::theme::{ProjectColorPalette, ThemePalette};
+    use ratatui::style::Color;
+
+    fn test_palette() -> ThemePalette {
+        ThemePalette {
+            text: Color::White,
+            subtle_text: Color::Gray,
+            border: Color::DarkGray,
+            accent: Color::Cyan,
+            timer_work: Color::Green,
+            timer_short_break: Color::Blue,
+            timer_long_break: Color::Magenta,
+            success: Color::Green,
+            error: Color::Red,
+            priority_1: Color::Red,
+            priority_2: Color::Yellow,
+            priority_3: Color::Blue,
+            project_colors: ProjectColorPalette {
+                berry_red: Color::Rgb(178, 67, 79),
+                red: Color::Red,
+                orange: Color::Rgb(255, 165, 0),
+                yellow: Color::Yellow,
+                olive_green: Color::Rgb(128, 128, 0),
+                lime_green: Color::Rgb(50, 205, 50),
+                green: Color::Green,
+                mint_green: Color::Rgb(152, 255, 152),
+                teal: Color::Cyan,
+                sky_blue: Color::Rgb(135, 206, 235),
+                light_blue: Color::Rgb(173, 216, 230),
+                blue: Color::Blue,
+                grape: Color::Rgb(111, 45, 168),
+                violet: Color::Rgb(138, 43, 226),
+                lavender: Color::Rgb(230, 230, 250),
+                magenta: Color::Magenta,
+                salmon: Color::Rgb(250, 128, 114),
+                charcoal: Color::Rgb(54, 69, 79),
+                grey: Color::Gray,
+                taupe: Color::Rgb(72, 60, 50),
+            },
+        }
+    }
 
     #[test]
     fn input_window_view_keeps_full_text_when_it_fits() {
@@ -3964,6 +4108,86 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn preview_panel_required_height_grows_with_content() {
+        let compact = FormPreviewPanelView {
+            preview_lines: vec![PreviewLineView::Text {
+                text: "Only one line".to_string(),
+                dimmed: false,
+            }],
+            tips: vec!["Tip".to_string()],
+        };
+        let expanded = FormPreviewPanelView {
+            preview_lines: vec![
+                PreviewLineView::KeyValue {
+                    label: "Project".to_string(),
+                    value: "Inbox".to_string(),
+                    emphasized: false,
+                    dimmed: false,
+                },
+                PreviewLineView::KeyValue {
+                    label: "Tags".to_string(),
+                    value: "@work @deep".to_string(),
+                    emphasized: false,
+                    dimmed: false,
+                },
+                PreviewLineView::KeyValue {
+                    label: "Priority".to_string(),
+                    value: "P2".to_string(),
+                    emphasized: false,
+                    dimmed: false,
+                },
+            ],
+            tips: vec![
+                "Type # for projects".to_string(),
+                "Type @ for tags".to_string(),
+            ],
+        };
+
+        assert!(
+            preview_panel_required_height(&expanded, 3)
+                > preview_panel_required_height(&compact, 3)
+        );
+    }
+
+    #[test]
+    fn preview_panel_lines_keep_tips_bottom_aligned_with_separator() {
+        let preview = FormPreviewPanelView {
+            preview_lines: vec![PreviewLineView::KeyValue {
+                label: "Project".to_string(),
+                value: "Inbox".to_string(),
+                emphasized: false,
+                dimmed: false,
+            }],
+            tips: vec!["Tip A".to_string(), "Tip B".to_string()],
+        };
+        let lines = preview_panel_lines(&preview, 30, 6, test_palette());
+
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[0].to_string(), "Project: Inbox");
+        assert_eq!(lines[1].to_string(), "");
+        assert_eq!(lines[4].to_string(), "Tip A");
+        assert_eq!(lines[5].to_string(), "Tip B");
+    }
+
+    #[test]
+    fn anchored_form_rect_keeps_base_top_when_expanding() {
+        let area = super::Rect::new(0, 0, 120, 50);
+        let base = super::centered_rect(area, 72, 11);
+        let expanded = super::anchored_form_rect(area, 72, 11, 16);
+        assert_eq!(expanded.y, base.y);
+        assert_eq!(expanded.x, base.x);
+        assert_eq!(expanded.height, 16);
+    }
+
+    #[test]
+    fn anchored_form_rect_shifts_up_only_when_needed_to_fit() {
+        let area = super::Rect::new(0, 0, 80, 20);
+        let expanded = super::anchored_form_rect(area, 72, 11, 30);
+        assert_eq!(expanded.height, 18);
+        assert_eq!(expanded.y, 2);
     }
 }
 
