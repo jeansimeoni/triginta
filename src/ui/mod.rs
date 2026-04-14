@@ -13,17 +13,18 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
-        App, CalendarPickerView, CycleEntryState, DeleteConfirmationView, FormPreviewPanelView,
-        HistoryPanelTab, PanelFocus, PreviewLineView, ProjectDeleteConfirmationView,
-        ProjectEditorView, ProjectSortPopupView, ProjectTreeRowView, RightPanelTab, ScreenData,
-        ShortcutSection, ShortcutTip, SidebarTab, TagDeleteConfirmationView, TagEditorView,
-        TagListRowView, TagSortPopupView, TaskEditorView, TaskInputView, TaskSearchView,
-        TaskSortPopupView, TaskView, TimerPhase,
+        App, CalendarPickerView, CycleEntryState, DeleteConfirmationView,
+        FilterDeleteConfirmationView, FilterEditorView, FilterListRowView, FilterSortPopupView,
+        FormPreviewPanelView, HistoryPanelTab, PanelFocus, PreviewLineView,
+        ProjectDeleteConfirmationView, ProjectEditorView, ProjectSortPopupView, ProjectTreeRowView,
+        RightPanelTab, ScreenData, ShortcutSection, ShortcutTip, SidebarTab,
+        TagDeleteConfirmationView, TagEditorView, TagListRowView, TagSortPopupView, TaskEditorView,
+        TaskInputView, TaskSearchView, TaskSortPopupView, TaskView, TimerPhase,
     },
     config::GlyphMode,
     domain::{
-        DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, TagColor, Task, TaskPriority,
-        TaskStatus,
+        DayHistorySummary, FilterColor, SessionEntry, SessionKind, SessionOutcome, TagColor, Task,
+        TaskPriority, TaskStatus,
     },
     theme::ThemePalette,
 };
@@ -323,22 +324,6 @@ fn render_navigation_panel(
                 .iter()
                 .position(|view| app.active_task_view() == *view),
         ),
-        SidebarTab::FiltersTags => {
-            let rows = app.tags_rows();
-            let selected_index = rows.iter().position(|row| row.is_selected);
-            if rows.is_empty() {
-                (vec![Line::from("No matching tags.")], selected_index)
-            } else if rows.len() == 1 && !app.has_user_tags() {
-                (vec![Line::from("No tags yet.")], selected_index)
-            } else {
-                (
-                    rows.into_iter()
-                        .map(|row| tag_list_line(row, symbols, content_width, palette))
-                        .collect::<Vec<_>>(),
-                    selected_index,
-                )
-            }
-        }
         SidebarTab::Projects => {
             let rows = app.project_tree_rows();
             let selected_index = rows.iter().position(|row| row.is_selected);
@@ -355,23 +340,59 @@ fn render_navigation_panel(
                 )
             }
         }
+        SidebarTab::Tags => {
+            let rows = app.tags_rows();
+            let selected_index = rows.iter().position(|row| row.is_selected);
+            if rows.is_empty() {
+                (vec![Line::from("No matching tags.")], selected_index)
+            } else if rows.len() == 1 && !app.has_user_tags() {
+                (vec![Line::from("No tags yet.")], selected_index)
+            } else {
+                (
+                    rows.into_iter()
+                        .map(|row| tag_list_line(row, symbols, content_width, palette))
+                        .collect::<Vec<_>>(),
+                    selected_index,
+                )
+            }
+        }
+        SidebarTab::Filters => {
+            let rows = app.filters_rows();
+            let selected_index = rows.iter().position(|row| row.is_selected);
+            if rows.is_empty() {
+                (vec![Line::from("No matching filters.")], selected_index)
+            } else if rows.len() == 1 && !app.has_user_filters() {
+                (vec![Line::from("No filters yet.")], selected_index)
+            } else {
+                (
+                    rows.into_iter()
+                        .map(|row| filter_list_line(row, symbols, content_width, palette))
+                        .collect::<Vec<_>>(),
+                    selected_index,
+                )
+            }
+        }
     };
     if lines.is_empty() {
         lines = vec![Line::from("No matching results.")];
     }
 
     let footer = match app.active_sidebar_tab() {
-        SidebarTab::FiltersTags => tags_sort_footer(app, symbols, palette),
-        SidebarTab::Projects => projects_sort_footer(app, symbols, palette),
         SidebarTab::Navigation => Line::from(""),
+        SidebarTab::Projects => projects_sort_footer(app, symbols, palette),
+        SidebarTab::Tags => tags_sort_footer(app, symbols, palette),
+        SidebarTab::Filters => filters_sort_footer(app, symbols, palette),
     };
     let footer_hints = match app.active_sidebar_tab() {
         SidebarTab::Navigation => navigation_footer_hint(symbols, palette),
-        SidebarTab::FiltersTags => {
-            tags_footer_hints(symbols, focused_panel == PanelFocus::Navigation, palette)
-        }
         SidebarTab::Projects => {
             projects_footer_hints(symbols, focused_panel == PanelFocus::Navigation, palette)
+        }
+        SidebarTab::Tags => {
+            tags_footer_hints(symbols, focused_panel == PanelFocus::Navigation, palette)
+        }
+        SidebarTab::Filters => {
+            filters_footer_hints(symbols, focused_panel == PanelFocus::Navigation, palette)
         }
     };
 
@@ -474,7 +495,7 @@ fn render_favorites_panel(
 
     let panel = Paragraph::new(lines)
         .block(panel_block(
-            Line::from(format!("[6] {} Favorites", symbols.favorite)),
+            Line::from(format!("[7] {} Favorites", symbols.favorite)),
             focused_panel == PanelFocus::Favorites,
             palette,
         ))
@@ -671,31 +692,38 @@ fn render_task_details_panel(
                 .join(" ")
         )));
     }
-    frame.render_widget(Paragraph::new(meta_lines).wrap(Wrap { trim: true }), meta_inner);
+    frame.render_widget(
+        Paragraph::new(meta_lines).wrap(Wrap { trim: true }),
+        meta_inner,
+    );
 
     let markdown_lines = if task.description.trim().is_empty() {
-        vec![Line::from(Span::styled(
+        vec![MarkdownRenderedLine::plain(Line::from(Span::styled(
             "No description",
             Style::default()
                 .fg(palette.subtle_text)
                 .add_modifier(Modifier::DIM),
-        ))]
+        )))]
     } else {
         markdown_to_lines(task.description.as_str(), palette)
     };
+    let paragraph_lines = markdown_lines
+        .iter()
+        .map(|markdown_line| markdown_line.line.clone())
+        .collect::<Vec<_>>();
 
     let scroll = app.task_details_scroll();
     frame.render_widget(
-        Paragraph::new(markdown_lines.clone())
+        Paragraph::new(paragraph_lines)
             .scroll((scroll as u16, 0))
             .wrap(Wrap { trim: false }),
         markdown_inner,
     );
+    render_markdown_hyperlinks(frame, markdown_inner, scroll, markdown_lines.as_slice());
 
     let viewport = markdown_inner.height as usize;
     if markdown_lines.len() > viewport && viewport > 0 {
-        let position =
-            scrollbar_position_from_offset(scroll, markdown_lines.len(), viewport);
+        let position = scrollbar_position_from_offset(scroll, markdown_lines.len(), viewport);
         let mut scrollbar_state = ScrollbarState::default()
             .content_length(markdown_lines.len())
             .viewport_content_length(viewport)
@@ -726,7 +754,7 @@ fn task_status_symbol(status: TaskStatus, symbols: Symbols) -> &'static str {
     }
 }
 
-fn markdown_to_lines(markdown: &str, palette: ThemePalette) -> Vec<Line<'static>> {
+fn markdown_to_lines(markdown: &str, palette: ThemePalette) -> Vec<MarkdownRenderedLine> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
 
@@ -738,81 +766,175 @@ fn markdown_to_lines(markdown: &str, palette: ThemePalette) -> Vec<Line<'static>
         }
 
         if in_code_block {
-            lines.push(Line::from(Span::styled(
+            lines.push(MarkdownRenderedLine::plain(Line::from(Span::styled(
                 format!("  {trimmed}"),
                 Style::default().fg(palette.text).bg(palette.border),
-            )));
+            ))));
             continue;
         }
 
         if trimmed.is_empty() {
-            lines.push(Line::from(""));
+            lines.push(MarkdownRenderedLine::plain(Line::from("")));
             continue;
         }
 
         let start_trimmed = trimmed.trim_start();
         if start_trimmed.starts_with('>') {
             let content = start_trimmed.trim_start_matches('>').trim_start();
-            let mut spans = vec![Span::styled(
-                "▏ ",
-                Style::default().fg(palette.subtle_text),
-            )];
-            spans.extend(markdown_inline_spans(content, palette));
-            lines.push(Line::from(spans));
+            let prefix = Span::styled("▏ ", Style::default().fg(palette.subtle_text));
+            lines.push(markdown_line_with_prefix(prefix, content, palette));
             continue;
         }
 
-        let heading_level = start_trimmed.chars().take_while(|character| *character == '#').count();
+        let heading_level = start_trimmed
+            .chars()
+            .take_while(|character| *character == '#')
+            .count();
         if heading_level > 0 && start_trimmed.chars().nth(heading_level) == Some(' ') {
             let content = start_trimmed[heading_level + 1..].trim_start();
-            let mut spans = vec![Span::styled(
+            let heading_prefix = Span::styled(
                 format!("{} ", "▌".repeat(heading_level.min(3))),
                 Style::default().fg(palette.accent),
-            )];
-            spans.extend(markdown_inline_spans(content, palette));
-            lines.push(Line::from(spans).style(
+            );
+            let mut line = markdown_line_with_prefix(heading_prefix, content, palette);
+            line.line = line.line.style(
                 Style::default()
                     .fg(palette.accent)
                     .add_modifier(Modifier::BOLD),
-            ));
+            );
+            lines.push(
+                line,
+            );
             continue;
         }
 
         if let Some(content) = checkbox_content(start_trimmed) {
-            let mut spans = vec![Span::styled(
-                "☐ ",
-                Style::default().fg(palette.subtle_text),
-            )];
-            spans.extend(markdown_inline_spans(content, palette));
-            lines.push(Line::from(spans));
+            let prefix = Span::styled("☐ ", Style::default().fg(palette.subtle_text));
+            lines.push(markdown_line_with_prefix(prefix, content, palette));
             continue;
         }
         if let Some(content) = checkbox_done_content(start_trimmed) {
-            let mut spans = vec![Span::styled("☑ ", Style::default().fg(palette.success))];
-            spans.extend(markdown_inline_spans(content, palette));
-            lines.push(Line::from(spans));
+            let prefix = Span::styled("☑ ", Style::default().fg(palette.success));
+            lines.push(markdown_line_with_prefix(prefix, content, palette));
             continue;
         }
         if let Some(content) = bullet_content(start_trimmed) {
-            let mut spans = vec![Span::styled("• ", Style::default().fg(palette.accent))];
-            spans.extend(markdown_inline_spans(content, palette));
-            lines.push(Line::from(spans));
+            let prefix = Span::styled("• ", Style::default().fg(palette.accent));
+            lines.push(markdown_line_with_prefix(prefix, content, palette));
             continue;
         }
         if let Some((prefix, content)) = ordered_list_content(start_trimmed) {
-            let mut spans = vec![Span::styled(
+            let ordered_prefix = Span::styled(
                 format!("{prefix} "),
                 Style::default().fg(palette.accent),
-            )];
-            spans.extend(markdown_inline_spans(content, palette));
-            lines.push(Line::from(spans));
+            );
+            lines.push(markdown_line_with_prefix(ordered_prefix, content, palette));
             continue;
         }
 
-        lines.push(Line::from(markdown_inline_spans(start_trimmed, palette)));
+        let inline = markdown_inline_spans(start_trimmed, palette);
+        lines.push(MarkdownRenderedLine {
+            line: Line::from(inline.spans),
+            hyperlinks: inline.hyperlinks,
+        });
     }
 
     lines
+}
+
+#[derive(Clone, Debug)]
+struct MarkdownRenderedLine {
+    line: Line<'static>,
+    hyperlinks: Vec<MarkdownHyperlinkRun>,
+}
+
+impl MarkdownRenderedLine {
+    fn plain(line: Line<'static>) -> Self {
+        Self {
+            line,
+            hyperlinks: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MarkdownHyperlinkRun {
+    start_col: usize,
+    text: String,
+    url: String,
+}
+
+#[derive(Clone, Debug)]
+struct MarkdownInlineRender {
+    spans: Vec<Span<'static>>,
+    hyperlinks: Vec<MarkdownHyperlinkRun>,
+}
+
+fn markdown_line_with_prefix(
+    prefix: Span<'static>,
+    content: &str,
+    palette: ThemePalette,
+) -> MarkdownRenderedLine {
+    let prefix_width = UnicodeWidthStr::width(prefix.content.as_ref());
+    let mut spans = vec![prefix];
+    let mut inline = markdown_inline_spans(content, palette);
+    inline
+        .hyperlinks
+        .iter_mut()
+        .for_each(|hyperlink| hyperlink.start_col += prefix_width);
+    spans.extend(inline.spans);
+    MarkdownRenderedLine {
+        line: Line::from(spans),
+        hyperlinks: inline.hyperlinks,
+    }
+}
+
+fn render_markdown_hyperlinks(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    scroll: usize,
+    lines: &[MarkdownRenderedLine],
+) {
+    if area.width == 0 || area.height == 0 || lines.is_empty() {
+        return;
+    }
+
+    let right = area.x.saturating_add(area.width);
+    let bottom = area.y.saturating_add(area.height);
+    let buffer = frame.buffer_mut();
+
+    for y in area.y..bottom {
+        let line_index = scroll.saturating_add((y - area.y) as usize);
+        let Some(line) = lines.get(line_index) else {
+            break;
+        };
+
+        for hyperlink in &line.hyperlinks {
+            let mut x = area.x.saturating_add(hyperlink.start_col as u16);
+            let mut chars = hyperlink.text.chars();
+            while x < right {
+                let Some(first) = chars.next() else {
+                    break;
+                };
+                let second = chars.next();
+                let mut chunk = String::new();
+                chunk.push(first);
+                if let Some(second_char) = second {
+                    chunk.push(second_char);
+                }
+                let width = UnicodeWidthStr::width(chunk.as_str());
+                if width == 0 {
+                    continue;
+                }
+                if x.saturating_add(width as u16) > right {
+                    break;
+                }
+                let wrapped = format!("\x1B]8;;{}\x07{}\x1B]8;;\x07", hyperlink.url, chunk);
+                buffer[(x, y)].set_symbol(wrapped.as_str());
+                x = x.saturating_add(width as u16);
+            }
+        }
+    }
 }
 
 fn checkbox_content(line: &str) -> Option<&str> {
@@ -842,102 +964,195 @@ fn ordered_list_content(line: &str) -> Option<(&str, &str)> {
     Some((prefix, &rest[2..]))
 }
 
-fn markdown_inline_spans(input: &str, palette: ThemePalette) -> Vec<Span<'static>> {
+fn markdown_inline_spans(input: &str, palette: ThemePalette) -> MarkdownInlineRender {
     let mut spans = Vec::new();
+    let mut hyperlinks = Vec::new();
     let mut buffer = String::new();
     let mut bold = false;
     let mut italic = false;
     let mut code = false;
-    let text = markdown_link_as_text(input);
-    let chars = text.chars().collect::<Vec<_>>();
-    let mut index = 0;
+    let mut current_link: Option<String> = None;
+    let mut col = 0usize;
+    let push_buffer =
+        |buffer: &mut String,
+         spans: &mut Vec<Span<'static>>,
+         hyperlinks: &mut Vec<MarkdownHyperlinkRun>,
+         bold: bool,
+         italic: bool,
+         code: bool,
+         current_link: Option<&str>,
+         col: &mut usize| {
+            if buffer.is_empty() {
+                return;
+            }
+            let mut style = Style::default().fg(palette.text);
+            if bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            if italic {
+                style = style.add_modifier(Modifier::ITALIC);
+            }
+            if code {
+                style = style.bg(palette.border).fg(palette.accent);
+            }
+            let text = std::mem::take(buffer);
+            let width = UnicodeWidthStr::width(text.as_str());
+            if let Some(url) = current_link {
+                hyperlinks.push(MarkdownHyperlinkRun {
+                    start_col: *col,
+                    text: text.clone(),
+                    url: url.to_string(),
+                });
+            }
+            spans.push(Span::styled(text, style));
+            *col = col.saturating_add(width);
+        };
 
-    let push_buffer = |buffer: &mut String,
-                       spans: &mut Vec<Span<'static>>,
-                       bold: bool,
-                       italic: bool,
-                       code: bool| {
-        if buffer.is_empty() {
-            return;
+    for token in markdown_inline_tokens(input) {
+        if token.url.as_ref() != current_link.as_ref() {
+            push_buffer(
+                &mut buffer,
+                &mut spans,
+                &mut hyperlinks,
+                bold,
+                italic,
+                code,
+                current_link.as_deref(),
+                &mut col,
+            );
+            current_link = token.url;
         }
-        let mut style = Style::default().fg(palette.text);
-        if bold {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        if italic {
-            style = style.add_modifier(Modifier::ITALIC);
-        }
-        if code {
-            style = style.bg(palette.border).fg(palette.accent);
-        }
-        spans.push(Span::styled(std::mem::take(buffer), style));
-    };
+        let chars = token.text.chars().collect::<Vec<_>>();
+        let mut index = 0;
+        while index < chars.len() {
+            let character = chars[index];
+            if character == '`' {
+                push_buffer(
+                    &mut buffer,
+                    &mut spans,
+                    &mut hyperlinks,
+                    bold,
+                    italic,
+                    code,
+                    current_link.as_deref(),
+                    &mut col,
+                );
+                code = !code;
+                index += 1;
+                continue;
+            }
 
-    while index < chars.len() {
-        let character = chars[index];
-        if character == '`' {
-            push_buffer(&mut buffer, &mut spans, bold, italic, code);
-            code = !code;
+            if !code && character == '*' && chars.get(index + 1) == Some(&'*') {
+                push_buffer(
+                    &mut buffer,
+                    &mut spans,
+                    &mut hyperlinks,
+                    bold,
+                    italic,
+                    code,
+                    current_link.as_deref(),
+                    &mut col,
+                );
+                bold = !bold;
+                index += 2;
+                continue;
+            }
+
+            if !code && (character == '*' || character == '_') {
+                push_buffer(
+                    &mut buffer,
+                    &mut spans,
+                    &mut hyperlinks,
+                    bold,
+                    italic,
+                    code,
+                    current_link.as_deref(),
+                    &mut col,
+                );
+                italic = !italic;
+                index += 1;
+                continue;
+            }
+
+            buffer.push(character);
             index += 1;
-            continue;
         }
-
-        if !code && character == '*' && chars.get(index + 1) == Some(&'*') {
-            push_buffer(&mut buffer, &mut spans, bold, italic, code);
-            bold = !bold;
-            index += 2;
-            continue;
-        }
-
-        if !code && (character == '*' || character == '_') {
-            push_buffer(&mut buffer, &mut spans, bold, italic, code);
-            italic = !italic;
-            index += 1;
-            continue;
-        }
-
-        buffer.push(character);
-        index += 1;
     }
 
-    push_buffer(&mut buffer, &mut spans, bold, italic, code);
-    spans
+    push_buffer(
+        &mut buffer,
+        &mut spans,
+        &mut hyperlinks,
+        bold,
+        italic,
+        code,
+        current_link.as_deref(),
+        &mut col,
+    );
+    MarkdownInlineRender { spans, hyperlinks }
 }
 
-fn markdown_link_as_text(input: &str) -> String {
-    let mut output = String::new();
+#[derive(Debug)]
+struct MarkdownInlineToken {
+    text: String,
+    url: Option<String>,
+}
+
+fn markdown_inline_tokens(input: &str) -> Vec<MarkdownInlineToken> {
+    let mut tokens = Vec::new();
     let mut rest = input;
 
     while let Some(open) = rest.find('[') {
-        output.push_str(&rest[..open]);
+        if open > 0 {
+            tokens.push(MarkdownInlineToken {
+                text: rest[..open].to_string(),
+                url: None,
+            });
+        }
         let after_open = &rest[open + 1..];
         let Some(close) = after_open.find(']') else {
-            output.push_str(&rest[open..]);
-            return output;
+            tokens.push(MarkdownInlineToken {
+                text: rest[open..].to_string(),
+                url: None,
+            });
+            return tokens;
         };
         let label = &after_open[..close];
         let after_label = &after_open[close + 1..];
         if let Some(after_paren) = after_label.strip_prefix('(') {
             if let Some(end_url) = after_paren.find(')') {
                 let url = &after_paren[..end_url];
-                output.push_str(label);
-                if !url.is_empty() {
-                    output.push_str(" (");
-                    output.push_str(url);
-                    output.push(')');
-                }
+                let text = if label.is_empty() {
+                    url.to_string()
+                } else {
+                    label.to_string()
+                };
+                tokens.push(MarkdownInlineToken {
+                    text,
+                    url: if url.is_empty() {
+                        None
+                    } else {
+                        Some(url.to_string())
+                    },
+                });
                 rest = &after_paren[end_url + 1..];
                 continue;
             }
         }
-        output.push('[');
-        output.push_str(label);
-        output.push(']');
+        tokens.push(MarkdownInlineToken {
+            text: format!("[{label}]"),
+            url: None,
+        });
         rest = after_label;
     }
 
-    output.push_str(rest);
-    output
+    if !rest.is_empty() {
+        tokens.push(MarkdownInlineToken {
+            text: rest.to_string(),
+            url: None,
+        });
+    }
+    tokens
 }
 
 fn render_statistics_panel(
@@ -1636,6 +1851,79 @@ fn tag_list_line(
     Line::from(spans)
 }
 
+fn filter_list_line(
+    row: FilterListRowView,
+    symbols: Symbols,
+    width: u16,
+    palette: ThemePalette,
+) -> Line<'static> {
+    let mut label = String::new();
+    if row.is_favorite {
+        label.push_str(symbols.favorite);
+        label.push(' ');
+    }
+    let color = row
+        .color
+        .map(|color| palette.project_color(project_color_for_filter(color)))
+        .unwrap_or(palette.text);
+    let selection_style = if row.is_selected {
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.border)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let count_text = format!(" {}", row.task_count);
+    let marker = "ƒ ";
+    let name_width = (width as usize)
+        .saturating_sub(label.width())
+        .saturating_sub(marker.width())
+        .saturating_sub(2)
+        .saturating_sub(count_text.width())
+        .max(1);
+    let mut spans = vec![
+        Span::styled(
+            label,
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(palette.subtle_text))
+            },
+        ),
+        Span::styled(
+            marker.to_string(),
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(color))
+            },
+        ),
+        Span::styled(
+            ellipsize_end(row.name.as_str(), name_width),
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(color))
+            },
+        ),
+        Span::styled(
+            count_text,
+            if row.is_selected {
+                Style::default().fg(palette.subtle_text).bg(palette.border)
+            } else {
+                Style::default().fg(palette.subtle_text)
+            },
+        ),
+    ];
+    let current_width = Line::from(spans.clone()).width();
+    let padding = (width as usize).saturating_sub(current_width);
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), selection_style));
+    }
+    Line::from(spans)
+}
+
 fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palette: ThemePalette) {
     if app.is_help_open() {
         render_help_dialog(frame, app, palette);
@@ -1651,6 +1939,12 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
     if let Some(sort_popup) = app.tag_sort_popup_view() {
         let anchor = project_sort_popup_anchor(frame.area());
         render_tag_sort_popup(frame, &sort_popup, anchor, symbols, palette);
+        return;
+    }
+
+    if let Some(sort_popup) = app.filter_sort_popup_view() {
+        let anchor = project_sort_popup_anchor(frame.area());
+        render_filter_sort_popup(frame, &sort_popup, anchor, symbols, palette);
         return;
     }
 
@@ -1680,6 +1974,11 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
         return;
     }
 
+    if let Some(editor) = app.filter_editor_view() {
+        render_filter_editor_popup(frame, &editor, symbols, palette);
+        return;
+    }
+
     if let Some(input) = app.task_input_view() {
         render_task_input_popup(frame, &input, symbols, palette);
         return;
@@ -1692,6 +1991,11 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
 
     if let Some(confirmation) = app.tag_delete_confirmation_view() {
         render_tag_delete_confirmation(frame, &confirmation, symbols, palette);
+        return;
+    }
+
+    if let Some(confirmation) = app.filter_delete_confirmation_view() {
+        render_filter_delete_confirmation(frame, &confirmation, symbols, palette);
         return;
     }
 
@@ -2068,10 +2372,7 @@ fn render_task_editor_popup(
     let form_section_height = form_height.min(area.height);
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(form_section_height),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(form_section_height), Constraint::Min(0)])
         .split(area);
     let form_block = Block::default()
         .title(Span::styled(
@@ -2979,6 +3280,136 @@ fn render_tag_delete_confirmation(
     frame.render_widget(popup, area);
 }
 
+fn render_filter_editor_popup(
+    frame: &mut Frame<'_>,
+    editor: &FilterEditorView,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let base_total_height = 18;
+    let form_height = 12;
+    let preview_height = preview_panel_required_height(&editor.preview_panel, 3);
+    let area = anchored_form_rect(
+        frame.area(),
+        72,
+        base_total_height,
+        form_height + preview_height,
+    );
+    frame.render_widget(Clear, area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(form_height),
+            Constraint::Length(preview_height),
+        ])
+        .split(area);
+
+    let form_block = Block::default()
+        .title(Span::styled(
+            editor.title,
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(project_editor_shortcuts_line(symbols, palette))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent));
+    let form_inner = form_block.inner(sections[0]);
+    frame.render_widget(form_block, sections[0]);
+    let form_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .split(form_inner);
+
+    render_editor_field(
+        frame,
+        form_rows[0],
+        "Name [F1]",
+        &editor.name_value,
+        editor.name_cursor,
+        editor.focus.name,
+        Some("Todoist-style display name"),
+        palette,
+    );
+    render_editor_field(
+        frame,
+        form_rows[1],
+        "Query [F2]",
+        &editor.query_value,
+        editor.query_cursor,
+        editor.focus.query,
+        editor.validation_error.as_deref(),
+        palette,
+    );
+    let meta_columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(form_rows[2]);
+    render_project_value_field(
+        frame,
+        meta_columns[0],
+        "Color [F3]",
+        &editor.color_label,
+        editor.focus.color,
+        Some(
+            Style::default()
+                .fg(palette.project_color(project_color_for_filter(editor.color_value))),
+        ),
+        palette,
+    );
+    render_project_value_field(
+        frame,
+        meta_columns[1],
+        "Favorite [F4]",
+        if editor.is_favorite { "yes" } else { "no" },
+        editor.focus.favorite,
+        None,
+        palette,
+    );
+
+    render_form_preview_panel(frame, sections[1], &editor.preview_panel, palette);
+}
+
+fn render_filter_delete_confirmation(
+    frame: &mut Frame<'_>,
+    confirmation: &FilterDeleteConfirmationView,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let area = centered_rect(frame.area(), 64, 7);
+    frame.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from("Remove this filter?"),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("\"{}\"", confirmation.filter_name),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Tasks are not modified."),
+        Line::from("Only this saved filter is removed."),
+    ];
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                "Remove Filter",
+                Style::default()
+                    .fg(palette.error)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .title_bottom(confirm_shortcuts_line(symbols, palette))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.error)),
+    );
+
+    frame.render_widget(popup, area);
+}
+
 fn render_form_preview_panel(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -3544,6 +3975,53 @@ fn render_tag_sort_popup(
     frame.render_widget(widget, area);
 }
 
+fn render_filter_sort_popup(
+    frame: &mut Frame<'_>,
+    popup: &FilterSortPopupView,
+    anchor: Rect,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let width = 24;
+    let height = popup.options.len() as u16 + 2;
+    let area = anchored_dropdown_rect(frame.area(), anchor, width, height);
+    frame.render_widget(Clear, area);
+
+    let lines = popup
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let selected = popup.selected_index == index;
+            let marker = if option.is_active {
+                if symbols.tasks == "#" { "* " } else { "󰄵 " }
+            } else {
+                "  "
+            };
+            selectable_line(
+                &format!("{marker}{}", option.label),
+                selected,
+                area.width.saturating_sub(2),
+                palette,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                popup.title,
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.accent)),
+    );
+
+    frame.render_widget(widget, area);
+}
+
 fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
@@ -4009,6 +4487,22 @@ fn tags_sort_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<
     )])
 }
 
+fn filters_sort_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    let sort_prefix = if symbols.tasks == "#" {
+        "sort"
+    } else {
+        symbols.sort
+    };
+    Line::from(vec![Span::styled(
+        format!(
+            " {} {} ",
+            sort_prefix,
+            app.filter_sort_order().short_label()
+        ),
+        Style::default().fg(palette.subtle_text),
+    )])
+}
+
 fn projects_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> Line<'static> {
     if !focused {
         return Line::from("").right_aligned();
@@ -4043,6 +4537,20 @@ fn tags_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> 
     .right_aligned()
 }
 
+fn filters_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> Line<'static> {
+    if !focused {
+        return Line::from("").right_aligned();
+    }
+    let filter_new_icon = if symbols.tasks == "#" { "+" } else { "✚" };
+    Line::from(vec![
+        Span::styled(symbols.sort, Style::default().fg(palette.accent)),
+        Span::styled(" o sort  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(filter_new_icon, Style::default().fg(palette.accent)),
+        Span::styled(" C new ", Style::default().fg(palette.subtle_text)),
+    ])
+    .right_aligned()
+}
+
 fn task_view_symbol(view: TaskView, symbols: Symbols) -> &'static str {
     match view {
         TaskView::All => symbols.tasks,
@@ -4062,12 +4570,17 @@ fn navigation_title(
     } else {
         Style::default().fg(palette.subtle_text)
     };
-    let filters_style = if active_tab == SidebarTab::FiltersTags {
+    let projects_style = if active_tab == SidebarTab::Projects {
         Style::default().fg(palette.accent)
     } else {
         Style::default().fg(palette.subtle_text)
     };
-    let projects_style = if active_tab == SidebarTab::Projects {
+    let tags_style = if active_tab == SidebarTab::Tags {
+        Style::default().fg(palette.accent)
+    } else {
+        Style::default().fg(palette.subtle_text)
+    };
+    let filters_style = if active_tab == SidebarTab::Filters {
         Style::default().fg(palette.accent)
     } else {
         Style::default().fg(palette.subtle_text)
@@ -4078,10 +4591,13 @@ fn navigation_title(
         Span::styled(format!("{} ", symbols.tasks), nav_style),
         Span::styled("Navigation", nav_style),
         Span::raw(" - "),
-        Span::styled("[4] Filters & Tags", filters_style),
-        Span::raw(" - "),
         Span::styled(format!("{} ", symbols.project), projects_style),
-        Span::styled("[5] Projects", projects_style),
+        Span::styled("[4] Projects", projects_style),
+        Span::raw(" - "),
+        Span::styled(format!("{} ", symbols.tag), tags_style),
+        Span::styled("[5] Tags", tags_style),
+        Span::raw(" - "),
+        Span::styled("[6] Filters", filters_style),
     ])
 }
 
@@ -4102,7 +4618,7 @@ fn right_panel_title(
     };
 
     Line::from(vec![
-        Span::raw("[7] "),
+        Span::raw("[8] "),
         Span::styled(format!("{} Tasks", symbols.tasks), tasks_style),
         Span::raw(" - "),
         Span::styled(format!("{} Stats", symbols.stats), stats_style),
@@ -4369,7 +4885,8 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 mod tests {
     use super::{
         FormPreviewPanelView, PreviewLineView, Symbols, TaskTagRowSegment,
-        format_task_tags_for_row, input_window_view, preview_panel_lines,
+        format_task_tags_for_row, input_window_view, markdown_inline_spans, markdown_inline_tokens,
+        preview_panel_lines,
         preview_panel_required_height,
     };
     use crate::config::GlyphMode;
@@ -4554,6 +5071,36 @@ mod tests {
         assert_eq!(expanded.height, 18);
         assert_eq!(expanded.y, 2);
     }
+
+    #[test]
+    fn markdown_inline_tokens_hide_url_when_label_is_present() {
+        let tokens = markdown_inline_tokens("See [Rust](https://www.rust-lang.org/) docs");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].text, "See ");
+        assert!(tokens[0].url.is_none());
+        assert_eq!(tokens[1].text, "Rust");
+        assert_eq!(
+            tokens[1].url.as_deref(),
+            Some("https://www.rust-lang.org/")
+        );
+        assert_eq!(tokens[2].text, " docs");
+        assert!(tokens[2].url.is_none());
+    }
+
+    #[test]
+    fn markdown_inline_spans_track_hyperlinks_for_overlay() {
+        let inline = markdown_inline_spans("Visit [Rust](https://www.rust-lang.org/) now", test_palette());
+        let rendered_text = inline
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(rendered_text, "Visit Rust now");
+        assert_eq!(inline.hyperlinks.len(), 1);
+        assert_eq!(inline.hyperlinks[0].start_col, 6);
+        assert_eq!(inline.hyperlinks[0].text, "Rust");
+        assert_eq!(inline.hyperlinks[0].url, "https://www.rust-lang.org/");
+    }
 }
 
 fn progress_meta_line(
@@ -4690,6 +5237,31 @@ fn project_color_for_tag(color: TagColor) -> crate::domain::ProjectColor {
         TagColor::Charcoal => crate::domain::ProjectColor::Charcoal,
         TagColor::Grey => crate::domain::ProjectColor::Grey,
         TagColor::Taupe => crate::domain::ProjectColor::Taupe,
+    }
+}
+
+fn project_color_for_filter(color: FilterColor) -> crate::domain::ProjectColor {
+    match color {
+        FilterColor::BerryRed => crate::domain::ProjectColor::BerryRed,
+        FilterColor::Red => crate::domain::ProjectColor::Red,
+        FilterColor::Orange => crate::domain::ProjectColor::Orange,
+        FilterColor::Yellow => crate::domain::ProjectColor::Yellow,
+        FilterColor::OliveGreen => crate::domain::ProjectColor::OliveGreen,
+        FilterColor::LimeGreen => crate::domain::ProjectColor::LimeGreen,
+        FilterColor::Green => crate::domain::ProjectColor::Green,
+        FilterColor::MintGreen => crate::domain::ProjectColor::MintGreen,
+        FilterColor::Teal => crate::domain::ProjectColor::Teal,
+        FilterColor::SkyBlue => crate::domain::ProjectColor::SkyBlue,
+        FilterColor::LightBlue => crate::domain::ProjectColor::LightBlue,
+        FilterColor::Blue => crate::domain::ProjectColor::Blue,
+        FilterColor::Grape => crate::domain::ProjectColor::Grape,
+        FilterColor::Violet => crate::domain::ProjectColor::Violet,
+        FilterColor::Lavender => crate::domain::ProjectColor::Lavender,
+        FilterColor::Magenta => crate::domain::ProjectColor::Magenta,
+        FilterColor::Salmon => crate::domain::ProjectColor::Salmon,
+        FilterColor::Charcoal => crate::domain::ProjectColor::Charcoal,
+        FilterColor::Grey => crate::domain::ProjectColor::Grey,
+        FilterColor::Taupe => crate::domain::ProjectColor::Taupe,
     }
 }
 
