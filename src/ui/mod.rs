@@ -914,8 +914,9 @@ fn task_project_line(
     let (project_name, project_color) = project_meta_for_task(data, task)
         .map(|(name, color)| (name, palette.project_color(color)))
         .unwrap_or(("Inbox", palette.subtle_text));
-    let tags = format_task_tags_for_row(task_tags_for_task(data, task.id).as_slice(), width);
-    let tags_width = task_tag_segments_width(tags.as_slice());
+    let tags =
+        format_task_tags_for_row(task_tags_for_task(data, task.id).as_slice(), width, symbols);
+    let tags_width = task_tag_segments_width(tags.as_slice(), symbols);
     let status_marker = task_status_symbol(task.status, symbols);
     let leading_padding = 2usize
         .saturating_add(status_marker.width())
@@ -971,6 +972,7 @@ fn task_project_line(
             base_style,
             selected,
             palette,
+            symbols,
         ));
     }
     let current_width = Line::from(spans.clone()).width();
@@ -1025,7 +1027,11 @@ struct TaskTagRowSegment {
     color: Option<TagColor>,
 }
 
-fn format_task_tags_for_row(tags: &[(&str, TagColor)], width: u16) -> Vec<TaskTagRowSegment> {
+fn format_task_tags_for_row(
+    tags: &[(&str, TagColor)],
+    width: u16,
+    symbols: Symbols,
+) -> Vec<TaskTagRowSegment> {
     if tags.is_empty() {
         return Vec::new();
     }
@@ -1035,9 +1041,9 @@ fn format_task_tags_for_row(tags: &[(&str, TagColor)], width: u16) -> Vec<TaskTa
     for (tag, color) in tags {
         let chunk = format!("@{tag}");
         let next = if segments.is_empty() {
-            chunk.width()
+            task_tag_segment_content_width(chunk.as_str(), true, symbols)
         } else {
-            chunk.width() + 1
+            task_tag_segment_content_width(chunk.as_str(), true, symbols) + 1
         };
         if used + next > max_width {
             break;
@@ -1051,12 +1057,17 @@ fn format_task_tags_for_row(tags: &[(&str, TagColor)], width: u16) -> Vec<TaskTa
     let remaining = tags.len().saturating_sub(segments.len());
     if remaining > 0 {
         let suffix = format!("+{remaining}");
-        if !segments.is_empty() && used + suffix.width() + 1 <= max_width {
+        if !segments.is_empty()
+            && used + task_tag_segment_content_width(suffix.as_str(), false, symbols) + 1
+                <= max_width
+        {
             segments.push(TaskTagRowSegment {
                 text: suffix,
                 color: None,
             });
-        } else if segments.is_empty() && suffix.width() <= max_width {
+        } else if segments.is_empty()
+            && task_tag_segment_content_width(suffix.as_str(), false, symbols) <= max_width
+        {
             segments.push(TaskTagRowSegment {
                 text: suffix,
                 color: None,
@@ -1066,16 +1077,17 @@ fn format_task_tags_for_row(tags: &[(&str, TagColor)], width: u16) -> Vec<TaskTa
     segments
 }
 
-fn task_tag_segments_width(segments: &[TaskTagRowSegment]) -> usize {
+fn task_tag_segments_width(segments: &[TaskTagRowSegment], symbols: Symbols) -> usize {
     segments
         .iter()
         .enumerate()
         .map(|(index, segment)| {
-            if index == 0 {
-                segment.text.width()
-            } else {
-                segment.text.width() + 1
-            }
+            let width = task_tag_segment_content_width(
+                segment.text.as_str(),
+                segment.color.is_some(),
+                symbols,
+            );
+            if index == 0 { width } else { width + 1 }
         })
         .sum()
 }
@@ -1085,23 +1097,90 @@ fn task_tag_segments_spans(
     base_style: Style,
     selected: bool,
     palette: ThemePalette,
+    symbols: Symbols,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
         if index > 0 {
             spans.push(Span::styled(" ", base_style));
         }
-        let style = if selected {
+        let style = if segment.color.is_none() {
+            base_style.patch(Style::default().fg(palette.subtle_text))
+        } else if selected {
             base_style
         } else if let Some(color) = segment.color {
             base_style
                 .patch(Style::default().fg(palette.project_color(project_color_for_tag(color))))
         } else {
-            base_style.patch(Style::default().fg(palette.subtle_text))
+            base_style
         };
-        spans.push(Span::styled(segment.text.clone(), style));
+        if segment.color.is_none() {
+            spans.push(Span::styled(segment.text.clone(), style));
+            continue;
+        }
+        let Some(color) = segment.color else {
+            continue;
+        };
+        let chip_color = palette.project_color(project_color_for_tag(color));
+        if symbols.tag_chip_uses_background {
+            let chip_bg = if selected { Color::White } else { chip_color };
+            let chip_fg = if selected {
+                Color::Black
+            } else {
+                contrasting_text_color(chip_bg)
+            };
+            spans.push(Span::styled(
+                symbols.tag_chip_left,
+                base_style.patch(Style::default().fg(chip_bg)),
+            ));
+            spans.push(Span::styled(
+                segment.text.clone(),
+                base_style.patch(Style::default().bg(chip_bg).fg(chip_fg)),
+            ));
+            spans.push(Span::styled(
+                symbols.tag_chip_right,
+                base_style.patch(Style::default().fg(chip_bg)),
+            ));
+        } else {
+            let chip = format!(
+                "{}{}{}",
+                symbols.tag_chip_left, segment.text, symbols.tag_chip_right
+            );
+            spans.push(Span::styled(chip, style));
+        }
     }
     spans
+}
+
+fn task_tag_segment_content_width(content: &str, is_tag: bool, symbols: Symbols) -> usize {
+    if !is_tag {
+        return content.width();
+    }
+    symbols.tag_chip_left.width() + content.width() + symbols.tag_chip_right.width()
+}
+
+fn contrasting_text_color(color: Color) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => {
+            let to_linear = |channel: u8| -> f64 {
+                let value = f64::from(channel) / 255.0;
+                if value <= 0.03928 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            let l = 0.2126 * to_linear(r) + 0.7152 * to_linear(g) + 0.0722 * to_linear(b);
+            let contrast_white = (1.0 + 0.05) / (l + 0.05);
+            let contrast_black = (l + 0.05) / 0.05;
+            if contrast_white >= contrast_black {
+                Color::White
+            } else {
+                Color::Black
+            }
+        }
+        _ => Color::White,
+    }
 }
 
 fn project_tree_line(
@@ -3591,7 +3670,8 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 
 #[cfg(test)]
 mod tests {
-    use super::{TaskTagRowSegment, format_task_tags_for_row, input_window_view};
+    use super::{Symbols, TaskTagRowSegment, format_task_tags_for_row, input_window_view};
+    use crate::config::GlyphMode;
     use crate::domain::TagColor;
 
     #[test]
@@ -3636,7 +3716,8 @@ mod tests {
             ("focus", TagColor::Red),
             ("planning", TagColor::Teal),
         ];
-        let rendered = format_task_tags_for_row(tags.as_slice(), 24);
+        let rendered =
+            format_task_tags_for_row(tags.as_slice(), 30, Symbols::new(GlyphMode::Ascii));
         assert_eq!(
             rendered,
             vec![
@@ -3695,6 +3776,9 @@ struct Symbols {
     voided: &'static str,
     bar_full: &'static str,
     bar_empty: &'static str,
+    tag_chip_left: &'static str,
+    tag_chip_right: &'static str,
+    tag_chip_uses_background: bool,
 }
 
 impl Symbols {
@@ -3722,6 +3806,9 @@ impl Symbols {
                 voided: "!",
                 bar_full: "=",
                 bar_empty: "-",
+                tag_chip_left: "[",
+                tag_chip_right: "]",
+                tag_chip_uses_background: false,
             },
             GlyphMode::NerdFonts => Self {
                 timer: "󰔛",
@@ -3745,6 +3832,9 @@ impl Symbols {
                 voided: "󰅖",
                 bar_full: "█",
                 bar_empty: "░",
+                tag_chip_left: "",
+                tag_chip_right: "",
+                tag_chip_uses_background: true,
             },
         }
     }
