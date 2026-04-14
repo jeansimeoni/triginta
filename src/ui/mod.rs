@@ -13,9 +13,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
-        App, CalendarPickerView, CycleEntryState, DeleteConfirmationView,
-        FilterDeleteConfirmationView, FilterEditorView, FilterListRowView, FilterSortPopupView,
-        FormPreviewPanelView, HistoryPanelTab, PanelFocus, PreviewLineView,
+        App, CalendarPickerView, CycleEntryState, DeleteConfirmationView, FavoriteItemColor,
+        FavoriteListRowView, FilterDeleteConfirmationView, FilterEditorView, FilterListRowView,
+        FilterSortPopupView, FormPreviewPanelView, HistoryPanelTab, PanelFocus, PreviewLineView,
         ProjectDeleteConfirmationView, ProjectEditorView, ProjectSortPopupView, ProjectTreeRowView,
         RightPanelTab, ScreenData, ShortcutSection, ShortcutTip, SidebarTab,
         TagDeleteConfirmationView, TagEditorView, TagListRowView, TagSortPopupView, TaskEditorView,
@@ -88,7 +88,7 @@ fn render_left_column(
     );
     render_favorites_panel(
         frame,
-        app.screen_data(),
+        app,
         sections[3],
         symbols,
         app.focused_panel(),
@@ -327,6 +327,7 @@ fn render_navigation_panel(
         SidebarTab::Projects => {
             let rows = app.project_tree_rows();
             let selected_index = rows.iter().position(|row| row.is_selected);
+            let show_selection = focused_panel == PanelFocus::Navigation;
             if rows.is_empty() {
                 (vec![Line::from("No matching projects.")], selected_index)
             } else if rows.len() == 1 && !app.has_user_projects() {
@@ -334,7 +335,12 @@ fn render_navigation_panel(
             } else {
                 (
                     rows.into_iter()
-                        .map(|row| project_tree_line(row, symbols, content_width, palette))
+                        .map(|mut row| {
+                            if !show_selection {
+                                row.is_selected = false;
+                            }
+                            project_tree_line(row, symbols, content_width, palette)
+                        })
                         .collect::<Vec<_>>(),
                     selected_index,
                 )
@@ -343,6 +349,7 @@ fn render_navigation_panel(
         SidebarTab::Tags => {
             let rows = app.tags_rows();
             let selected_index = rows.iter().position(|row| row.is_selected);
+            let show_selection = focused_panel == PanelFocus::Navigation;
             if rows.is_empty() {
                 (vec![Line::from("No matching tags.")], selected_index)
             } else if rows.len() == 1 && !app.has_user_tags() {
@@ -350,7 +357,12 @@ fn render_navigation_panel(
             } else {
                 (
                     rows.into_iter()
-                        .map(|row| tag_list_line(row, symbols, content_width, palette))
+                        .map(|mut row| {
+                            if !show_selection {
+                                row.is_selected = false;
+                            }
+                            tag_list_line(row, symbols, content_width, palette)
+                        })
                         .collect::<Vec<_>>(),
                     selected_index,
                 )
@@ -359,6 +371,7 @@ fn render_navigation_panel(
         SidebarTab::Filters => {
             let rows = app.filters_rows();
             let selected_index = rows.iter().position(|row| row.is_selected);
+            let show_selection = focused_panel == PanelFocus::Navigation;
             if rows.is_empty() {
                 (vec![Line::from("No matching filters.")], selected_index)
             } else if rows.len() == 1 && !app.has_user_filters() {
@@ -366,7 +379,12 @@ fn render_navigation_panel(
             } else {
                 (
                     rows.into_iter()
-                        .map(|row| filter_list_line(row, symbols, content_width, palette))
+                        .map(|mut row| {
+                            if !show_selection {
+                                row.is_selected = false;
+                            }
+                            filter_list_line(row, symbols, content_width, palette)
+                        })
                         .collect::<Vec<_>>(),
                     selected_index,
                 )
@@ -471,37 +489,70 @@ fn scrollbar_position_from_offset(
 
 fn render_favorites_panel(
     frame: &mut Frame<'_>,
-    data: &ScreenData,
+    app: &App,
     area: Rect,
     symbols: Symbols,
     focused_panel: PanelFocus,
     palette: ThemePalette,
 ) {
-    let favorites = favorite_tasks(data.tasks.as_slice());
-    let content_width = area.width.saturating_sub(2);
-    let mut lines = vec![];
-
-    if favorites.is_empty() {
-        lines.push(Line::from("No favorites yet."));
-        lines.push(Line::from("Pinned tasks or saved searches can live here."));
+    let rows = app.favorite_rows();
+    let selected_index = rows.iter().position(|row| row.is_selected);
+    let show_selection = focused_panel == PanelFocus::Favorites;
+    let mut lines = if rows.is_empty() {
+        let mut empty = Vec::new();
+        empty.push(Line::from("No favorites yet."));
+        empty
     } else {
-        for task in favorites {
-            lines.push(Line::from(ellipsize_end(
-                &format!("{} {}", symbols.favorite, task.title),
-                content_width as usize,
-            )));
-        }
+        rows.into_iter()
+            .map(|mut row| {
+                if !show_selection {
+                    row.is_selected = false;
+                }
+                favorite_item_line(row, symbols, area.width.saturating_sub(2), palette)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if lines.is_empty() {
+        lines.push(Line::from("No favorites yet."));
     }
 
-    let panel = Paragraph::new(lines)
-        .block(panel_block(
-            Line::from(format!("[7] {} Favorites", symbols.favorite)),
-            focused_panel == PanelFocus::Favorites,
-            palette,
-        ))
-        .wrap(Wrap { trim: true });
+    let block = panel_block(
+        Line::from(format!("[7] {} Favorites", symbols.favorite)),
+        focused_panel == PanelFocus::Favorites,
+        palette,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    frame.render_widget(panel, area);
+    let viewport_lines = inner.height as usize;
+    let scroll = panel_scroll_offset(lines.len(), viewport_lines, selected_index);
+    let visible_lines = lines
+        .iter()
+        .skip(scroll)
+        .take(viewport_lines)
+        .cloned()
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(visible_lines).wrap(Wrap { trim: false }),
+        inner,
+    );
+
+    if lines.len() > viewport_lines {
+        let selected_position = scrollbar_position_from_offset(scroll, lines.len(), viewport_lines);
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(lines.len())
+            .viewport_content_length(viewport_lines)
+            .position(selected_position);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("▐")
+            .thumb_style(Style::default().fg(palette.subtle_text));
+        frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+    }
 }
 
 fn render_task_list_panel(
@@ -803,9 +854,7 @@ fn markdown_to_lines(markdown: &str, palette: ThemePalette) -> Vec<MarkdownRende
                     .fg(heading_color)
                     .add_modifier(Modifier::BOLD),
             );
-            lines.push(
-                line,
-            );
+            lines.push(line);
             continue;
         }
 
@@ -825,10 +874,8 @@ fn markdown_to_lines(markdown: &str, palette: ThemePalette) -> Vec<MarkdownRende
             continue;
         }
         if let Some((prefix, content)) = ordered_list_content(start_trimmed) {
-            let ordered_prefix = Span::styled(
-                format!("{prefix} "),
-                Style::default().fg(palette.accent),
-            );
+            let ordered_prefix =
+                Span::styled(format!("{prefix} "), Style::default().fg(palette.accent));
             lines.push(markdown_line_with_prefix(ordered_prefix, content, palette));
             continue;
         }
@@ -974,40 +1021,39 @@ fn markdown_inline_spans(input: &str, palette: ThemePalette) -> MarkdownInlineRe
     let mut code = false;
     let mut current_link: Option<String> = None;
     let mut col = 0usize;
-    let push_buffer =
-        |buffer: &mut String,
-         spans: &mut Vec<Span<'static>>,
-         hyperlinks: &mut Vec<MarkdownHyperlinkRun>,
-         bold: bool,
-         italic: bool,
-         code: bool,
-         current_link: Option<&str>,
-         col: &mut usize| {
-            if buffer.is_empty() {
-                return;
-            }
-            let mut style = Style::default().fg(palette.text);
-            if bold {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            if italic {
-                style = style.add_modifier(Modifier::ITALIC);
-            }
-            if code {
-                style = style.bg(palette.border).fg(palette.accent);
-            }
-            let text = std::mem::take(buffer);
-            let width = UnicodeWidthStr::width(text.as_str());
-            if let Some(url) = current_link {
-                hyperlinks.push(MarkdownHyperlinkRun {
-                    start_col: *col,
-                    text: text.clone(),
-                    url: url.to_string(),
-                });
-            }
-            spans.push(Span::styled(text, style));
-            *col = col.saturating_add(width);
-        };
+    let push_buffer = |buffer: &mut String,
+                       spans: &mut Vec<Span<'static>>,
+                       hyperlinks: &mut Vec<MarkdownHyperlinkRun>,
+                       bold: bool,
+                       italic: bool,
+                       code: bool,
+                       current_link: Option<&str>,
+                       col: &mut usize| {
+        if buffer.is_empty() {
+            return;
+        }
+        let mut style = Style::default().fg(palette.text);
+        if bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if italic {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if code {
+            style = style.bg(palette.border).fg(palette.accent);
+        }
+        let text = std::mem::take(buffer);
+        let width = UnicodeWidthStr::width(text.as_str());
+        if let Some(url) = current_link {
+            hyperlinks.push(MarkdownHyperlinkRun {
+                start_col: *col,
+                text: text.clone(),
+                url: url.to_string(),
+            });
+        }
+        spans.push(Span::styled(text, style));
+        *col = col.saturating_add(width);
+    };
 
     for token in markdown_inline_tokens(input) {
         if token.url.as_ref() != current_link.as_ref() {
@@ -1320,12 +1366,81 @@ fn render_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect, palette: Them
     }
 }
 
-fn favorite_tasks(tasks: &[Task]) -> Vec<&Task> {
-    tasks
-        .iter()
-        .filter(|task| task.deleted_at.is_none() && task.status != TaskStatus::Done)
-        .take(3)
-        .collect()
+fn favorite_item_line(
+    row: FavoriteListRowView,
+    symbols: Symbols,
+    width: u16,
+    palette: ThemePalette,
+) -> Line<'static> {
+    let (marker, color) = match row.color {
+        FavoriteItemColor::Project(color) => (
+            format!("{} ", symbols.project),
+            palette.project_color(color),
+        ),
+        FavoriteItemColor::Tag(color) => (
+            format!("{} ", symbols.tag),
+            palette.project_color(project_color_for_tag(color)),
+        ),
+        FavoriteItemColor::Filter(color) => (
+            "ƒ ".to_string(),
+            palette.project_color(project_color_for_filter(color)),
+        ),
+    };
+    let selection_style = if row.is_selected {
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.border)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let count_text = format!(" {}", row.task_count);
+    let name_width = (width as usize)
+        .saturating_sub(symbols.favorite.width())
+        .saturating_sub(1)
+        .saturating_sub(marker.width())
+        .saturating_sub(count_text.width())
+        .max(1);
+    let mut spans = vec![
+        Span::styled(
+            format!("{} ", symbols.favorite),
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(palette.subtle_text))
+            },
+        ),
+        Span::styled(
+            marker,
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(color))
+            },
+        ),
+        Span::styled(
+            ellipsize_end(row.name.as_str(), name_width),
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(color))
+            },
+        ),
+        Span::styled(
+            count_text,
+            if row.is_selected {
+                Style::default().fg(palette.subtle_text).bg(palette.border)
+            } else {
+                Style::default().fg(palette.subtle_text)
+            },
+        ),
+    ];
+    let current_width = Line::from(spans.clone()).width();
+    let padding = (width as usize).saturating_sub(current_width);
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), selection_style));
+    }
+    Line::from(spans)
 }
 
 fn task_summary_line(
@@ -4898,8 +5013,7 @@ mod tests {
     use super::{
         FormPreviewPanelView, PreviewLineView, Symbols, TaskTagRowSegment,
         format_task_tags_for_row, input_window_view, markdown_inline_spans, markdown_inline_tokens,
-        preview_panel_lines,
-        preview_panel_required_height,
+        preview_panel_lines, preview_panel_required_height,
     };
     use crate::config::GlyphMode;
     use crate::domain::TagColor;
@@ -5097,17 +5211,17 @@ mod tests {
         assert_eq!(tokens[0].text, "See ");
         assert!(tokens[0].url.is_none());
         assert_eq!(tokens[1].text, "Rust");
-        assert_eq!(
-            tokens[1].url.as_deref(),
-            Some("https://www.rust-lang.org/")
-        );
+        assert_eq!(tokens[1].url.as_deref(), Some("https://www.rust-lang.org/"));
         assert_eq!(tokens[2].text, " docs");
         assert!(tokens[2].url.is_none());
     }
 
     #[test]
     fn markdown_inline_spans_track_hyperlinks_for_overlay() {
-        let inline = markdown_inline_spans("Visit [Rust](https://www.rust-lang.org/) now", test_palette());
+        let inline = markdown_inline_spans(
+            "Visit [Rust](https://www.rust-lang.org/) now",
+            test_palette(),
+        );
         let rendered_text = inline
             .spans
             .iter()

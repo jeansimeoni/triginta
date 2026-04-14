@@ -1,6 +1,6 @@
-use std::{env, fs, process::Command, time::Duration};
 #[cfg(debug_assertions)]
 use std::path::PathBuf;
+use std::{env, fs, process::Command, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime};
@@ -955,6 +955,29 @@ pub struct FilterListRowView {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FavoriteItemKind {
+    Project(ProjectId),
+    Tag(TagId),
+    Filter(FilterId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FavoriteItemColor {
+    Project(ProjectColor),
+    Tag(TagColor),
+    Filter(FilterColor),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FavoriteListRowView {
+    pub item: FavoriteItemKind,
+    pub name: String,
+    pub color: FavoriteItemColor,
+    pub task_count: usize,
+    pub is_selected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilterEditorField {
     Name,
     Query,
@@ -1335,10 +1358,28 @@ const PROJECTS_SHORTCUTS: &[ShortcutTip] = &[
     },
 ];
 
-const FAVORITES_SHORTCUTS: &[ShortcutTip] = &[ShortcutTip {
-    keys: "1-8 / Tab",
-    description: "change focus",
-}];
+const FAVORITES_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "move favorite",
+    },
+    ShortcutTip {
+        keys: "PgUp/PgDn",
+        description: "page",
+    },
+    ShortcutTip {
+        keys: "Home/End",
+        description: "jump first/last",
+    },
+    ShortcutTip {
+        keys: "f",
+        description: "remove favorite",
+    },
+    ShortcutTip {
+        keys: "1-8 / Tab",
+        description: "change focus",
+    },
+];
 
 const TASKS_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
@@ -1567,6 +1608,7 @@ pub struct App {
     selected_project_id: Option<ProjectId>,
     selected_tag_id: Option<TagId>,
     selected_filter_id: Option<FilterId>,
+    selected_favorite_item: Option<FavoriteItemKind>,
     assigned_task_id: Option<TaskId>,
     active_focus_task_id: Option<TaskId>,
     task_input: Option<TaskInputState>,
@@ -1647,6 +1689,7 @@ impl App {
             selected_project_id: None,
             selected_tag_id: None,
             selected_filter_id: None,
+            selected_favorite_item: None,
             assigned_task_id: None,
             active_focus_task_id: None,
             task_input: None,
@@ -1674,6 +1717,7 @@ impl App {
             screen_data,
         };
         app.sync_task_selection();
+        app.sync_favorite_selection();
         app
     }
 
@@ -1873,6 +1917,59 @@ impl App {
             .filters
             .iter()
             .any(|filter| filter.deleted_at.is_none())
+    }
+
+    pub fn favorite_rows(&self) -> Vec<FavoriteListRowView> {
+        let mut rows = Vec::new();
+
+        let mut projects = self
+            .screen_data
+            .projects
+            .iter()
+            .filter(|project| {
+                project.deleted_at.is_none() && !project.is_inbox && project.is_favorite
+            })
+            .collect::<Vec<_>>();
+        projects.sort_by(|left, right| self.compare_projects(left, right));
+        rows.extend(projects.into_iter().map(|project| FavoriteListRowView {
+            item: FavoriteItemKind::Project(project.id),
+            name: project.name.clone(),
+            color: FavoriteItemColor::Project(project.color),
+            task_count: self.tasks_for_project_filter(Some(project.id)),
+            is_selected: self.selected_favorite_item == Some(FavoriteItemKind::Project(project.id)),
+        }));
+
+        let mut tags = self
+            .screen_data
+            .tags
+            .iter()
+            .filter(|tag| tag.deleted_at.is_none() && tag.is_favorite)
+            .collect::<Vec<_>>();
+        tags.sort_by(|left, right| self.compare_tags(left, right));
+        rows.extend(tags.into_iter().map(|tag| FavoriteListRowView {
+            item: FavoriteItemKind::Tag(tag.id),
+            name: tag.name.clone(),
+            color: FavoriteItemColor::Tag(tag.color),
+            task_count: self.tasks_for_tag_filter(Some(tag.id)),
+            is_selected: self.selected_favorite_item == Some(FavoriteItemKind::Tag(tag.id)),
+        }));
+
+        let mut filters = self
+            .screen_data
+            .filters
+            .iter()
+            .filter(|filter| filter.deleted_at.is_none() && filter.is_favorite)
+            .collect::<Vec<_>>();
+        filters.sort_by(|left, right| self.compare_filters(left, right));
+        rows.extend(filters.into_iter().map(|filter| FavoriteListRowView {
+            item: FavoriteItemKind::Filter(filter.id),
+            name: filter.name.clone(),
+            color: FavoriteItemColor::Filter(filter.color),
+            task_count: self.tasks_for_filter(Some(filter.id)),
+            is_selected: self.selected_favorite_item == Some(FavoriteItemKind::Filter(filter.id)),
+        }));
+
+        rows
     }
 
     pub fn task_input_view(&self) -> Option<TaskInputView> {
@@ -4581,6 +4678,18 @@ impl App {
         }
     }
 
+    fn sync_favorite_selection(&mut self) {
+        let items = self
+            .favorite_rows()
+            .into_iter()
+            .map(|row| row.item)
+            .collect::<Vec<_>>();
+        self.selected_favorite_item = match self.selected_favorite_item {
+            Some(selected) if items.contains(&selected) => Some(selected),
+            _ => items.first().copied(),
+        };
+    }
+
     fn refresh_tasks(&mut self) -> Result<()> {
         self.screen_data.tasks = self.database.task_repository().list_all()?;
         self.screen_data.projects = self.database.project_repository().list_all()?;
@@ -4606,6 +4715,7 @@ impl App {
         self.sync_tag_selection();
         self.sync_filter_selection();
         self.sync_task_selection();
+        self.sync_favorite_selection();
         Ok(())
     }
 
@@ -5803,6 +5913,21 @@ impl App {
         self.selected_filter_id = rows[next_index].filter_id;
     }
 
+    fn move_favorite_selection(&mut self, offset: isize) {
+        let rows = self.favorite_rows();
+        if rows.is_empty() {
+            self.selected_favorite_item = None;
+            return;
+        }
+        let current_index = rows
+            .iter()
+            .position(|row| Some(row.item) == self.selected_favorite_item)
+            .unwrap_or(0);
+        let next_index = (current_index as isize + offset)
+            .clamp(0, rows.len().saturating_sub(1) as isize) as usize;
+        self.selected_favorite_item = Some(rows[next_index].item);
+    }
+
     fn open_create_filter_popup(&mut self) {
         self.filter_editor = Some(FilterEditorState {
             filter_id: None,
@@ -5976,6 +6101,60 @@ impl App {
                 is_favorite: !project.is_favorite,
             },
         )?;
+        self.refresh_tasks()?;
+        Ok(())
+    }
+
+    fn toggle_selected_favorite_item(&mut self) -> Result<()> {
+        let Some(item) = self.selected_favorite_item else {
+            return Ok(());
+        };
+        match item {
+            FavoriteItemKind::Project(project_id) => {
+                let Some(project) = self.project_by_id(project_id).cloned() else {
+                    return Ok(());
+                };
+                if project.is_inbox {
+                    return Ok(());
+                }
+                self.database.project_repository().update(
+                    project_id,
+                    &ProjectUpdate {
+                        name: project.name,
+                        parent_project_id: project.parent_project_id,
+                        color: project.color,
+                        is_favorite: !project.is_favorite,
+                    },
+                )?;
+            }
+            FavoriteItemKind::Tag(tag_id) => {
+                let Some(tag) = self.tag_by_id(tag_id).cloned() else {
+                    return Ok(());
+                };
+                self.database.tag_repository().update(
+                    tag_id,
+                    &TagUpdate {
+                        name: tag.name,
+                        color: tag.color,
+                        is_favorite: !tag.is_favorite,
+                    },
+                )?;
+            }
+            FavoriteItemKind::Filter(filter_id) => {
+                let Some(filter) = self.filter_by_id(filter_id).cloned() else {
+                    return Ok(());
+                };
+                self.database.filter_repository().update(
+                    filter_id,
+                    &FilterUpdate {
+                        name: filter.name,
+                        query: filter.query,
+                        color: filter.color,
+                        is_favorite: !filter.is_favorite,
+                    },
+                )?;
+            }
+        }
         self.refresh_tasks()?;
         Ok(())
     }
@@ -7894,6 +8073,12 @@ impl App {
                     self.scroll_history_up();
                 }
             }
+            KeyCode::Char('j') | KeyCode::Down if self.focused_panel == PanelFocus::Favorites => {
+                self.move_favorite_selection(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up if self.focused_panel == PanelFocus::Favorites => {
+                self.move_favorite_selection(-1);
+            }
             KeyCode::PageDown if self.focused_panel == PanelFocus::History => {
                 if self.active_history_panel_tab == HistoryPanelTab::Today {
                     self.scroll_history_page_down();
@@ -7904,6 +8089,12 @@ impl App {
                     self.scroll_history_page_up();
                 }
             }
+            KeyCode::PageDown if self.focused_panel == PanelFocus::Favorites => {
+                self.move_favorite_selection(5);
+            }
+            KeyCode::PageUp if self.focused_panel == PanelFocus::Favorites => {
+                self.move_favorite_selection(-5);
+            }
             KeyCode::Home if self.focused_panel == PanelFocus::History => {
                 if self.active_history_panel_tab == HistoryPanelTab::Today {
                     self.history_scroll = 0;
@@ -7913,6 +8104,12 @@ impl App {
                 if self.active_history_panel_tab == HistoryPanelTab::Today {
                     self.history_scroll = self.max_history_scroll();
                 }
+            }
+            KeyCode::Home if self.focused_panel == PanelFocus::Favorites => {
+                self.selected_favorite_item = self.favorite_rows().first().map(|row| row.item);
+            }
+            KeyCode::End if self.focused_panel == PanelFocus::Favorites => {
+                self.selected_favorite_item = self.favorite_rows().last().map(|row| row.item);
             }
             KeyCode::Char('j') | KeyCode::Down if self.focused_panel == PanelFocus::Navigation => {
                 match self.active_sidebar_tab {
@@ -8123,6 +8320,9 @@ impl App {
                     && self.active_sidebar_tab == SidebarTab::Filters =>
             {
                 self.reorder_selected_filter(-1)?;
+            }
+            KeyCode::Char('f') if self.focused_panel == PanelFocus::Favorites => {
+                self.toggle_selected_favorite_item()?;
             }
             KeyCode::Char('j') | KeyCode::Down
                 if self.focused_panel == PanelFocus::RightPane
@@ -8628,9 +8828,10 @@ mod tests {
     use crate::theme::ThemePalette;
 
     use super::{
-        App, CycleEntryState, HistoryPanelTab, PanelFocus, PreviewLineView, RightPanelTab,
-        RunOptions, ScreenData, SidebarTab, TaskEditorField, TaskEditorState, TaskView, TimerPhase,
-        TimerRunState, apply_debug_overrides, chrono_duration, duration_to_stored_minutes,
+        App, CycleEntryState, FavoriteItemKind, HistoryPanelTab, PanelFocus, PreviewLineView,
+        RightPanelTab, RunOptions, ScreenData, SidebarTab, TaskEditorField, TaskEditorState,
+        TaskView, TimerPhase, TimerRunState, apply_debug_overrides, chrono_duration,
+        duration_to_stored_minutes,
     };
 
     fn assert_key_value_preview_line(
@@ -8846,6 +9047,155 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Left)
             .expect("sidebar tab should switch");
         assert_eq!(app.active_sidebar_tab(), SidebarTab::Projects);
+    }
+
+    #[test]
+    fn favorites_rows_are_grouped_by_type_and_projects_are_flat() {
+        let mut app = test_app();
+        let now = Local::now();
+        app.config.ui.project_list_sort = ProjectSortOrder::NameAsc;
+
+        let parent = app
+            .database
+            .project_repository()
+            .create("Alpha Parent", None, ProjectColor::Blue, true, now)
+            .expect("parent project should create");
+        let child = app
+            .database
+            .project_repository()
+            .create("Beta Child", Some(parent.id), ProjectColor::Teal, true, now)
+            .expect("child project should create");
+        let tag = app
+            .database
+            .tag_repository()
+            .create("Urgent", TagColor::Red, true, now)
+            .expect("tag should create");
+        let filter = app
+            .database
+            .filter_repository()
+            .create("Today", "today", FilterColor::Orange, true, now)
+            .expect("filter should create");
+        app.refresh_tasks().expect("data should refresh");
+
+        let rows = app.favorite_rows();
+        assert_eq!(rows.len(), 4);
+
+        assert_eq!(rows[0].item, FavoriteItemKind::Project(parent.id));
+        assert_eq!(rows[0].name, "Alpha Parent");
+        assert_eq!(rows[1].item, FavoriteItemKind::Project(child.id));
+        assert_eq!(rows[1].name, "Beta Child");
+        assert_eq!(rows[2].item, FavoriteItemKind::Tag(tag.id));
+        assert_eq!(rows[3].item, FavoriteItemKind::Filter(filter.id));
+    }
+
+    #[test]
+    fn favorites_panel_moves_selection_and_unfavorites_selected_item() {
+        let mut app = test_app();
+        let now = Local::now();
+
+        let project = app
+            .database
+            .project_repository()
+            .create("Project Favorite", None, ProjectColor::Blue, true, now)
+            .expect("project should create");
+        let tag = app
+            .database
+            .tag_repository()
+            .create("Tag Favorite", TagColor::Teal, true, now)
+            .expect("tag should create");
+        let filter = app
+            .database
+            .filter_repository()
+            .create("Filter Favorite", "today", FilterColor::SkyBlue, true, now)
+            .expect("filter should create");
+        app.refresh_tasks().expect("data should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch to favorites");
+        assert_eq!(app.focused_panel(), PanelFocus::Favorites);
+        assert_eq!(
+            app.favorite_rows()
+                .iter()
+                .find(|row| row.is_selected)
+                .map(|row| row.item),
+            Some(FavoriteItemKind::Project(project.id))
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("selection should move");
+        assert_eq!(
+            app.favorite_rows()
+                .iter()
+                .find(|row| row.is_selected)
+                .map(|row| row.item),
+            Some(FavoriteItemKind::Tag(tag.id))
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Char('f'))
+            .expect("favorite should toggle");
+
+        let updated_tag = app
+            .database
+            .tag_repository()
+            .list_all()
+            .expect("tags should list")
+            .into_iter()
+            .find(|candidate| candidate.id == tag.id)
+            .expect("tag should exist");
+        assert!(!updated_tag.is_favorite);
+
+        let remaining = app.favorite_rows();
+        assert_eq!(remaining.len(), 2);
+        assert!(
+            remaining
+                .iter()
+                .any(|row| row.item == FavoriteItemKind::Project(project.id))
+        );
+        assert!(
+            remaining
+                .iter()
+                .any(|row| row.item == FavoriteItemKind::Filter(filter.id))
+        );
+    }
+
+    #[test]
+    fn favorites_panel_home_end_select_first_and_last_rows() {
+        let mut app = test_app();
+        let now = Local::now();
+
+        let project = app
+            .database
+            .project_repository()
+            .create("P", None, ProjectColor::Blue, true, now)
+            .expect("project should create");
+        let filter = app
+            .database
+            .filter_repository()
+            .create("F", "today", FilterColor::Orange, true, now)
+            .expect("filter should create");
+        app.refresh_tasks().expect("data should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch to favorites");
+        app.handle_key(crossterm::event::KeyCode::End)
+            .expect("end should jump");
+        assert_eq!(
+            app.favorite_rows()
+                .iter()
+                .find(|row| row.is_selected)
+                .map(|row| row.item),
+            Some(FavoriteItemKind::Filter(filter.id))
+        );
+
+        app.handle_key(crossterm::event::KeyCode::Home)
+            .expect("home should jump");
+        assert_eq!(
+            app.favorite_rows()
+                .iter()
+                .find(|row| row.is_selected)
+                .map(|row| row.item),
+            Some(FavoriteItemKind::Project(project.id))
+        );
     }
 
     #[test]
