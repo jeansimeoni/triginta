@@ -430,40 +430,30 @@ enum TaskEditorField {
 }
 
 impl TaskEditorField {
-    const ALL: [Self; 8] = [
-        Self::Title,
-        Self::Project,
-        Self::Tags,
-        Self::DueDate,
-        Self::Priority,
-        Self::DueTime,
-        Self::Recurrence,
-        Self::Description,
-    ];
-
-    fn index(self) -> usize {
+    fn next(self) -> Self {
         match self {
-            Self::Title => 0,
-            Self::Project => 1,
-            Self::Tags => 2,
-            Self::DueDate => 3,
-            Self::Priority => 4,
-            Self::DueTime => 5,
-            Self::Recurrence => 6,
-            Self::Description => 7,
+            Self::Title => Self::Description,
+            Self::Description => Self::Project,
+            Self::Project => Self::Tags,
+            Self::Tags => Self::DueDate,
+            Self::DueDate => Self::Priority,
+            Self::Priority => Self::DueTime,
+            Self::DueTime => Self::Recurrence,
+            Self::Recurrence => Self::Recurrence,
         }
     }
 
-    fn from_index(index: usize) -> Self {
-        Self::ALL[index.min(Self::ALL.len().saturating_sub(1))]
-    }
-
-    fn next(self) -> Self {
-        Self::from_index((self.index() + 1).min(Self::ALL.len().saturating_sub(1)))
-    }
-
     fn previous(self) -> Self {
-        Self::from_index(self.index().saturating_sub(1))
+        match self {
+            Self::Title => Self::Title,
+            Self::Description => Self::Title,
+            Self::Project => Self::Description,
+            Self::Tags => Self::Project,
+            Self::DueDate => Self::Tags,
+            Self::Priority => Self::DueDate,
+            Self::DueTime => Self::Priority,
+            Self::Recurrence => Self::DueTime,
+        }
     }
 }
 
@@ -1860,8 +1850,6 @@ impl App {
                     effective_priority,
                     due_preview.as_ref(),
                     editor.focused_field,
-                    (!editor.description_input.trim().is_empty())
-                        .then_some(editor.description_input.as_str()),
                 ),
             }
         })
@@ -2023,7 +2011,6 @@ impl App {
         priority: TaskPriority,
         due_preview: Option<&TaskDuePreviewView>,
         focused_field: TaskEditorField,
-        description_preview: Option<&str>,
     ) -> FormPreviewPanelView {
         let mut preview_lines = vec![PreviewLineView::key_value("Project", project_value)];
         if !tags_value.trim().is_empty() {
@@ -2055,19 +2042,6 @@ impl App {
             ));
         } else {
             preview_lines.push(PreviewLineView::key_value("Summary", "no due date"));
-        }
-        if let Some(description_preview) = description_preview {
-            let preview = description_preview
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim();
-            if !preview.is_empty() {
-                preview_lines.push(PreviewLineView::key_value(
-                    "Description",
-                    ellipsize_preview(preview, 48),
-                ));
-            }
         }
 
         let tips = match focused_field {
@@ -7606,16 +7580,6 @@ fn last_7_days_bounds(now: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>
         .single()
         .expect("local midnight should be representable");
     (start, today_end)
-}
-
-fn ellipsize_preview(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    text.chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>()
-        + "…"
 }
 
 fn fuzzy_matches(query: &str, candidate: &str) -> bool {

@@ -2055,7 +2055,7 @@ fn render_task_editor_popup(
     palette: ThemePalette,
 ) {
     let base_total_height = 30;
-    let form_height = 22;
+    let form_height = 21;
     let preview_height = preview_panel_required_height(&editor.preview_panel, 3);
     let area = anchored_form_rect(
         frame.area(),
@@ -2065,11 +2065,12 @@ fn render_task_editor_popup(
     );
     frame.render_widget(Clear, area);
 
+    let form_section_height = form_height.min(area.height);
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(form_height),
-            Constraint::Length(preview_height),
+            Constraint::Length(form_section_height),
+            Constraint::Min(0),
         ])
         .split(area);
     let form_block = Block::default()
@@ -2088,8 +2089,7 @@ fn render_task_editor_popup(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(5),
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
@@ -2188,7 +2188,9 @@ fn render_task_editor_popup(
         Some("every monday at 9am"),
         palette,
     );
-    render_form_preview_panel(frame, sections[1], &editor.preview_panel, palette);
+    if sections[1].height > 0 {
+        render_form_preview_panel(frame, sections[1], &editor.preview_panel, palette);
+    }
 
     if (editor.focus.project || editor.focus.title) && !editor.project_suggestions.is_empty() {
         let dropdown_height = editor.project_suggestions.len().min(4) as u16 + 2;
