@@ -2917,7 +2917,7 @@ impl App {
             return None;
         }
         let query = value[token_start + 1..safe_cursor].trim_start();
-        if query.is_empty() || query.contains('\n') {
+        if query.is_empty() || query.contains('\n') || query.contains('#') {
             return None;
         }
         Some((token_start, safe_cursor, query.to_string()))
@@ -2926,16 +2926,21 @@ impl App {
     fn active_tag_field_query(&self, value: &str, cursor: usize) -> Option<(usize, usize, String)> {
         let safe_cursor = cursor.min(value.len());
         let before_cursor = &value[..safe_cursor];
-        let token_start = before_cursor
-            .rfind(|character: char| character.is_whitespace() || character == ',')
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        let raw = value[token_start..safe_cursor].trim();
-        if raw.is_empty() {
+        let token_start = before_cursor.rfind('@')?;
+        if token_start > 0
+            && !value[..token_start]
+                .chars()
+                .last()
+                .is_some_and(char::is_whitespace)
+            && !value[..token_start]
+                .chars()
+                .last()
+                .is_some_and(|ch| ch == ',')
+        {
             return None;
         }
-        let query = raw.trim_start_matches('@').trim();
-        if query.is_empty() || query.contains('\n') {
+        let query = value[token_start + 1..safe_cursor].trim_start();
+        if query.is_empty() || query.contains('\n') || query.contains('#') {
             return None;
         }
         Some((token_start, safe_cursor, query.to_string()))
@@ -3013,39 +3018,87 @@ impl App {
     }
 
     fn extract_tag_references(&self, raw: String) -> (String, Vec<String>) {
-        let mut cleaned_parts = Vec::new();
+        let mut cleaned = String::new();
         let mut tag_queries = Vec::new();
-        for token in raw.split_whitespace() {
-            if let Some(query) = token.strip_prefix('@') {
-                let normalized = query.trim();
-                if !normalized.is_empty() {
-                    let normalized = normalized.to_string();
-                    if !tag_queries.contains(&normalized) {
-                        tag_queries.push(normalized);
-                    }
-                    continue;
-                }
+        let mut cursor = 0usize;
+
+        while let Some((start, end, query)) = Self::next_tag_reference(raw.as_str(), cursor) {
+            cleaned.push_str(&raw[cursor..start]);
+            if !tag_queries.contains(&query) {
+                tag_queries.push(query);
             }
-            cleaned_parts.push(token.to_string());
+            cursor = end;
         }
-        (cleaned_parts.join(" "), tag_queries)
+
+        if cursor < raw.len() {
+            cleaned.push_str(&raw[cursor..]);
+        }
+
+        let cleaned = cleaned
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string();
+
+        (cleaned, tag_queries)
     }
 
     fn parse_tags_field_queries(&self, value: &str) -> Vec<String> {
         let mut result = Vec::new();
-        for token in value
-            .split(|character: char| character.is_whitespace() || character == ',')
-            .filter(|token| !token.trim().is_empty())
-        {
-            let query = token.trim().trim_start_matches('@');
-            if !query.is_empty() {
-                let normalized = query.to_string();
-                if !result.contains(&normalized) {
-                    result.push(normalized);
-                }
+        let mut cursor = 0usize;
+        while let Some((_, end, query)) = Self::next_tag_reference(value, cursor) {
+            if !result.contains(&query) {
+                result.push(query);
             }
+            cursor = end;
         }
         result
+    }
+
+    fn next_tag_reference(value: &str, mut search_from: usize) -> Option<(usize, usize, String)> {
+        while search_from < value.len() {
+            let relative = value[search_from..].find('@')?;
+            let start = search_from + relative;
+            if start > 0
+                && !value[..start]
+                    .chars()
+                    .last()
+                    .is_some_and(char::is_whitespace)
+                && !value[..start].chars().last().is_some_and(|ch| ch == ',')
+            {
+                search_from = start + 1;
+                continue;
+            }
+
+            let mut end = value.len();
+            for (offset, character) in value[start + 1..].char_indices() {
+                let index = start + 1 + offset;
+                if character == '\n' {
+                    end = index;
+                    break;
+                }
+                if (character == '@' || character == '#')
+                    && value[..index]
+                        .chars()
+                        .last()
+                        .is_some_and(char::is_whitespace)
+                {
+                    end = index;
+                    break;
+                }
+            }
+
+            let query = value[start + 1..end].trim();
+            if query.is_empty() {
+                search_from = end.min(start + 1);
+                continue;
+            }
+
+            return Some((start, end, query.to_string()));
+        }
+
+        None
     }
 
     fn inbox_project_id(&self) -> ProjectId {
@@ -7353,6 +7406,93 @@ mod tests {
         let task = app.selected_task().expect("task should be selected");
         assert_eq!(task.title, "Draft spec");
         assert_eq!(task.project_id, project.id);
+    }
+
+    #[test]
+    fn create_popup_enter_submits_with_inline_tag_and_exact_project_reference() {
+        let mut app = test_app();
+        let project = app
+            .database
+            .project_repository()
+            .create(
+                "Another Project",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "This is a task @Work #Another Project".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should submit task");
+
+        assert!(app.task_input_view().is_none());
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "This is a task");
+        assert_eq!(task.project_id, project.id);
+
+        let task_tags = app
+            .task_tags(task.id)
+            .into_iter()
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(task_tags, vec!["Work".to_string()]);
+    }
+
+    #[test]
+    fn create_popup_enter_submits_with_multi_word_tag_and_project_reference() {
+        let mut app = test_app();
+        let project = app
+            .database
+            .project_repository()
+            .create(
+                "Another Project",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "This is a task @Deep Work #Another Project".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should submit task");
+
+        assert!(app.task_input_view().is_none());
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "This is a task");
+        assert_eq!(task.project_id, project.id);
+
+        let task_tags = app
+            .task_tags(task.id)
+            .into_iter()
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(task_tags, vec!["Deep Work".to_string()]);
+    }
+
+    #[test]
+    fn parse_tags_field_queries_supports_multi_word_tag_names() {
+        let app = test_app();
+        assert_eq!(
+            app.parse_tags_field_queries("@Deep Work @Personal".trim()),
+            vec!["Deep Work".to_string(), "Personal".to_string()]
+        );
     }
 
     #[test]
