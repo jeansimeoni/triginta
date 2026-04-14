@@ -1228,7 +1228,7 @@ const INPUT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
 
 const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
-        keys: "Ctrl+Enter",
+        keys: "F12",
         description: "save",
     },
     ShortcutTip {
@@ -2069,7 +2069,7 @@ impl App {
         let tips = match focused_field {
             TaskEditorField::Title => vec!["Press # for selecting a project".to_string()],
             TaskEditorField::Description => vec![
-                "Enter inserts line break, Ctrl+Enter saves, Ctrl+E opens external editor"
+                "Enter inserts line break, F12 saves, Ctrl+E opens external editor"
                     .to_string(),
             ],
             TaskEditorField::Project => {
@@ -6169,7 +6169,7 @@ impl App {
 
             match code {
                 KeyCode::Esc => {}
-                KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::F(12) => {
                     return self.submit_task_editor(editor, now);
                 }
                 KeyCode::Char('e')

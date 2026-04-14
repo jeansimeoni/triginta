@@ -2610,7 +2610,7 @@ fn render_editor_calendar(
 fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "F1-F8 fields  Ctrl+Enter save  Ctrl+E ext editor  F8 recurrence  F9 cal  F10 clear",
+            "F1-F8 fields  F12 save  Ctrl+E ext editor  F8 recurrence  F9 cal  F10 clear",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
@@ -2619,7 +2619,7 @@ fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'stati
     Line::from(vec![
         Span::styled("F1-F8", Style::default().fg(palette.subtle_text)),
         Span::raw(" fields  "),
-        Span::styled("Ctrl+↵", Style::default().fg(palette.subtle_text)),
+        Span::styled("F12", Style::default().fg(palette.subtle_text)),
         Span::raw(" save  "),
         Span::styled("Ctrl+e", Style::default().fg(palette.subtle_text)),
         Span::raw(" ext  "),
