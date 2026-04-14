@@ -22,7 +22,8 @@ use crate::{
     },
     config::GlyphMode,
     domain::{
-        DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, TagColor, Task, TaskStatus,
+        DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, TagColor, Task, TaskPriority,
+        TaskStatus,
     },
     theme::ThemePalette,
 };
@@ -611,6 +612,15 @@ fn render_task_details_panel(
                 task.created_at.format("%Y-%m-%d %H:%M")
             )),
         ];
+        if let Some(indicator) = task_priority_indicator(task.priority, symbols) {
+            lines.push(Line::from(vec![
+                Span::raw("Priority: "),
+                Span::styled(
+                    indicator,
+                    Style::default().fg(priority_color(task.priority, palette)),
+                ),
+            ]));
+        }
         if let Some(due) = &task.due {
             let due_text = due
                 .datetime
@@ -837,6 +847,7 @@ fn task_summary_line(
         TaskStatus::Done => symbols.done,
     };
     let now = Local::now();
+    let priority_indicator = task_priority_indicator(task.priority, symbols);
     let due_text = task
         .due
         .as_ref()
@@ -858,19 +869,39 @@ fn task_summary_line(
                     .unwrap_or(0)
         })
         .unwrap_or(0);
+    let marker_width = marker.width();
+    let priority_width = priority_indicator
+        .as_ref()
+        .map(|value| value.width() + 1)
+        .unwrap_or(0);
     let left_width = (width as usize)
         .saturating_sub(leading_padding)
         .saturating_sub(due_meta_width)
         .saturating_sub(due_gap);
-    let title_text = ellipsize_end(&format!("{marker} {}", task.title), left_width);
+    let title_width = left_width
+        .saturating_sub(marker_width)
+        .saturating_sub(1)
+        .saturating_sub(priority_width);
+    let title_text = ellipsize_end(&task.title, title_width);
 
     let row_style = task_row_style(task, palette, selected, now);
     let due_style = task_due_style(task, palette, selected, now);
     let recurring_style = task_recurring_style(task, palette, selected, now);
-    let mut spans = vec![
-        Span::styled(" ".repeat(leading_padding), row_style),
-        Span::styled(title_text, row_style),
-    ];
+    let priority_style = if selected {
+        row_style
+    } else {
+        Style::default()
+            .fg(priority_color(task.priority, palette))
+            .add_modifier(Modifier::BOLD)
+    };
+    let mut spans = vec![Span::styled(" ".repeat(leading_padding), row_style)];
+    spans.push(Span::styled(marker.to_string(), row_style));
+    spans.push(Span::styled(" ".to_string(), row_style));
+    if let Some(priority_indicator) = priority_indicator {
+        spans.push(Span::styled(priority_indicator, priority_style));
+        spans.push(Span::styled(" ".to_string(), row_style));
+    }
+    spans.push(Span::styled(title_text, row_style));
 
     if due_meta_width > 0 {
         let current_width = Line::from(spans.clone()).width();
@@ -918,9 +949,13 @@ fn task_project_line(
         format_task_tags_for_row(task_tags_for_task(data, task.id).as_slice(), width, symbols);
     let tags_width = task_tag_segments_width(tags.as_slice(), symbols);
     let status_marker = task_status_symbol(task.status, symbols);
+    let priority_width = task_priority_indicator(task.priority, symbols)
+        .map(|value| value.width() + 1)
+        .unwrap_or(0);
     let leading_padding = 2usize
         .saturating_add(status_marker.width())
-        .saturating_add(1);
+        .saturating_add(1)
+        .saturating_add(priority_width);
     let base_style = if selected {
         Style::default()
             .fg(palette.text)
@@ -1791,7 +1826,11 @@ fn render_task_editor_popup(
 
     let due_row = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .constraints([
+            Constraint::Percentage(48),
+            Constraint::Percentage(20),
+            Constraint::Percentage(32),
+        ])
         .split(form_rows[3]);
     render_editor_field(
         frame,
@@ -1806,7 +1845,17 @@ fn render_task_editor_popup(
     render_editor_field(
         frame,
         due_row[1],
-        "Due Time [F5]",
+        "Priority [F5]",
+        &editor.priority_value,
+        editor.priority_cursor,
+        editor.focus.priority,
+        Some("p1..p4"),
+        palette,
+    );
+    render_editor_field(
+        frame,
+        due_row[2],
+        "Due Time [F6]",
         &editor.due_time_value,
         editor.due_time_cursor,
         editor.focus.due_time,
@@ -1816,7 +1865,7 @@ fn render_task_editor_popup(
     render_editor_field(
         frame,
         form_rows[4],
-        "Recurrence [F6]",
+        "Recurrence [F7]",
         &editor.recurrence_value,
         editor.recurrence_cursor,
         editor.focus.recurrence,
@@ -2066,18 +2115,18 @@ fn render_editor_calendar(
 fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "F1-F6 fields  ↑/↓ suggestions  F8 calendar  F7 clear due",
+            "F1-F7 fields  ↑/↓ suggestions  F8 calendar  F9 clear due",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
     }
 
     Line::from(vec![
-        Span::styled("F1-F6", Style::default().fg(palette.subtle_text)),
+        Span::styled("F1-F7", Style::default().fg(palette.subtle_text)),
         Span::raw(" fields  "),
         Span::styled("F8", Style::default().fg(palette.subtle_text)),
         Span::raw(" 󰃭  "),
-        Span::styled("F7", Style::default().fg(palette.subtle_text)),
+        Span::styled("F9", Style::default().fg(palette.subtle_text)),
         Span::raw(" due  "),
         Span::styled("󰄬", Style::default().fg(palette.subtle_text)),
         Span::raw(" ↵  "),
@@ -3769,6 +3818,7 @@ struct Symbols {
     hidden: &'static str,
     visible: &'static str,
     recurring: &'static str,
+    priority: &'static str,
     todo: &'static str,
     in_progress: &'static str,
     breaking: &'static str,
@@ -3779,6 +3829,7 @@ struct Symbols {
     tag_chip_left: &'static str,
     tag_chip_right: &'static str,
     tag_chip_uses_background: bool,
+    ascii_mode: bool,
 }
 
 impl Symbols {
@@ -3799,6 +3850,7 @@ impl Symbols {
                 hidden: "x",
                 visible: "o",
                 recurring: "~",
+                priority: "!",
                 todo: ".",
                 in_progress: ">",
                 breaking: "~",
@@ -3809,6 +3861,7 @@ impl Symbols {
                 tag_chip_left: "[",
                 tag_chip_right: "]",
                 tag_chip_uses_background: false,
+                ascii_mode: true,
             },
             GlyphMode::NerdFonts => Self {
                 timer: "󰔛",
@@ -3825,6 +3878,7 @@ impl Symbols {
                 hidden: "󰈉",
                 visible: "󰈈",
                 recurring: "󰑖",
+                priority: "⚑",
                 todo: "󰄱",
                 in_progress: "󰧞",
                 breaking: "󰒲",
@@ -3835,6 +3889,7 @@ impl Symbols {
                 tag_chip_left: "",
                 tag_chip_right: "",
                 tag_chip_uses_background: true,
+                ascii_mode: false,
             },
         }
     }
@@ -3929,6 +3984,28 @@ fn task_recurring_style(
         base.fg(palette.subtle_text).add_modifier(Modifier::DIM)
     } else {
         base.fg(palette.timer_short_break)
+    }
+}
+
+fn task_priority_indicator(priority: TaskPriority, symbols: Symbols) -> Option<String> {
+    match priority {
+        TaskPriority::P1 | TaskPriority::P2 | TaskPriority::P3 => {
+            if symbols.ascii_mode {
+                Some(priority.label().to_string())
+            } else {
+                Some(format!("{}{}", symbols.priority, priority.level()))
+            }
+        }
+        TaskPriority::P4 => None,
+    }
+}
+
+fn priority_color(priority: TaskPriority, palette: ThemePalette) -> Color {
+    match priority {
+        TaskPriority::P1 => palette.priority_1,
+        TaskPriority::P2 => palette.priority_2,
+        TaskPriority::P3 => palette.priority_3,
+        TaskPriority::P4 => palette.text,
     }
 }
 

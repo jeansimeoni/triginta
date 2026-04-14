@@ -102,16 +102,20 @@ pub enum TaskSortOrder {
     TitleDesc,
     CreatedNewest,
     CreatedOldest,
+    PriorityHigh,
+    PriorityLow,
 }
 
 impl TaskSortOrder {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::DueAsc,
         Self::DueDesc,
         Self::TitleAsc,
         Self::TitleDesc,
         Self::CreatedNewest,
         Self::CreatedOldest,
+        Self::PriorityHigh,
+        Self::PriorityLow,
     ];
 
     pub fn all() -> &'static [Self] {
@@ -126,6 +130,8 @@ impl TaskSortOrder {
             Self::TitleDesc => "Title Z-A",
             Self::CreatedNewest => "Created Newest",
             Self::CreatedOldest => "Created Oldest",
+            Self::PriorityHigh => "Priority High-Low",
+            Self::PriorityLow => "Priority Low-High",
         }
     }
 
@@ -137,6 +143,8 @@ impl TaskSortOrder {
             Self::TitleDesc => "title ↓",
             Self::CreatedNewest => "newest",
             Self::CreatedOldest => "oldest",
+            Self::PriorityHigh => "prio ↑",
+            Self::PriorityLow => "prio ↓",
         }
     }
 }

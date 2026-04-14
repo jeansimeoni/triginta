@@ -303,6 +303,63 @@ impl TaskStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskPriority {
+    P1,
+    P2,
+    P3,
+    P4,
+}
+
+impl TaskPriority {
+    pub fn level(self) -> u8 {
+        match self {
+            Self::P1 => 1,
+            Self::P2 => 2,
+            Self::P3 => 3,
+            Self::P4 => 4,
+        }
+    }
+
+    pub fn from_level(level: u8) -> Self {
+        match level {
+            1 => Self::P1,
+            2 => Self::P2,
+            3 => Self::P3,
+            _ => Self::P4,
+        }
+    }
+
+    pub fn from_db(value: i64) -> Self {
+        match value {
+            1 => Self::P1,
+            2 => Self::P2,
+            3 => Self::P3,
+            4 => Self::P4,
+            _ => Self::P4,
+        }
+    }
+
+    pub fn to_db(self) -> i64 {
+        i64::from(self.level())
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::P1 => "P1",
+            Self::P2 => "P2",
+            Self::P3 => "P3",
+            Self::P4 => "P4",
+        }
+    }
+}
+
+impl Default for TaskPriority {
+    fn default() -> Self {
+        Self::P4
+    }
+}
+
 // These structs are plain data carriers, similar to C structs, but ownership
 // is explicit per field. For example `title: String` means the `Task` owns the
 // heap-allocated text and will free it automatically when dropped.
@@ -320,6 +377,7 @@ pub struct Task {
     pub project_id: ProjectId,
     pub title: String,
     pub status: TaskStatus,
+    pub priority: TaskPriority,
     pub created_at: DateTime<Local>,
     pub completed_at: Option<DateTime<Local>>,
     pub deleted_at: Option<DateTime<Local>>,
@@ -330,6 +388,7 @@ pub struct Task {
 pub struct TaskUpdate {
     pub title: String,
     pub project_id: ProjectId,
+    pub priority: TaskPriority,
     pub due: Option<TaskDue>,
 }
 

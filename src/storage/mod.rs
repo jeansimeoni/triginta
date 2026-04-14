@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::domain::{
     DayHistorySummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate, SessionEntry,
     SessionKind, SessionOutcome, Tag, TagColor, TagId, TagUpdate, Task, TaskDue, TaskId,
-    TaskStatus, TaskUpdate,
+    TaskPriority, TaskStatus, TaskUpdate,
 };
 
 // Keeping the schema as a string literal makes bootstrap simple for this early
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     project_id INTEGER,
     title TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'todo',
+    priority INTEGER NOT NULL DEFAULT 4,
     created_at TEXT NOT NULL,
     completed_at TEXT,
     deleted_at TEXT,
@@ -228,6 +229,10 @@ impl Database {
             "due_is_recurring",
             "ALTER TABLE tasks ADD COLUMN due_is_recurring INTEGER NOT NULL DEFAULT 0",
         )?;
+        self.ensure_tasks_column(
+            "priority",
+            "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 4",
+        )?;
         self.connection
             .execute(
                 "INSERT OR IGNORE INTO app_metadata(key, value) VALUES (?1, ?2)",
@@ -331,7 +336,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         // closure. The closure is conceptually similar to a row-to-struct
         // callback in C, but its return type is checked by the compiler.
         let mut statement = self.connection.prepare(
-            "SELECT id, project_id, title, status, created_at, completed_at, deleted_at, due_date, due_datetime, due_string, due_is_recurring
+            "SELECT id, project_id, title, status, priority, created_at, completed_at, deleted_at, due_date, due_datetime, due_string, due_is_recurring
              FROM tasks
              ORDER BY created_at DESC, id DESC",
         )?;
@@ -342,14 +347,15 @@ impl TaskRepository for SqliteTaskRepository<'_> {
                 project_id: ProjectId(row.get(1)?),
                 title: row.get(2)?,
                 status: TaskStatus::from_db(row.get::<_, String>(3)?.as_str()),
-                created_at: row.get(4)?,
-                completed_at: row.get(5)?,
-                deleted_at: row.get(6)?,
+                priority: TaskPriority::from_db(row.get::<_, i64>(4)?),
+                created_at: row.get(5)?,
+                completed_at: row.get(6)?,
+                deleted_at: row.get(7)?,
                 due: match (
-                    row.get::<_, Option<chrono::NaiveDate>>(7)?,
-                    row.get::<_, Option<chrono::NaiveDateTime>>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, i64>(10)?,
+                    row.get::<_, Option<chrono::NaiveDate>>(8)?,
+                    row.get::<_, Option<chrono::NaiveDateTime>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, i64>(11)?,
                 ) {
                     (Some(date), datetime, Some(string), is_recurring) => Some(TaskDue {
                         date,
@@ -377,12 +383,13 @@ impl TaskRepository for SqliteTaskRepository<'_> {
     ) -> Result<Task> {
         self.connection
             .execute(
-                "INSERT INTO tasks(project_id, title, status, created_at, completed_at, due_date, due_datetime, due_string, due_is_recurring)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8)",
+                "INSERT INTO tasks(project_id, title, status, priority, created_at, completed_at, due_date, due_datetime, due_string, due_is_recurring)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9)",
                 params![
                     project_id.0,
                     title,
                     TaskStatus::Todo.as_str(),
+                    TaskPriority::P4.to_db(),
                     now,
                     due.map(|due| due.date),
                     due.and_then(|due| due.datetime),
@@ -402,11 +409,12 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         self.connection
             .execute(
                 "UPDATE tasks
-                 SET title = ?1, project_id = ?2, due_date = ?3, due_datetime = ?4, due_string = ?5, due_is_recurring = ?6
-                 WHERE id = ?7",
+                 SET title = ?1, project_id = ?2, priority = ?3, due_date = ?4, due_datetime = ?5, due_string = ?6, due_is_recurring = ?7
+                 WHERE id = ?8",
                 params![
                     update.title,
                     update.project_id.0,
+                    update.priority.to_db(),
                     update.due.as_ref().map(|due| due.date),
                     update.due.as_ref().and_then(|due| due.datetime),
                     update.due.as_ref().map(|due| due.string.clone()),
@@ -459,7 +467,7 @@ impl SqliteTaskRepository<'_> {
         self.connection
             .query_row(
                 "SELECT id, project_id, title, status, created_at, completed_at
-                 , deleted_at, due_date, due_datetime, due_string, due_is_recurring
+                 , priority, deleted_at, due_date, due_datetime, due_string, due_is_recurring
                  FROM tasks
                  WHERE id = ?1",
                 params![task_id.0],
@@ -471,12 +479,13 @@ impl SqliteTaskRepository<'_> {
                         status: TaskStatus::from_db(row.get::<_, String>(3)?.as_str()),
                         created_at: row.get(4)?,
                         completed_at: row.get(5)?,
-                        deleted_at: row.get(6)?,
+                        priority: TaskPriority::from_db(row.get::<_, i64>(6)?),
+                        deleted_at: row.get(7)?,
                         due: match (
-                            row.get::<_, Option<chrono::NaiveDate>>(7)?,
-                            row.get::<_, Option<chrono::NaiveDateTime>>(8)?,
-                            row.get::<_, Option<String>>(9)?,
-                            row.get::<_, i64>(10)?,
+                            row.get::<_, Option<chrono::NaiveDate>>(8)?,
+                            row.get::<_, Option<chrono::NaiveDateTime>>(9)?,
+                            row.get::<_, Option<String>>(10)?,
+                            row.get::<_, i64>(11)?,
                         ) {
                             (Some(date), datetime, Some(string), is_recurring) => Some(TaskDue {
                                 date,
@@ -1202,7 +1211,8 @@ mod tests {
     use chrono::{Local, NaiveDate};
 
     use crate::domain::{
-        ProjectColor, ProjectUpdate, TagColor, TagUpdate, TaskDue, TaskStatus, TaskUpdate,
+        ProjectColor, ProjectUpdate, TagColor, TagUpdate, TaskDue, TaskPriority, TaskStatus,
+        TaskUpdate,
     };
 
     use super::{Database, PomodoroRepository, ProjectRepository, TagRepository, TaskRepository};
@@ -1248,6 +1258,7 @@ mod tests {
 
         assert_eq!(created.title, "Write release notes");
         assert_eq!(created.status, TaskStatus::Todo);
+        assert_eq!(created.priority, TaskPriority::P4);
         assert_eq!(created.completed_at, None);
         assert_eq!(created.deleted_at, None);
         assert_eq!(created.due, None);
@@ -1257,11 +1268,13 @@ mod tests {
             &TaskUpdate {
                 title: "Ship release notes".to_string(),
                 project_id: inbox_project_id,
+                priority: TaskPriority::P4,
                 due: None,
             },
         )?;
         assert_eq!(updated.title, "Ship release notes");
         assert_eq!(updated.status, TaskStatus::Todo);
+        assert_eq!(updated.priority, TaskPriority::P4);
 
         let completed_at = Local::now();
         let completed =
@@ -1273,6 +1286,7 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, created.id);
         assert_eq!(tasks[0].title, "Ship release notes");
+        assert_eq!(tasks[0].priority, TaskPriority::P4);
 
         repository.delete(created.id)?;
         let tasks = repository.list_all()?;
@@ -1363,6 +1377,7 @@ mod tests {
             &TaskUpdate {
                 title: "Draft quarterly roadmap".to_string(),
                 project_id: inbox_project_id,
+                priority: TaskPriority::P2,
                 due: Some(TaskDue {
                     date: due_date,
                     datetime: Some(due_datetime),
@@ -1373,6 +1388,7 @@ mod tests {
         )?;
 
         assert_eq!(updated.title, "Draft quarterly roadmap");
+        assert_eq!(updated.priority, TaskPriority::P2);
         assert_eq!(
             updated.due,
             Some(TaskDue {
@@ -1388,11 +1404,13 @@ mod tests {
             &TaskUpdate {
                 title: "Draft quarterly roadmap".to_string(),
                 project_id: inbox_project_id,
+                priority: TaskPriority::P4,
                 due: None,
             },
         )?;
 
         assert_eq!(cleared.due, None);
+        assert_eq!(cleared.priority, TaskPriority::P4);
         assert_eq!(cleared.status, TaskStatus::Todo);
         assert_eq!(cleared.completed_at, None);
         Ok(())

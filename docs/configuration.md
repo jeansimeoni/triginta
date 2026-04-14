@@ -99,6 +99,8 @@ Allowed values:
 - `title-desc`
 - `created-newest`
 - `created-oldest`
+- `priority-high`
+- `priority-low`
 
 Default:
 
@@ -199,8 +201,13 @@ Theme files support these keys:
 - `timer_long_break`
 - `success`
 - `error`
+- `priority_1`
+- `priority_2`
+- `priority_3`
 
 Each value must be a 6-digit hex color like `"#cdd6f4"`.
+If `priority_1..priority_3` are omitted, Triginta uses Catppuccin-compatible
+defaults that approximate Todoist's red/orange/blue priority colors.
 
 Example:
 
@@ -214,6 +221,9 @@ timer_short_break = "#66cccc"
 timer_long_break = "#4488cc"
 success = "#66dd88"
 error = "#dd6677"
+priority_1 = "#f38ba8"
+priority_2 = "#fab387"
+priority_3 = "#89b4fa"
 ```
 
 ## Timer

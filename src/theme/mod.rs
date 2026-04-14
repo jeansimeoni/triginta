@@ -18,6 +18,9 @@ pub struct ThemePalette {
     pub timer_long_break: Color,
     pub success: Color,
     pub error: Color,
+    pub priority_1: Color,
+    pub priority_2: Color,
+    pub priority_3: Color,
     pub project_colors: ProjectColorPalette,
 }
 
@@ -122,6 +125,12 @@ struct ThemeFile {
     success: String,
     error: String,
     #[serde(default)]
+    priority_1: Option<String>,
+    #[serde(default)]
+    priority_2: Option<String>,
+    #[serde(default)]
+    priority_3: Option<String>,
+    #[serde(default)]
     project_colors: Option<ProjectColorFile>,
 }
 
@@ -149,11 +158,19 @@ struct ProjectColorFile {
     taupe: String,
 }
 
+#[derive(Debug, Clone)]
+struct PriorityColorFile {
+    priority_1: String,
+    priority_2: String,
+    priority_3: String,
+}
+
 impl ThemeFile {
     fn into_palette(self) -> Result<ThemePalette> {
         let project_colors = self
             .project_colors
             .unwrap_or_else(default_project_color_file);
+        let default_priority_colors = default_priority_color_file();
         Ok(ThemePalette {
             text: parse_hex_color(&self.text).context("invalid theme color for text")?,
             subtle_text: parse_hex_color(&self.subtle_text)
@@ -168,6 +185,24 @@ impl ThemeFile {
                 .context("invalid theme color for timer_long_break")?,
             success: parse_hex_color(&self.success).context("invalid theme color for success")?,
             error: parse_hex_color(&self.error).context("invalid theme color for error")?,
+            priority_1: parse_hex_color(
+                self.priority_1
+                    .as_deref()
+                    .unwrap_or(default_priority_colors.priority_1.as_str()),
+            )
+            .context("invalid theme color for priority_1")?,
+            priority_2: parse_hex_color(
+                self.priority_2
+                    .as_deref()
+                    .unwrap_or(default_priority_colors.priority_2.as_str()),
+            )
+            .context("invalid theme color for priority_2")?,
+            priority_3: parse_hex_color(
+                self.priority_3
+                    .as_deref()
+                    .unwrap_or(default_priority_colors.priority_3.as_str()),
+            )
+            .context("invalid theme color for priority_3")?,
             project_colors: ProjectColorPalette {
                 berry_red: parse_hex_color(&project_colors.berry_red)
                     .context("invalid project color for berry_red")?,
@@ -226,6 +261,9 @@ fn builtin_theme(name: &str) -> Option<ThemePalette> {
             timer_long_break: rgb(32, 159, 181),
             success: rgb(64, 160, 43),
             error: rgb(210, 15, 57),
+            priority_1: rgb(210, 15, 57),
+            priority_2: rgb(223, 142, 29),
+            priority_3: rgb(30, 102, 245),
             project_colors: default_project_colors(),
         }),
         "catppuccin-frappe" => Some(ThemePalette {
@@ -238,6 +276,9 @@ fn builtin_theme(name: &str) -> Option<ThemePalette> {
             timer_long_break: rgb(133, 193, 220),
             success: rgb(166, 209, 137),
             error: rgb(231, 130, 132),
+            priority_1: rgb(231, 130, 132),
+            priority_2: rgb(239, 159, 118),
+            priority_3: rgb(140, 170, 238),
             project_colors: default_project_colors(),
         }),
         "catppuccin-macchiato" => Some(ThemePalette {
@@ -250,6 +291,9 @@ fn builtin_theme(name: &str) -> Option<ThemePalette> {
             timer_long_break: rgb(125, 196, 228),
             success: rgb(166, 218, 149),
             error: rgb(237, 135, 150),
+            priority_1: rgb(237, 135, 150),
+            priority_2: rgb(245, 169, 127),
+            priority_3: rgb(138, 173, 244),
             project_colors: default_project_colors(),
         }),
         "catppuccin-mocha" => Some(ThemePalette {
@@ -262,6 +306,9 @@ fn builtin_theme(name: &str) -> Option<ThemePalette> {
             timer_long_break: rgb(116, 199, 236),
             success: rgb(166, 227, 161),
             error: rgb(243, 139, 168),
+            priority_1: rgb(243, 139, 168),
+            priority_2: rgb(250, 179, 135),
+            priority_3: rgb(137, 180, 250),
             project_colors: default_project_colors(),
         }),
         _ => None,
@@ -290,6 +337,14 @@ fn default_project_color_file() -> ProjectColorFile {
         charcoal: "#808080".to_string(),
         grey: "#999999".to_string(),
         taupe: "#8F7A69".to_string(),
+    }
+}
+
+fn default_priority_color_file() -> PriorityColorFile {
+    PriorityColorFile {
+        priority_1: "#F38BA8".to_string(),
+        priority_2: "#FAB387".to_string(),
+        priority_3: "#89B4FA".to_string(),
     }
 }
 

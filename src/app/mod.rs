@@ -18,7 +18,7 @@ use crate::{
     domain::{
         DayHistorySummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate,
         SessionEntry, SessionKind, SessionOutcome, Tag, TagColor, TagId, TagUpdate, Task, TaskId,
-        TaskStatus, TaskUpdate,
+        TaskPriority, TaskStatus, TaskUpdate,
     },
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
     storage::{Database, PomodoroRepository, ProjectRepository, TagRepository, TaskRepository},
@@ -423,16 +423,18 @@ enum TaskEditorField {
     Project,
     Tags,
     DueDate,
+    Priority,
     DueTime,
     Recurrence,
 }
 
 impl TaskEditorField {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Title,
         Self::Project,
         Self::Tags,
         Self::DueDate,
+        Self::Priority,
         Self::DueTime,
         Self::Recurrence,
     ];
@@ -443,8 +445,9 @@ impl TaskEditorField {
             Self::Project => 1,
             Self::Tags => 2,
             Self::DueDate => 3,
-            Self::DueTime => 4,
-            Self::Recurrence => 5,
+            Self::Priority => 4,
+            Self::DueTime => 5,
+            Self::Recurrence => 6,
         }
     }
 
@@ -474,6 +477,8 @@ struct TaskEditorState {
     suggestion_index: usize,
     due_date_input: String,
     due_date_cursor: usize,
+    priority_input: String,
+    priority_cursor: usize,
     due_time_input: String,
     due_time_cursor: usize,
     recurrence_input: String,
@@ -621,6 +626,7 @@ pub struct TaskEditorFocusView {
     pub project: bool,
     pub tags: bool,
     pub due_date: bool,
+    pub priority: bool,
     pub due_time: bool,
     pub recurrence: bool,
 }
@@ -640,6 +646,8 @@ pub struct TaskEditorView {
     pub selected_tag_suggestion: usize,
     pub due_date_value: String,
     pub due_date_cursor: usize,
+    pub priority_value: String,
+    pub priority_cursor: usize,
     pub due_time_value: String,
     pub due_time_cursor: usize,
     pub recurrence_value: String,
@@ -720,6 +728,7 @@ struct ParsedTaskDraft {
     due: Option<crate::domain::TaskDue>,
     project_id: ProjectId,
     tag_queries: Vec<String>,
+    priority: TaskPriority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1211,7 +1220,7 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "next/prev field",
     },
     ShortcutTip {
-        keys: "F1-F6",
+        keys: "F1-F7",
         description: "jump to field",
     },
     ShortcutTip {
@@ -1223,7 +1232,7 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "suggestions",
     },
     ShortcutTip {
-        keys: "F7",
+        keys: "F9",
         description: "clear due",
     },
 ];
@@ -1378,13 +1387,14 @@ impl App {
         let (without_tag_tokens, tag_queries) = self.extract_tag_references(raw.to_string());
         let (without_project_tokens, project_id) =
             self.extract_project_reference(without_tag_tokens.as_str(), fallback_project_id);
-        let content = without_project_tokens;
+        let (content, priority) = Self::extract_priority_reference(without_project_tokens.as_str());
         let parsed = parse_task_input(content.as_str(), self.today());
         ParsedTaskDraft {
             cleaned_title: parsed.cleaned_title,
             due: parsed.due,
             project_id,
             tag_queries,
+            priority,
         }
     }
 
@@ -1664,6 +1674,7 @@ impl App {
                 project: editor.focused_field == TaskEditorField::Project,
                 tags: editor.focused_field == TaskEditorField::Tags,
                 due_date: editor.focused_field == TaskEditorField::DueDate,
+                priority: editor.focused_field == TaskEditorField::Priority,
                 due_time: editor.focused_field == TaskEditorField::DueTime,
                 recurrence: editor.focused_field == TaskEditorField::Recurrence,
             };
@@ -1686,6 +1697,8 @@ impl App {
                     .min(tag_suggestions.len().saturating_sub(1)),
                 due_date_value: editor.due_date_input.clone(),
                 due_date_cursor: editor.due_date_cursor,
+                priority_value: editor.priority_input.clone(),
+                priority_cursor: editor.priority_cursor,
                 due_time_value: editor.due_time_input.clone(),
                 due_time_cursor: editor.due_time_cursor,
                 recurrence_value: editor.recurrence_input.clone(),
@@ -1699,6 +1712,7 @@ impl App {
                 preview_panel: Self::task_editor_preview_panel(
                     editor.project_input.as_str(),
                     editor.tags_input.as_str(),
+                    editor.priority_input.as_str(),
                     due_preview.as_ref(),
                     editor.focused_field,
                 ),
@@ -1846,6 +1860,7 @@ impl App {
     fn task_editor_preview_panel(
         project_value: &str,
         tags_value: &str,
+        priority_value: &str,
         due_preview: Option<&TaskDuePreviewView>,
         focused_field: TaskEditorField,
     ) -> FormPreviewPanelView {
@@ -1857,6 +1872,12 @@ impl App {
             } else {
                 tags_value.trim().to_string()
             },
+        ));
+        preview_lines.push(PreviewLineView::key_value(
+            "Priority",
+            Self::parse_priority_input(priority_value)
+                .unwrap_or(TaskPriority::P4)
+                .label(),
         ));
         if let Some(due) = due_preview {
             preview_lines.push(PreviewLineView::emphasized_key_value(
@@ -1890,6 +1911,9 @@ impl App {
             }
             TaskEditorField::DueDate => {
                 vec!["Type YYYY-MM-DD or use F8 to pick from calendar".to_string()]
+            }
+            TaskEditorField::Priority => {
+                vec!["Type p1-p4 (P4 means no priority indicator)".to_string()]
             }
             TaskEditorField::DueTime => {
                 vec!["Type HH:MM (24h) or leave empty for all-day due date".to_string()]
@@ -2814,6 +2838,36 @@ impl App {
         (cleaned, project_id)
     }
 
+    fn parse_priority_input(value: &str) -> Option<TaskPriority> {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return None;
+        }
+        let numeric = normalized.strip_prefix('p').unwrap_or(normalized.as_str());
+        match numeric.parse::<u8>().ok()? {
+            1 => Some(TaskPriority::P1),
+            2 => Some(TaskPriority::P2),
+            3 => Some(TaskPriority::P3),
+            4 => Some(TaskPriority::P4),
+            _ => None,
+        }
+    }
+
+    fn extract_priority_reference(raw: &str) -> (String, TaskPriority) {
+        let mut cleaned_tokens = Vec::new();
+        let mut priority = TaskPriority::P4;
+
+        for token in raw.split_whitespace() {
+            if let Some(parsed) = Self::parse_priority_input(token) {
+                priority = parsed;
+            } else {
+                cleaned_tokens.push(token);
+            }
+        }
+
+        (cleaned_tokens.join(" ").trim().to_string(), priority)
+    }
+
     fn tag_by_id(&self, tag_id: TagId) -> Option<&Tag> {
         self.screen_data.tags.iter().find(|tag| tag.id == tag_id)
     }
@@ -3530,6 +3584,31 @@ impl App {
                 .cmp(&right.created_at)
                 .then_with(|| self.compare_task_title(left, right))
                 .then_with(|| left.id.0.cmp(&right.id.0)),
+            TaskSortOrder::PriorityHigh => self
+                .compare_task_priority(left, right, false)
+                .then_with(|| self.compare_task_due(left, right, false))
+                .then_with(|| self.compare_task_title(left, right))
+                .then_with(|| right.created_at.cmp(&left.created_at))
+                .then_with(|| right.id.0.cmp(&left.id.0)),
+            TaskSortOrder::PriorityLow => self
+                .compare_task_priority(left, right, true)
+                .then_with(|| self.compare_task_due(left, right, false))
+                .then_with(|| self.compare_task_title(left, right))
+                .then_with(|| right.created_at.cmp(&left.created_at))
+                .then_with(|| right.id.0.cmp(&left.id.0)),
+        }
+    }
+
+    fn compare_task_priority(
+        &self,
+        left: &Task,
+        right: &Task,
+        low_to_high: bool,
+    ) -> std::cmp::Ordering {
+        if low_to_high {
+            right.priority.level().cmp(&left.priority.level())
+        } else {
+            left.priority.level().cmp(&right.priority.level())
         }
     }
 
@@ -3799,6 +3878,8 @@ impl App {
         let due_date_cursor = due_date_input.len();
         let due_time_cursor = due_time_input.len();
         let recurrence_cursor = recurrence_input.len();
+        let priority_input = format!("p{}", task.priority.level());
+        let priority_cursor = priority_input.len();
         let tags_input = self
             .task_tags(task.id)
             .into_iter()
@@ -3821,6 +3902,8 @@ impl App {
             suggestion_index: 0,
             due_date_input,
             due_date_cursor,
+            priority_input,
+            priority_cursor,
             due_time_input,
             due_time_cursor,
             recurrence_input,
@@ -3901,6 +3984,7 @@ impl App {
             TaskEditorField::Project => (&mut editor.project_input, &mut editor.project_cursor),
             TaskEditorField::Tags => (&mut editor.tags_input, &mut editor.tags_cursor),
             TaskEditorField::DueDate => (&mut editor.due_date_input, &mut editor.due_date_cursor),
+            TaskEditorField::Priority => (&mut editor.priority_input, &mut editor.priority_cursor),
             TaskEditorField::DueTime => (&mut editor.due_time_input, &mut editor.due_time_cursor),
             TaskEditorField::Recurrence => {
                 (&mut editor.recurrence_input, &mut editor.recurrence_cursor)
@@ -3989,6 +4073,7 @@ impl App {
             TaskEditorField::Title => Self::sync_editor_due_from_title(editor, reference_date),
             TaskEditorField::Project => {}
             TaskEditorField::Tags => {}
+            TaskEditorField::Priority => {}
             TaskEditorField::DueDate | TaskEditorField::DueTime => {
                 editor.due_from_title = false;
                 if !editor.recurrence_input.trim().is_empty() {
@@ -4129,12 +4214,20 @@ impl App {
                 return Ok(true);
             }
         };
+        let field_priority =
+            Self::parse_priority_input(editor.priority_input.as_str()).unwrap_or(TaskPriority::P4);
+        let priority = if parsed.priority == TaskPriority::P4 {
+            field_priority
+        } else {
+            parsed.priority
+        };
 
         self.database.task_repository().update(
             editor.task_id,
             &TaskUpdate {
                 title: parsed.cleaned_title,
                 project_id: parsed.project_id,
+                priority,
                 due,
             },
         )?;
@@ -5441,17 +5534,17 @@ impl App {
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(5) => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::DueTime);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Priority);
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(6) => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::Recurrence);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::DueTime);
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(7) => {
-                    Self::clear_editor_due(&mut editor);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Recurrence);
                     self.task_editor = Some(editor);
                 }
                 KeyCode::Down | KeyCode::Char('j')
@@ -5495,6 +5588,10 @@ impl App {
                 }
                 KeyCode::F(8) if editor.focused_field == TaskEditorField::DueDate => {
                     Self::open_editor_calendar(&mut editor, now.date_naive());
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::F(9) => {
+                    Self::clear_editor_due(&mut editor);
                     self.task_editor = Some(editor);
                 }
                 KeyCode::Home => {
@@ -5610,6 +5707,17 @@ impl App {
                     parsed.due.as_ref(),
                     now,
                 )?;
+                if parsed.priority != TaskPriority::P4 {
+                    self.database.task_repository().update(
+                        task.id,
+                        &TaskUpdate {
+                            title: parsed.cleaned_title.clone(),
+                            project_id: parsed.project_id,
+                            priority: parsed.priority,
+                            due: parsed.due.clone(),
+                        },
+                    )?;
+                }
                 let tag_ids =
                     self.resolve_or_create_tag_queries(parsed.tag_queries.as_slice(), now)?;
                 self.database
@@ -6588,7 +6696,9 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 
     use crate::config::{AppConfig, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings};
-    use crate::domain::{ProjectColor, ProjectId, TagColor, TaskDue, TaskId, TaskStatus};
+    use crate::domain::{
+        ProjectColor, ProjectId, TagColor, TaskDue, TaskId, TaskPriority, TaskStatus, TaskUpdate,
+    };
     use crate::storage::{Database, ProjectRepository, TagRepository, TaskRepository};
     use crate::task_nlp::parse_task_input;
     use crate::theme::ThemePalette;
@@ -6985,7 +7095,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(7))
+        app.handle_key(crossterm::event::KeyCode::F(9))
             .expect("clear due should succeed");
         app.handle_key(crossterm::event::KeyCode::Enter)
             .expect("edit should submit");
@@ -7062,7 +7172,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(6))
+        app.handle_key(crossterm::event::KeyCode::F(7))
             .expect("focus should switch to recurrence");
         for character in "every monday at 9am".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))
@@ -7091,6 +7201,8 @@ mod tests {
             suggestion_index: 0,
             due_date_input: "2026-04-13".to_string(),
             due_date_cursor: "2026-04-13".len(),
+            priority_input: "p4".to_string(),
+            priority_cursor: "p4".len(),
             due_time_input: "09:00".to_string(),
             due_time_cursor: "09:00".len(),
             recurrence_input: "every tuesday at 10am".to_string(),
@@ -7138,7 +7250,7 @@ mod tests {
             app.handle_key(crossterm::event::KeyCode::Char(character))
                 .expect("date typing should succeed");
         }
-        app.handle_key(crossterm::event::KeyCode::F(5))
+        app.handle_key(crossterm::event::KeyCode::F(6))
             .expect("focus should switch to due time");
         for character in "3pm".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))
@@ -7362,7 +7474,7 @@ mod tests {
             vec!["Type YYYY-MM-DD or use F8 to pick from calendar".to_string()]
         );
 
-        app.handle_key(crossterm::event::KeyCode::F(6))
+        app.handle_key(crossterm::event::KeyCode::F(7))
             .expect("focus should switch");
         let editor = app.task_editor_view().expect("editor should be visible");
         assert_eq!(
@@ -8877,6 +8989,79 @@ mod tests {
     }
 
     #[test]
+    fn create_popup_parses_priority_token_and_strips_it_from_title() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Ship report p2 tomorrow".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "Ship report");
+        assert_eq!(task.priority, TaskPriority::P2);
+    }
+
+    #[test]
+    fn create_popup_uses_last_priority_token_when_multiple_are_present() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Ship report p3 p1".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "Ship report");
+        assert_eq!(task.priority, TaskPriority::P1);
+    }
+
+    #[test]
+    fn task_editor_priority_field_updates_task_priority() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Refine parser".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::F(5))
+            .expect("focus should switch to priority");
+        app.handle_key(crossterm::event::KeyCode::Backspace)
+            .expect("backspace should edit priority");
+        app.handle_key(crossterm::event::KeyCode::Backspace)
+            .expect("backspace should edit priority");
+        for character in "p2".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("edit should submit");
+
+        assert_eq!(
+            app.selected_task().expect("task should exist").priority,
+            TaskPriority::P2
+        );
+    }
+
+    #[test]
     fn task_list_sorts_by_due_then_title_by_default() {
         let mut app = test_app();
         let repository = app.database.task_repository();
@@ -8922,6 +9107,77 @@ mod tests {
             .map(|task| task.title.as_str())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["Alpha", "Zulu", "Inbox"]);
+    }
+
+    #[test]
+    fn task_list_sorts_by_priority_in_both_directions() {
+        let mut app = test_app();
+        let repository = app.database.task_repository();
+        let inbox_project_id = app.inbox_project_id();
+        let now = Local::now();
+
+        let alpha = repository
+            .create("Alpha", inbox_project_id, None, now)
+            .expect("task should create");
+        let bravo = repository
+            .create("Bravo", inbox_project_id, None, now)
+            .expect("task should create");
+        let charlie = repository
+            .create("Charlie", inbox_project_id, None, now)
+            .expect("task should create");
+
+        repository
+            .update(
+                alpha.id,
+                &TaskUpdate {
+                    title: "Alpha".to_string(),
+                    project_id: inbox_project_id,
+                    priority: TaskPriority::P4,
+                    due: None,
+                },
+            )
+            .expect("task should update");
+        repository
+            .update(
+                bravo.id,
+                &TaskUpdate {
+                    title: "Bravo".to_string(),
+                    project_id: inbox_project_id,
+                    priority: TaskPriority::P1,
+                    due: None,
+                },
+            )
+            .expect("task should update");
+        repository
+            .update(
+                charlie.id,
+                &TaskUpdate {
+                    title: "Charlie".to_string(),
+                    project_id: inbox_project_id,
+                    priority: TaskPriority::P2,
+                    due: None,
+                },
+            )
+            .expect("task should update");
+
+        app.refresh_tasks().expect("tasks should refresh");
+        app.apply_task_sort_order(TaskSortOrder::PriorityHigh)
+            .expect("sort should apply");
+        let high_to_low = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(high_to_low, vec!["Bravo", "Charlie", "Alpha"]);
+
+        app.apply_task_sort_order(TaskSortOrder::PriorityLow)
+            .expect("sort should apply");
+        let low_to_high = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(low_to_high, vec!["Alpha", "Charlie", "Bravo"]);
     }
 
     #[test]
@@ -9161,7 +9417,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(6))
+        app.handle_key(crossterm::event::KeyCode::F(7))
             .expect("focus should switch to recurrence");
         for character in "every day".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))
