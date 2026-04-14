@@ -1915,6 +1915,24 @@ fn render_task_editor_popup(
         render_editor_tag_suggestions(frame, dropdown_area, editor, palette);
     }
 
+    if editor.focus.priority && !editor.priority_suggestions.is_empty() {
+        let dropdown_height = editor.priority_suggestions.len().min(4) as u16 + 2;
+        let visible_width = due_row[1].width.saturating_sub(4) as usize;
+        let cursor_col = editor_cursor_display_column(
+            &editor.priority_value,
+            editor.priority_cursor,
+            visible_width,
+        );
+        let dropdown_area = project_parent_dropdown_rect(
+            frame.area(),
+            due_row[1],
+            cursor_col as u16,
+            project_parent_dropdown_width(editor.priority_suggestions.as_slice()),
+            dropdown_height,
+        );
+        render_editor_priority_suggestions(frame, dropdown_area, editor, palette);
+    }
+
     if let Some(calendar) = editor.calendar {
         let calendar_area = anchored_dropdown_rect(frame.area(), due_row[0], 24, 10);
         render_editor_calendar(frame, calendar_area, calendar, palette);
@@ -2057,6 +2075,58 @@ fn render_editor_tag_suggestions(
                 Block::default()
                     .title(Span::styled(
                         "Tag",
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            )
+            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+        area,
+    );
+}
+
+fn render_editor_priority_suggestions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &TaskEditorView,
+    palette: ThemePalette,
+) {
+    let content_width = area.width.saturating_sub(2) as usize;
+    let lines = editor
+        .priority_suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let style = if index
+                == editor
+                    .selected_priority_suggestion
+                    .min(editor.priority_suggestions.len().saturating_sub(1))
+            {
+                Style::default()
+                    .fg(palette.text)
+                    .bg(palette.border)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            let value = ellipsize_end(suggestion, content_width);
+            let padding = " ".repeat(content_width.saturating_sub(value.width()));
+            Line::from(vec![Span::styled(format!("{value}{padding}"), style)])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        "Priority",
                         Style::default()
                             .fg(palette.accent)
                             .add_modifier(Modifier::BOLD),

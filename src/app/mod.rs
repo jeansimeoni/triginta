@@ -648,6 +648,8 @@ pub struct TaskEditorView {
     pub due_date_cursor: usize,
     pub priority_value: String,
     pub priority_cursor: usize,
+    pub priority_suggestions: Vec<String>,
+    pub selected_priority_suggestion: usize,
     pub due_time_value: String,
     pub due_time_cursor: usize,
     pub recurrence_value: String,
@@ -1669,6 +1671,19 @@ impl App {
             } else {
                 Vec::new()
             };
+            let priority_suggestions = if editor.focused_field == TaskEditorField::Priority {
+                self.priority_suggestions(editor.priority_input.as_str())
+                    .into_iter()
+                    .take(4)
+                    .map(|priority| priority.to_string())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let title_priority = Self::last_priority_token(editor.title_input.as_str());
+            let field_priority = Self::parse_priority_input(editor.priority_input.as_str())
+                .unwrap_or(TaskPriority::P4);
+            let effective_priority = title_priority.unwrap_or(field_priority);
             let focus = TaskEditorFocusView {
                 title: editor.focused_field == TaskEditorField::Title,
                 project: editor.focused_field == TaskEditorField::Project,
@@ -1699,6 +1714,10 @@ impl App {
                 due_date_cursor: editor.due_date_cursor,
                 priority_value: editor.priority_input.clone(),
                 priority_cursor: editor.priority_cursor,
+                priority_suggestions: priority_suggestions.clone(),
+                selected_priority_suggestion: editor
+                    .suggestion_index
+                    .min(priority_suggestions.len().saturating_sub(1)),
                 due_time_value: editor.due_time_input.clone(),
                 due_time_cursor: editor.due_time_cursor,
                 recurrence_value: editor.recurrence_input.clone(),
@@ -1712,7 +1731,7 @@ impl App {
                 preview_panel: Self::task_editor_preview_panel(
                     editor.project_input.as_str(),
                     editor.tags_input.as_str(),
-                    editor.priority_input.as_str(),
+                    effective_priority,
                     due_preview.as_ref(),
                     editor.focused_field,
                 ),
@@ -1860,7 +1879,7 @@ impl App {
     fn task_editor_preview_panel(
         project_value: &str,
         tags_value: &str,
-        priority_value: &str,
+        priority: TaskPriority,
         due_preview: Option<&TaskDuePreviewView>,
         focused_field: TaskEditorField,
     ) -> FormPreviewPanelView {
@@ -1873,12 +1892,7 @@ impl App {
                 tags_value.trim().to_string()
             },
         ));
-        preview_lines.push(PreviewLineView::key_value(
-            "Priority",
-            Self::parse_priority_input(priority_value)
-                .unwrap_or(TaskPriority::P4)
-                .label(),
-        ));
+        preview_lines.push(PreviewLineView::key_value("Priority", priority.label()));
         if let Some(due) = due_preview {
             preview_lines.push(PreviewLineView::emphasized_key_value(
                 "Summary",
@@ -1913,7 +1927,7 @@ impl App {
                 vec!["Type YYYY-MM-DD or use F8 to pick from calendar".to_string()]
             }
             TaskEditorField::Priority => {
-                vec!["Type p1-p4 (P4 means no priority indicator)".to_string()]
+                vec!["Type p1-p4 and use Enter/Tab to accept suggestion".to_string()]
             }
             TaskEditorField::DueTime => {
                 vec!["Type HH:MM (24h) or leave empty for all-day due date".to_string()]
@@ -2839,7 +2853,10 @@ impl App {
     }
 
     fn parse_priority_input(value: &str) -> Option<TaskPriority> {
-        let normalized = value.trim().to_ascii_lowercase();
+        let normalized = value
+            .trim()
+            .trim_matches(|character: char| !character.is_ascii_alphanumeric())
+            .to_ascii_lowercase();
         if normalized.is_empty() {
             return None;
         }
@@ -2851,6 +2868,60 @@ impl App {
             4 => Some(TaskPriority::P4),
             _ => None,
         }
+    }
+
+    fn last_priority_token(value: &str) -> Option<TaskPriority> {
+        let mut matched = None;
+        for token in value.split_whitespace() {
+            if let Some(priority) = Self::parse_priority_input(token) {
+                matched = Some(priority);
+            }
+        }
+        matched
+    }
+
+    fn priority_suggestions(&self, query: &str) -> Vec<&'static str> {
+        const OPTIONS: [&str; 4] = ["p1", "p2", "p3", "p4"];
+        let normalized = query.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return OPTIONS.to_vec();
+        }
+
+        let mut suggestions = OPTIONS
+            .into_iter()
+            .filter(|option| option.starts_with(normalized.as_str()))
+            .collect::<Vec<_>>();
+        if suggestions.is_empty() {
+            suggestions = OPTIONS
+                .into_iter()
+                .filter(|option| fuzzy_matches(normalized.as_str(), option))
+                .collect();
+        }
+        suggestions
+    }
+
+    fn accept_task_editor_priority_suggestion(&self, editor: &mut TaskEditorState) -> bool {
+        if editor.focused_field != TaskEditorField::Priority {
+            return false;
+        }
+        let suggestions = self.priority_suggestions(editor.priority_input.as_str());
+        let Some(priority) = suggestions
+            .get(
+                editor
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        else {
+            return false;
+        };
+        if editor.priority_input.trim().eq_ignore_ascii_case(priority) {
+            return false;
+        }
+        editor.priority_input = priority.to_string();
+        editor.priority_cursor = editor.priority_input.len();
+        editor.suggestion_index = 0;
+        true
     }
 
     fn extract_priority_reference(raw: &str) -> (String, TaskPriority) {
@@ -4070,7 +4141,10 @@ impl App {
 
     fn after_editor_text_change(editor: &mut TaskEditorState, reference_date: NaiveDate) {
         match editor.focused_field {
-            TaskEditorField::Title => Self::sync_editor_due_from_title(editor, reference_date),
+            TaskEditorField::Title => {
+                Self::sync_editor_due_from_title(editor, reference_date);
+                Self::sync_editor_priority_from_title(editor);
+            }
             TaskEditorField::Project => {}
             TaskEditorField::Tags => {}
             TaskEditorField::Priority => {}
@@ -4110,6 +4184,18 @@ impl App {
         if editor.due_from_title {
             Self::clear_editor_due(editor);
         }
+    }
+
+    fn sync_editor_priority_from_title(editor: &mut TaskEditorState) {
+        let Some(priority) = Self::last_priority_token(editor.title_input.as_str()) else {
+            return;
+        };
+        let value = format!("p{}", priority.level());
+        if editor.priority_input == value {
+            return;
+        }
+        editor.priority_input = value;
+        editor.priority_cursor = editor.priority_input.len();
     }
 
     fn sync_editor_due_from_recurrence(editor: &mut TaskEditorState, reference_date: NaiveDate) {
@@ -4216,11 +4302,8 @@ impl App {
         };
         let field_priority =
             Self::parse_priority_input(editor.priority_input.as_str()).unwrap_or(TaskPriority::P4);
-        let priority = if parsed.priority == TaskPriority::P4 {
-            field_priority
-        } else {
-            parsed.priority
-        };
+        let title_priority = Self::last_priority_token(editor.title_input.as_str());
+        let priority = title_priority.unwrap_or(field_priority);
 
         self.database.task_repository().update(
             editor.task_id,
@@ -5467,6 +5550,12 @@ impl App {
                         self.task_editor = Some(editor);
                         return Ok(true);
                     }
+                    if editor.focused_field == TaskEditorField::Priority
+                        && self.accept_task_editor_priority_suggestion(&mut editor)
+                    {
+                        self.task_editor = Some(editor);
+                        return Ok(true);
+                    }
                     return self.submit_task_editor(editor, now);
                 }
                 KeyCode::Tab => {
@@ -5500,6 +5589,12 @@ impl App {
                     }
                     if editor.focused_field == TaskEditorField::Tags
                         && self.accept_or_create_task_editor_tag_token(&mut editor, now)?
+                    {
+                        self.task_editor = Some(editor);
+                        return Ok(true);
+                    }
+                    if editor.focused_field == TaskEditorField::Priority
+                        && self.accept_task_editor_priority_suggestion(&mut editor)
                     {
                         self.task_editor = Some(editor);
                         return Ok(true);
@@ -5560,6 +5655,18 @@ impl App {
                 KeyCode::Up | KeyCode::Char('k')
                     if editor.focused_field == TaskEditorField::Project =>
                 {
+                    editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Down if editor.focused_field == TaskEditorField::Priority => {
+                    let last_index = self
+                        .priority_suggestions(editor.priority_input.as_str())
+                        .len()
+                        .saturating_sub(1);
+                    editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Up if editor.focused_field == TaskEditorField::Priority => {
                     editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
                     self.task_editor = Some(editor);
                 }
@@ -7481,6 +7588,71 @@ mod tests {
             editor.preview_panel.tips,
             vec!["Type recurrence phrases like: every monday at 9am".to_string()]
         );
+    }
+
+    #[test]
+    fn task_editor_preview_priority_prefers_title_token_over_priority_field() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Prepare deck".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+
+        app.handle_key(crossterm::event::KeyCode::F(5))
+            .expect("focus should switch to priority");
+        app.handle_key(crossterm::event::KeyCode::Backspace)
+            .expect("priority edit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Backspace)
+            .expect("priority edit should succeed");
+        for character in "p3".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::F(1))
+            .expect("focus should switch to title");
+        for character in " p2".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_key_value_preview_line(&editor.preview_panel.preview_lines[2], "Priority", "P2");
+    }
+
+    #[test]
+    fn task_editor_title_priority_token_updates_priority_field_value() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Prepare deck".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+
+        app.handle_key(crossterm::event::KeyCode::F(1))
+            .expect("focus should switch to title");
+        for character in " p2".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_eq!(editor.priority_value, "p2");
     }
 
     #[test]
