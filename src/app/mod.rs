@@ -2029,9 +2029,10 @@ impl App {
             preview_panel: FormPreviewPanelView {
                 preview_lines: Vec::new(),
                 tips: match editor.focused_field {
-                    TagEditorField::Name => {
-                        vec!["Use @name style when typing task titles".to_string()]
-                    }
+                    TagEditorField::Name => vec![
+                        "Type the tag name without @".to_string(),
+                        "Use @name style only when typing task titles".to_string(),
+                    ],
                     TagEditorField::Color => vec!["Use ←/→ or h/l to change the color".to_string()],
                     TagEditorField::Favorite => {
                         vec!["Use ←/→ or h/l to toggle favorite".to_string()]
@@ -4329,7 +4330,7 @@ impl App {
     }
 
     fn submit_tag_editor(&mut self, editor: TagEditorState, now: DateTime<Local>) -> Result<()> {
-        let name = editor.name_input.trim();
+        let name = editor.name_input.trim().trim_start_matches('@').trim();
         if name.is_empty() {
             self.tag_editor = Some(editor);
             return Ok(());
