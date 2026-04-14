@@ -5354,7 +5354,7 @@ impl App {
                     editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::Down | KeyCode::Char('j')
+                KeyCode::Down
                     if editor.focused_field == TaskEditorField::Tags
                         && self
                             .active_tag_field_query(editor.tags_input.as_str(), editor.tags_cursor)
@@ -5368,7 +5368,7 @@ impl App {
                     editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::Up | KeyCode::Char('k')
+                KeyCode::Up
                     if editor.focused_field == TaskEditorField::Tags
                         && self
                             .active_tag_field_query(editor.tags_input.as_str(), editor.tags_cursor)
