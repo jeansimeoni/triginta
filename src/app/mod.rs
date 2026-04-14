@@ -1,9 +1,9 @@
-use std::time::Duration;
+use std::{env, fs, process::Command, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -426,10 +426,11 @@ enum TaskEditorField {
     Priority,
     DueTime,
     Recurrence,
+    Description,
 }
 
 impl TaskEditorField {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Title,
         Self::Project,
         Self::Tags,
@@ -437,6 +438,7 @@ impl TaskEditorField {
         Self::Priority,
         Self::DueTime,
         Self::Recurrence,
+        Self::Description,
     ];
 
     fn index(self) -> usize {
@@ -448,6 +450,7 @@ impl TaskEditorField {
             Self::Priority => 4,
             Self::DueTime => 5,
             Self::Recurrence => 6,
+            Self::Description => 7,
         }
     }
 
@@ -466,9 +469,12 @@ impl TaskEditorField {
 
 #[derive(Debug, Clone)]
 struct TaskEditorState {
-    task_id: TaskId,
+    task_id: Option<TaskId>,
     title_input: String,
     title_cursor: usize,
+    description_input: String,
+    description_cursor: usize,
+    description_scroll: usize,
     project_input: String,
     project_cursor: usize,
     project_id: ProjectId,
@@ -625,6 +631,7 @@ pub struct CalendarPickerView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskEditorFocusView {
     pub title: bool,
+    pub description: bool,
     pub project: bool,
     pub tags: bool,
     pub due_date: bool,
@@ -638,6 +645,9 @@ pub struct TaskEditorView {
     pub title: &'static str,
     pub title_value: String,
     pub title_cursor: usize,
+    pub description_value: String,
+    pub description_cursor: usize,
+    pub description_scroll: usize,
     pub project_value: String,
     pub project_cursor: usize,
     pub project_suggestions: Vec<String>,
@@ -819,6 +829,8 @@ pub struct TaskSortPopupView {
     pub selected_index: usize,
     pub options: Vec<TaskSortOptionView>,
 }
+
+const DESCRIPTION_VIEWPORT_LINES: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSortOptionView {
@@ -1197,6 +1209,10 @@ const INPUT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "submit",
     },
     ShortcutTip {
+        keys: "Ctrl+e",
+        description: "full editor",
+    },
+    ShortcutTip {
         keys: "Esc",
         description: "cancel",
     },
@@ -1212,8 +1228,8 @@ const INPUT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
 
 const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
-        keys: "Enter",
-        description: "submit",
+        keys: "Ctrl+Enter",
+        description: "save",
     },
     ShortcutTip {
         keys: "Esc",
@@ -1224,11 +1240,15 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "next/prev field",
     },
     ShortcutTip {
-        keys: "F1-F7",
+        keys: "F1-F8",
         description: "jump to field",
     },
     ShortcutTip {
-        keys: "F8",
+        keys: "Ctrl+e",
+        description: "external editor",
+    },
+    ShortcutTip {
+        keys: "F8/F9",
         description: "open calendar",
     },
     ShortcutTip {
@@ -1382,6 +1402,9 @@ pub struct App {
     help_open: bool,
     help_scroll: usize,
     help_viewport_lines: usize,
+    task_details_scroll: usize,
+    task_details_anchor_task_id: Option<TaskId>,
+    needs_full_redraw: bool,
     should_quit: bool,
     screen_data: ScreenData,
 }
@@ -1452,6 +1475,9 @@ impl App {
             help_open: false,
             help_scroll: 0,
             help_viewport_lines: 0,
+            task_details_scroll: 0,
+            task_details_anchor_task_id: None,
+            needs_full_redraw: false,
             should_quit: false,
             screen_data,
         };
@@ -1529,6 +1555,36 @@ impl App {
             PanelFocus::Timer => self.assigned_task(),
             PanelFocus::History => self.selected_history_task(),
             _ => None,
+        }
+    }
+
+    pub fn task_details_scroll(&self) -> usize {
+        self.task_details_scroll
+    }
+
+    pub fn consume_full_redraw_request(&mut self) -> bool {
+        let requested = self.needs_full_redraw;
+        self.needs_full_redraw = false;
+        requested
+    }
+
+    fn scroll_task_details(&mut self, amount: isize) {
+        if self.task_details_task().is_none() {
+            self.task_details_scroll = 0;
+            return;
+        }
+        if amount.is_negative() {
+            self.task_details_scroll = self.task_details_scroll.saturating_sub(amount.unsigned_abs());
+        } else {
+            self.task_details_scroll = self.task_details_scroll.saturating_add(amount as usize);
+        }
+    }
+
+    fn sync_task_details_anchor(&mut self) {
+        let current = self.task_details_task().map(|task| task.id);
+        if current != self.task_details_anchor_task_id {
+            self.task_details_anchor_task_id = current;
+            self.task_details_scroll = 0;
         }
     }
 
@@ -1744,6 +1800,7 @@ impl App {
             let effective_priority = title_priority.unwrap_or(field_priority);
             let focus = TaskEditorFocusView {
                 title: editor.focused_field == TaskEditorField::Title,
+                description: editor.focused_field == TaskEditorField::Description,
                 project: editor.focused_field == TaskEditorField::Project,
                 tags: editor.focused_field == TaskEditorField::Tags,
                 due_date: editor.focused_field == TaskEditorField::DueDate,
@@ -1753,9 +1810,16 @@ impl App {
             };
             let due_preview = self.editor_due_preview(editor);
             TaskEditorView {
-                title: "Edit Task",
+                title: if editor.task_id.is_some() {
+                    "Edit Task"
+                } else {
+                    "New Task"
+                },
                 title_value: editor.title_input.clone(),
                 title_cursor: editor.title_cursor,
+                description_value: editor.description_input.clone(),
+                description_cursor: editor.description_cursor,
+                description_scroll: editor.description_scroll,
                 project_value: editor.project_input.clone(),
                 project_cursor: editor.project_cursor,
                 project_suggestions: project_suggestions.clone(),
@@ -1792,6 +1856,8 @@ impl App {
                     effective_priority,
                     due_preview.as_ref(),
                     editor.focused_field,
+                    (!editor.description_input.trim().is_empty())
+                        .then_some(editor.description_input.as_str()),
                 ),
             }
         })
@@ -1953,6 +2019,7 @@ impl App {
         priority: TaskPriority,
         due_preview: Option<&TaskDuePreviewView>,
         focused_field: TaskEditorField,
+        description_preview: Option<&str>,
     ) -> FormPreviewPanelView {
         let mut preview_lines = vec![PreviewLineView::key_value("Project", project_value)];
         if !tags_value.trim().is_empty() {
@@ -1985,9 +2052,26 @@ impl App {
         } else {
             preview_lines.push(PreviewLineView::key_value("Summary", "no due date"));
         }
+        if let Some(description_preview) = description_preview {
+            let preview = description_preview
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !preview.is_empty() {
+                preview_lines.push(PreviewLineView::key_value(
+                    "Description",
+                    ellipsize_preview(preview, 48),
+                ));
+            }
+        }
 
         let tips = match focused_field {
             TaskEditorField::Title => vec!["Press # for selecting a project".to_string()],
+            TaskEditorField::Description => vec![
+                "Enter inserts line break, Ctrl+Enter saves, Ctrl+E opens external editor"
+                    .to_string(),
+            ],
             TaskEditorField::Project => {
                 vec!["Type in Project to fuzzy-match and use Enter/Tab to accept".to_string()]
             }
@@ -4177,6 +4261,67 @@ impl App {
         });
     }
 
+    fn open_full_add_task_popup_from_input(&mut self, input: &TaskInputState) {
+        let parsed = self.task_input_parse(input.value.as_str(), input.project_id);
+        let (due_date_input, due_time_input, recurrence_input, due_natural) =
+            if let Some(due) = parsed.due.as_ref() {
+                (
+                    due.date.format("%Y-%m-%d").to_string(),
+                    due.datetime
+                        .map(|datetime| datetime.format("%H:%M").to_string())
+                        .unwrap_or_default(),
+                    if due.is_recurring {
+                        due.string.clone()
+                    } else {
+                        String::new()
+                    },
+                    due.string.clone(),
+                )
+            } else {
+                (String::new(), String::new(), String::new(), String::new())
+            };
+        let priority_input = format!("p{}", parsed.priority.level());
+        let tags_input = parsed
+            .tag_queries
+            .iter()
+            .map(|tag| format!("@{tag}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let project_name = self
+            .project_name(parsed.project_id)
+            .unwrap_or("Inbox")
+            .to_string();
+
+        self.task_editor = Some(TaskEditorState {
+            task_id: None,
+            title_cursor: parsed.cleaned_title.len(),
+            title_input: parsed.cleaned_title,
+            description_input: String::new(),
+            description_cursor: 0,
+            description_scroll: 0,
+            project_input: project_name.clone(),
+            project_cursor: project_name.len(),
+            project_id: parsed.project_id,
+            tags_input: tags_input.clone(),
+            tags_cursor: tags_input.len(),
+            suggestion_index: 0,
+            due_date_input: due_date_input.clone(),
+            due_date_cursor: due_date_input.len(),
+            priority_input: priority_input.clone(),
+            priority_cursor: priority_input.len(),
+            due_time_input: due_time_input.clone(),
+            due_time_cursor: due_time_input.len(),
+            recurrence_input: recurrence_input.clone(),
+            recurrence_cursor: recurrence_input.len(),
+            due_natural,
+            due_from_title: false,
+            focused_field: TaskEditorField::Title,
+            calendar: None,
+        });
+        self.task_input = None;
+    }
+
     fn open_edit_task_popup(&mut self) {
         let Some(task) = self.selected_task().cloned() else {
             return;
@@ -4213,9 +4358,12 @@ impl App {
             .join(" ");
 
         self.task_editor = Some(TaskEditorState {
-            task_id: task.id,
+            task_id: Some(task.id),
             title_cursor: task.title.len(),
             title_input: task.title.clone(),
+            description_cursor: task.description.len(),
+            description_input: task.description.clone(),
+            description_scroll: 0,
             project_input: self
                 .project_name(task.project_id)
                 .unwrap_or("Inbox")
@@ -4306,6 +4454,9 @@ impl App {
     fn editor_value_mut(editor: &mut TaskEditorState) -> (&mut String, &mut usize) {
         match editor.focused_field {
             TaskEditorField::Title => (&mut editor.title_input, &mut editor.title_cursor),
+            TaskEditorField::Description => {
+                (&mut editor.description_input, &mut editor.description_cursor)
+            }
             TaskEditorField::Project => (&mut editor.project_input, &mut editor.project_cursor),
             TaskEditorField::Tags => (&mut editor.tags_input, &mut editor.tags_cursor),
             TaskEditorField::DueDate => (&mut editor.due_date_input, &mut editor.due_date_cursor),
@@ -4318,6 +4469,16 @@ impl App {
     }
 
     fn move_editor_cursor_home(editor: &mut TaskEditorState) {
+        if editor.focused_field == TaskEditorField::Description {
+            let current = editor.description_cursor.min(editor.description_input.len());
+            let start = editor.description_input[..current]
+                .rfind('\n')
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            editor.description_cursor = start;
+            Self::sync_editor_description_scroll(editor);
+            return;
+        }
         let (_, cursor) = Self::editor_value_mut(editor);
         *cursor = 0;
     }
@@ -4332,6 +4493,9 @@ impl App {
             .last()
             .map(|(index, _)| index)
             .unwrap_or(0);
+        if editor.focused_field == TaskEditorField::Description {
+            Self::sync_editor_description_scroll(editor);
+        }
     }
 
     fn move_editor_cursor_right(editor: &mut TaskEditorState) {
@@ -4344,9 +4508,22 @@ impl App {
             .nth(1)
             .map(|(offset, _)| *cursor + offset)
             .unwrap_or(value.len());
+        if editor.focused_field == TaskEditorField::Description {
+            Self::sync_editor_description_scroll(editor);
+        }
     }
 
     fn move_editor_cursor_end(editor: &mut TaskEditorState) {
+        if editor.focused_field == TaskEditorField::Description {
+            let current = editor.description_cursor.min(editor.description_input.len());
+            let end = editor.description_input[current..]
+                .find('\n')
+                .map(|index| current + index)
+                .unwrap_or(editor.description_input.len());
+            editor.description_cursor = end;
+            Self::sync_editor_description_scroll(editor);
+            return;
+        }
         let (value, cursor) = Self::editor_value_mut(editor);
         *cursor = value.len();
     }
@@ -4359,6 +4536,13 @@ impl App {
         let (value, cursor) = Self::editor_value_mut(editor);
         value.insert(*cursor, character);
         *cursor += character.len_utf8();
+        Self::after_editor_text_change(editor, reference_date);
+    }
+
+    fn insert_editor_newline(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+        let (value, cursor) = Self::editor_value_mut(editor);
+        value.insert(*cursor, '\n');
+        *cursor += 1;
         Self::after_editor_text_change(editor, reference_date);
     }
 
@@ -4399,6 +4583,7 @@ impl App {
                 Self::sync_editor_due_from_title(editor, reference_date);
                 Self::sync_editor_priority_from_title(editor);
             }
+            TaskEditorField::Description => {}
             TaskEditorField::Project => {
                 Self::sync_editor_title_from_project_field(editor);
             }
@@ -4418,6 +4603,82 @@ impl App {
                 editor.due_from_title = false;
                 Self::sync_editor_due_from_recurrence(editor, reference_date);
             }
+        }
+        if editor.focused_field == TaskEditorField::Description {
+            Self::sync_editor_description_scroll(editor);
+        }
+    }
+
+    fn description_line_start(value: &str, cursor: usize) -> usize {
+        let clamped = cursor.min(value.len());
+        value[..clamped]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0)
+    }
+
+    fn description_column(value: &str, cursor: usize) -> usize {
+        cursor.min(value.len()) - Self::description_line_start(value, cursor)
+    }
+
+    fn description_line_end(value: &str, cursor: usize) -> usize {
+        let clamped = cursor.min(value.len());
+        value[clamped..]
+            .find('\n')
+            .map(|index| clamped + index)
+            .unwrap_or(value.len())
+    }
+
+    fn move_editor_description_cursor_vertical(editor: &mut TaskEditorState, direction: isize) {
+        let value = editor.description_input.as_str();
+        let cursor = editor.description_cursor.min(value.len());
+        let current_start = Self::description_line_start(value, cursor);
+        let current_col = Self::description_column(value, cursor);
+
+        let target_start = if direction < 0 {
+            if current_start == 0 {
+                0
+            } else {
+                Self::description_line_start(value, current_start.saturating_sub(1))
+            }
+        } else {
+            let current_end = Self::description_line_end(value, cursor);
+            if current_end >= value.len() {
+                current_start
+            } else {
+                current_end + 1
+            }
+        };
+
+        let target_end = value[target_start..]
+            .find('\n')
+            .map(|index| target_start + index)
+            .unwrap_or(value.len());
+        editor.description_cursor = (target_start + current_col).min(target_end);
+        Self::sync_editor_description_scroll(editor);
+    }
+
+    fn description_cursor_line(value: &str, cursor: usize) -> usize {
+        value[..cursor.min(value.len())]
+            .chars()
+            .filter(|character| *character == '\n')
+            .count()
+    }
+
+    fn sync_editor_description_scroll(editor: &mut TaskEditorState) {
+        let line = Self::description_cursor_line(
+            editor.description_input.as_str(),
+            editor.description_cursor,
+        );
+        if line < editor.description_scroll {
+            editor.description_scroll = line;
+            return;
+        }
+        let bottom = editor
+            .description_scroll
+            .saturating_add(DESCRIPTION_VIEWPORT_LINES.saturating_sub(1));
+        if line > bottom {
+            editor.description_scroll = line.saturating_sub(DESCRIPTION_VIEWPORT_LINES - 1);
         }
     }
 
@@ -4602,15 +4863,38 @@ impl App {
         let title_priority = Self::last_priority_token(editor.title_input.as_str());
         let priority = title_priority.unwrap_or(field_priority);
 
-        self.database.task_repository().update(
-            editor.task_id,
-            &TaskUpdate {
-                title: parsed.cleaned_title,
-                project_id: parsed.project_id,
-                priority,
-                due,
-            },
-        )?;
+        let description = editor.description_input.trim_end_matches('\n').to_string();
+        let task_id = if let Some(task_id) = editor.task_id {
+            self.database.task_repository().update(
+                task_id,
+                &TaskUpdate {
+                    title: parsed.cleaned_title,
+                    description: description.clone(),
+                    project_id: parsed.project_id,
+                    priority,
+                    due,
+                },
+            )?;
+            task_id
+        } else {
+            let created_task = self.database.task_repository().create(
+                parsed.cleaned_title.as_str(),
+                parsed.project_id,
+                due.as_ref(),
+                now,
+            )?;
+            self.database.task_repository().update(
+                created_task.id,
+                &TaskUpdate {
+                    title: parsed.cleaned_title,
+                    description,
+                    project_id: parsed.project_id,
+                    priority,
+                    due,
+                },
+            )?;
+            created_task.id
+        };
         let mut tag_queries = parsed.tag_queries;
         for query in self.parse_tags_field_queries(editor.tags_input.as_str()) {
             if !tag_queries.contains(&query) {
@@ -4620,10 +4904,78 @@ impl App {
         let tag_ids = self.resolve_or_create_tag_queries(tag_queries.as_slice(), now)?;
         self.database
             .tag_repository()
-            .replace_task_tags(editor.task_id, tag_ids.as_slice())?;
+            .replace_task_tags(task_id, tag_ids.as_slice())?;
         self.refresh_tasks()?;
-        self.selected_task_id = Some(editor.task_id);
+        self.selected_task_id = Some(task_id);
         Ok(true)
+    }
+
+    fn external_editor_command() -> Option<String> {
+        env::var("VISUAL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| env::var("EDITOR").ok().filter(|value| !value.trim().is_empty()))
+            .or_else(|| {
+                ["nvim", "vim", "vi"].into_iter().find_map(|binary| {
+                    Command::new("sh")
+                        .arg("-lc")
+                        .arg(format!("command -v {binary} >/dev/null 2>&1"))
+                        .status()
+                        .ok()
+                        .and_then(|status| status.success().then(|| binary.to_string()))
+                })
+            })
+    }
+
+    fn shell_escape_single(input: &str) -> String {
+        format!("'{}'", input.replace('\'', "'\"'\"'"))
+    }
+
+    fn edit_description_in_external_editor(&mut self, editor: &mut TaskEditorState) -> Result<()> {
+        let Some(command) = Self::external_editor_command() else {
+            anyhow::bail!("no external editor found in VISUAL/EDITOR or nvim/vim/vi");
+        };
+
+        let temp_path = env::temp_dir().join(format!(
+            "triginta-description-{}-{}.md",
+            std::process::id(),
+            Local::now().timestamp_millis()
+        ));
+        fs::write(&temp_path, editor.description_input.as_bytes())
+            .context("failed to write temporary description file")?;
+
+        let mut stdout = std::io::stdout();
+        disable_raw_mode().context("failed to disable raw mode before external editor")?;
+        execute!(stdout, LeaveAlternateScreen)
+            .context("failed to leave alternate screen before external editor")?;
+
+        let launch_result = Command::new("sh")
+            .arg("-lc")
+            .arg(format!(
+                "{} {}",
+                command,
+                Self::shell_escape_single(temp_path.to_string_lossy().as_ref())
+            ))
+            .status()
+            .context("failed to launch external editor");
+
+        execute!(stdout, EnterAlternateScreen)
+            .context("failed to re-enter alternate screen after external editor")?;
+        enable_raw_mode().context("failed to enable raw mode after external editor")?;
+
+        let status = launch_result?;
+        if !status.success() {
+            anyhow::bail!("external editor exited with status {status}");
+        }
+
+        editor.description_input = fs::read_to_string(&temp_path)
+            .context("failed to read edited description from temporary file")?;
+        editor.description_cursor = editor.description_input.len();
+        editor.description_scroll = 0;
+        Self::sync_editor_description_scroll(editor);
+        self.needs_full_redraw = true;
+        let _ = fs::remove_file(&temp_path);
+        Ok(())
     }
 
     fn open_delete_confirmation(&mut self) {
@@ -5190,7 +5542,12 @@ impl App {
         }
     }
 
-    fn handle_task_overlay_key(&mut self, code: KeyCode, now: DateTime<Local>) -> Result<bool> {
+    fn handle_task_overlay_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        now: DateTime<Local>,
+    ) -> Result<bool> {
         if let Some(mut popup) = self.task_sort_popup.take() {
             match code {
                 KeyCode::Esc | KeyCode::Char('o') => {}
@@ -5812,7 +6169,24 @@ impl App {
 
             match code {
                 KeyCode::Esc => {}
+                KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
+                    return self.submit_task_editor(editor, now);
+                }
+                KeyCode::Char('e')
+                    if modifiers.contains(KeyModifiers::CONTROL)
+                        && editor.focused_field == TaskEditorField::Description =>
+                {
+                    if self.edit_description_in_external_editor(&mut editor).is_ok() {
+                        editor.suggestion_index = 0;
+                    }
+                    self.task_editor = Some(editor);
+                }
                 KeyCode::Enter => {
+                    if editor.focused_field == TaskEditorField::Description {
+                        Self::insert_editor_newline(&mut editor, now.date_naive());
+                        self.task_editor = Some(editor);
+                        return Ok(true);
+                    }
                     if editor.focused_field == TaskEditorField::Title {
                         if self.accept_task_editor_title_project_suggestion(
                             &mut editor,
@@ -5987,6 +6361,22 @@ impl App {
                     Self::focus_editor_field(&mut editor, TaskEditorField::Recurrence);
                     self.task_editor = Some(editor);
                 }
+                KeyCode::F(8) if editor.focused_field != TaskEditorField::DueDate => {
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Description);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Down | KeyCode::Char('j')
+                    if editor.focused_field == TaskEditorField::Description =>
+                {
+                    Self::move_editor_description_cursor_vertical(&mut editor, 1);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Up | KeyCode::Char('k')
+                    if editor.focused_field == TaskEditorField::Description =>
+                {
+                    Self::move_editor_description_cursor_vertical(&mut editor, -1);
+                    self.task_editor = Some(editor);
+                }
                 KeyCode::Down | KeyCode::Char('j')
                     if editor.focused_field == TaskEditorField::Project =>
                 {
@@ -6084,7 +6474,11 @@ impl App {
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(9) => {
-                    Self::clear_editor_due(&mut editor);
+                    if editor.focused_field == TaskEditorField::DueDate {
+                        Self::open_editor_calendar(&mut editor, now.date_naive());
+                    } else {
+                        Self::clear_editor_due(&mut editor);
+                    }
                     self.task_editor = Some(editor);
                 }
                 KeyCode::Home => {
@@ -6131,6 +6525,9 @@ impl App {
 
         match code {
             KeyCode::Esc => {}
+            KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_full_add_task_popup_from_input(&input);
+            }
             KeyCode::Tab => {
                 let accepted_project = self.accept_task_input_project_suggestion(&mut input);
                 let accepted_tag = if accepted_project {
@@ -6227,6 +6624,7 @@ impl App {
                         task.id,
                         &TaskUpdate {
                             title: parsed.cleaned_title.clone(),
+                            description: String::new(),
                             project_id: parsed.project_id,
                             priority: parsed.priority,
                             due: parsed.due.clone(),
@@ -6483,14 +6881,25 @@ impl App {
     }
 
     pub fn handle_key(&mut self, code: KeyCode) -> Result<()> {
-        self.handle_key_at(code, Local::now())
+        self.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
+    pub fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
+        self.handle_key_event_at(key, Local::now())
+    }
+
+    #[cfg(test)]
     fn handle_key_at(&mut self, code: KeyCode, now: DateTime<Local>) -> Result<()> {
+        self.handle_key_event_at(KeyEvent::new(code, KeyModifiers::NONE), now)
+    }
+
+    fn handle_key_event_at(&mut self, key: KeyEvent, now: DateTime<Local>) -> Result<()> {
+        let code = key.code;
+        let modifiers = key.modifiers;
         // `&mut self` is exclusive access: while this method runs, no other
         // code can also mutate the app state. This prevents a whole class of
         // aliasing bugs that are easy to create in C.
-        if self.handle_task_overlay_key(code, now)? {
+        if self.handle_task_overlay_key(code, modifiers, now)? {
             return Ok(());
         }
 
@@ -6778,6 +7187,32 @@ impl App {
             {
                 self.move_task_selection(-1);
             }
+            KeyCode::Char('j')
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.scroll_task_details(1);
+            }
+            KeyCode::Char('k')
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.scroll_task_details(-1);
+            }
+            KeyCode::PageDown
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.scroll_task_details(8);
+            }
+            KeyCode::PageUp
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.scroll_task_details(-8);
+            }
             KeyCode::Char('e')
                 if self.focused_panel == PanelFocus::RightPane
                     && self.active_right_panel_tab == RightPanelTab::Tasks =>
@@ -6868,6 +7303,7 @@ impl App {
     }
 
     fn on_tick_at(&mut self, now: DateTime<Local>) -> Result<()> {
+        self.sync_task_details_anchor();
         if self.timer.run_state != TimerRunState::Running {
             return Ok(());
         }
@@ -7089,6 +7525,9 @@ fn run_event_loop(
 ) -> Result<()> {
     while !app.should_quit() {
         app.on_tick()?;
+        if app.consume_full_redraw_request() {
+            terminal.clear().context("failed to clear terminal for full redraw")?;
+        }
         app.sync_help_viewport(terminal.size()?.height);
         terminal
             .draw(|frame| ui::render(frame, app))
@@ -7103,7 +7542,7 @@ fn run_event_loop(
             };
 
             if key.kind == KeyEventKind::Press {
-                app.handle_key(key.code)?;
+                app.handle_key_event(key)?;
             }
         }
     }
@@ -7181,6 +7620,16 @@ fn last_7_days_bounds(now: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>
         .single()
         .expect("local midnight should be representable");
     (start, today_end)
+}
+
+fn ellipsize_preview(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    text.chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>()
+        + "…"
 }
 
 fn fuzzy_matches(query: &str, candidate: &str) -> bool {
@@ -7716,9 +8165,12 @@ mod tests {
     #[test]
     fn task_editor_recurrence_phrase_updates_due_time() {
         let mut editor = TaskEditorState {
-            task_id: TaskId(1),
+            task_id: Some(TaskId(1)),
             title_input: "Write tests".to_string(),
             title_cursor: "Write tests".len(),
+            description_input: String::new(),
+            description_cursor: 0,
+            description_scroll: 0,
             project_input: "Inbox".to_string(),
             project_cursor: "Inbox".len(),
             project_id: ProjectId(1),
@@ -10079,6 +10531,7 @@ mod tests {
                 alpha.id,
                 &TaskUpdate {
                     title: "Alpha".to_string(),
+                    description: String::new(),
                     project_id: inbox_project_id,
                     priority: TaskPriority::P4,
                     due: None,
@@ -10090,6 +10543,7 @@ mod tests {
                 bravo.id,
                 &TaskUpdate {
                     title: "Bravo".to_string(),
+                    description: String::new(),
                     project_id: inbox_project_id,
                     priority: TaskPriority::P1,
                     due: None,
@@ -10101,6 +10555,7 @@ mod tests {
                 charlie.id,
                 &TaskUpdate {
                     title: "Charlie".to_string(),
+                    description: String::new(),
                     project_id: inbox_project_id,
                     priority: TaskPriority::P2,
                     due: None,

@@ -376,6 +376,7 @@ pub struct Task {
     pub id: TaskId,
     pub project_id: ProjectId,
     pub title: String,
+    pub description: String,
     pub status: TaskStatus,
     pub priority: TaskPriority,
     pub created_at: DateTime<Local>,
@@ -387,6 +388,7 @@ pub struct Task {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskUpdate {
     pub title: String,
+    pub description: String,
     pub project_id: ProjectId,
     pub priority: TaskPriority,
     pub due: Option<TaskDue>,

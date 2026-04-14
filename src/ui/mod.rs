@@ -596,75 +596,118 @@ fn render_task_details_panel(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let lines = if let Some(task) = app.task_details_task() {
-        let mut lines = vec![
-            Line::from(vec![Span::styled(
-                format!(
-                    "{} {}",
-                    task_status_symbol(task.status, symbols),
-                    task.title
-                ),
-                Style::default().add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(""),
-            Line::from(format!(
-                "Created: {}",
-                task.created_at.format("%Y-%m-%d %H:%M")
-            )),
-        ];
-        if let Some(indicator) = task_priority_indicator(task.priority, symbols) {
-            lines.push(Line::from(vec![
-                Span::raw("Priority: "),
-                Span::styled(
-                    indicator,
-                    Style::default().fg(priority_color(task.priority, palette)),
-                ),
-            ]));
-        }
-        if let Some(due) = &task.due {
-            let due_text = due
-                .datetime
-                .map(|datetime| datetime.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
-            lines.push(Line::from(format!("Due: {due_text}")));
-            if due.is_recurring {
-                lines.push(Line::from(format!(
-                    "Recurring: {}",
-                    format_recurring_rule(due.string.as_str())
-                )));
-            }
-        }
-        if let Some(project_name) = project_name_for_task(app.screen_data(), task) {
-            lines.push(Line::from(format!("Project: {project_name}")));
-        }
-        let tags = task_tags_for_task(app.screen_data(), task.id);
-        if !tags.is_empty() {
-            lines.push(Line::from(format!(
-                "Tags: {}",
-                tags.into_iter()
-                    .map(|(tag, _)| format!("@{tag}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )));
-        }
-        lines
-    } else {
-        Vec::new()
+    let block = Block::default()
+        .title(Span::styled(
+            format!("{} Task Details", symbols.details),
+            Style::default().fg(palette.accent),
+        ))
+        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+        .border_style(Style::default().fg(palette.border));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(task) = app.task_details_task() else {
+        frame.render_widget(
+            Paragraph::new(vec![Line::from("Select a task to inspect details.")]),
+            inner,
+        );
+        return;
     };
 
-    let details = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title(Span::styled(
-                    format!("{} Task Details", symbols.details),
-                    Style::default().fg(palette.accent),
-                ))
-                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                .border_style(Style::default().fg(palette.border)),
-        )
-        .wrap(Wrap { trim: true });
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Min(0)])
+        .split(inner);
+    let meta_inner = sections[0].inner(Margin {
+        vertical: 0,
+        horizontal: 1,
+    });
+    let markdown_inner = sections[1].inner(Margin {
+        vertical: 0,
+        horizontal: 1,
+    });
 
-    frame.render_widget(details, area);
+    let mut meta_lines = vec![
+        Line::from(vec![Span::styled(
+            format!(
+                "{} {}",
+                task_status_symbol(task.status, symbols),
+                task.title
+            ),
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(format!(
+            "Created: {}",
+            task.created_at.format("%Y-%m-%d %H:%M")
+        )),
+    ];
+    if let Some(indicator) = task_priority_indicator(task.priority, symbols) {
+        meta_lines.push(Line::from(vec![
+            Span::raw("Priority: "),
+            Span::styled(
+                indicator,
+                Style::default().fg(priority_color(task.priority, palette)),
+            ),
+        ]));
+    }
+    if let Some(due) = &task.due {
+        let due_text = due
+            .datetime
+            .map(|datetime| datetime.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
+        meta_lines.push(Line::from(format!("Due: {due_text}")));
+    }
+    if let Some(project_name) = project_name_for_task(app.screen_data(), task) {
+        meta_lines.push(Line::from(format!("Project: {project_name}")));
+    }
+    let tags = task_tags_for_task(app.screen_data(), task.id);
+    if !tags.is_empty() {
+        meta_lines.push(Line::from(format!(
+            "Tags: {}",
+            tags.into_iter()
+                .map(|(tag, _)| format!("@{tag}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )));
+    }
+    frame.render_widget(Paragraph::new(meta_lines).wrap(Wrap { trim: true }), meta_inner);
+
+    let markdown_lines = if task.description.trim().is_empty() {
+        vec![Line::from(Span::styled(
+            "No description",
+            Style::default()
+                .fg(palette.subtle_text)
+                .add_modifier(Modifier::DIM),
+        ))]
+    } else {
+        markdown_to_lines(task.description.as_str(), palette)
+    };
+
+    let scroll = app.task_details_scroll();
+    frame.render_widget(
+        Paragraph::new(markdown_lines.clone())
+            .scroll((scroll as u16, 0))
+            .wrap(Wrap { trim: false }),
+        markdown_inner,
+    );
+
+    let viewport = markdown_inner.height as usize;
+    if markdown_lines.len() > viewport && viewport > 0 {
+        let position =
+            scrollbar_position_from_offset(scroll, markdown_lines.len(), viewport);
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(markdown_lines.len())
+            .viewport_content_length(viewport)
+            .position(position);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("▐")
+            .thumb_style(Style::default().fg(palette.subtle_text));
+        frame.render_stateful_widget(scrollbar, sections[1], &mut scrollbar_state);
+    }
 }
 
 fn task_status_symbol(status: TaskStatus, symbols: Symbols) -> &'static str {
@@ -672,6 +715,220 @@ fn task_status_symbol(status: TaskStatus, symbols: Symbols) -> &'static str {
         TaskStatus::Todo => symbols.todo,
         TaskStatus::Done => symbols.done,
     }
+}
+
+fn markdown_to_lines(markdown: &str, palette: ThemePalette) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut in_code_block = false;
+
+    for raw_line in markdown.lines() {
+        let trimmed = raw_line.trim_end();
+        if trimmed.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+
+        if in_code_block {
+            lines.push(Line::from(Span::styled(
+                format!("  {trimmed}"),
+                Style::default().fg(palette.text).bg(palette.border),
+            )));
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            lines.push(Line::from(""));
+            continue;
+        }
+
+        let start_trimmed = trimmed.trim_start();
+        if start_trimmed.starts_with('>') {
+            let content = start_trimmed.trim_start_matches('>').trim_start();
+            let mut spans = vec![Span::styled(
+                "▏ ",
+                Style::default().fg(palette.subtle_text),
+            )];
+            spans.extend(markdown_inline_spans(content, palette));
+            lines.push(Line::from(spans));
+            continue;
+        }
+
+        let heading_level = start_trimmed.chars().take_while(|character| *character == '#').count();
+        if heading_level > 0 && start_trimmed.chars().nth(heading_level) == Some(' ') {
+            let content = start_trimmed[heading_level + 1..].trim_start();
+            let mut spans = vec![Span::styled(
+                format!("{} ", "▌".repeat(heading_level.min(3))),
+                Style::default().fg(palette.accent),
+            )];
+            spans.extend(markdown_inline_spans(content, palette));
+            lines.push(Line::from(spans).style(
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            continue;
+        }
+
+        if let Some(content) = checkbox_content(start_trimmed) {
+            let mut spans = vec![Span::styled(
+                "☐ ",
+                Style::default().fg(palette.subtle_text),
+            )];
+            spans.extend(markdown_inline_spans(content, palette));
+            lines.push(Line::from(spans));
+            continue;
+        }
+        if let Some(content) = checkbox_done_content(start_trimmed) {
+            let mut spans = vec![Span::styled("☑ ", Style::default().fg(palette.success))];
+            spans.extend(markdown_inline_spans(content, palette));
+            lines.push(Line::from(spans));
+            continue;
+        }
+        if let Some(content) = bullet_content(start_trimmed) {
+            let mut spans = vec![Span::styled("• ", Style::default().fg(palette.accent))];
+            spans.extend(markdown_inline_spans(content, palette));
+            lines.push(Line::from(spans));
+            continue;
+        }
+        if let Some((prefix, content)) = ordered_list_content(start_trimmed) {
+            let mut spans = vec![Span::styled(
+                format!("{prefix} "),
+                Style::default().fg(palette.accent),
+            )];
+            spans.extend(markdown_inline_spans(content, palette));
+            lines.push(Line::from(spans));
+            continue;
+        }
+
+        lines.push(Line::from(markdown_inline_spans(start_trimmed, palette)));
+    }
+
+    lines
+}
+
+fn checkbox_content(line: &str) -> Option<&str> {
+    ["- [ ] ", "* [ ] ", "+ [ ] "]
+        .into_iter()
+        .find_map(|prefix| line.strip_prefix(prefix))
+}
+
+fn checkbox_done_content(line: &str) -> Option<&str> {
+    ["- [x] ", "* [x] ", "+ [x] ", "- [X] ", "* [X] ", "+ [X] "]
+        .into_iter()
+        .find_map(|prefix| line.strip_prefix(prefix))
+}
+
+fn bullet_content(line: &str) -> Option<&str> {
+    ["- ", "* ", "+ "]
+        .into_iter()
+        .find_map(|prefix| line.strip_prefix(prefix))
+}
+
+fn ordered_list_content(line: &str) -> Option<(&str, &str)> {
+    let dot = line.find(". ")?;
+    let (prefix, rest) = line.split_at(dot);
+    if prefix.is_empty() || !prefix.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    Some((prefix, &rest[2..]))
+}
+
+fn markdown_inline_spans(input: &str, palette: ThemePalette) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut buffer = String::new();
+    let mut bold = false;
+    let mut italic = false;
+    let mut code = false;
+    let text = markdown_link_as_text(input);
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut index = 0;
+
+    let push_buffer = |buffer: &mut String,
+                       spans: &mut Vec<Span<'static>>,
+                       bold: bool,
+                       italic: bool,
+                       code: bool| {
+        if buffer.is_empty() {
+            return;
+        }
+        let mut style = Style::default().fg(palette.text);
+        if bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if italic {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if code {
+            style = style.bg(palette.border).fg(palette.accent);
+        }
+        spans.push(Span::styled(std::mem::take(buffer), style));
+    };
+
+    while index < chars.len() {
+        let character = chars[index];
+        if character == '`' {
+            push_buffer(&mut buffer, &mut spans, bold, italic, code);
+            code = !code;
+            index += 1;
+            continue;
+        }
+
+        if !code && character == '*' && chars.get(index + 1) == Some(&'*') {
+            push_buffer(&mut buffer, &mut spans, bold, italic, code);
+            bold = !bold;
+            index += 2;
+            continue;
+        }
+
+        if !code && (character == '*' || character == '_') {
+            push_buffer(&mut buffer, &mut spans, bold, italic, code);
+            italic = !italic;
+            index += 1;
+            continue;
+        }
+
+        buffer.push(character);
+        index += 1;
+    }
+
+    push_buffer(&mut buffer, &mut spans, bold, italic, code);
+    spans
+}
+
+fn markdown_link_as_text(input: &str) -> String {
+    let mut output = String::new();
+    let mut rest = input;
+
+    while let Some(open) = rest.find('[') {
+        output.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find(']') else {
+            output.push_str(&rest[open..]);
+            return output;
+        };
+        let label = &after_open[..close];
+        let after_label = &after_open[close + 1..];
+        if let Some(after_paren) = after_label.strip_prefix('(') {
+            if let Some(end_url) = after_paren.find(')') {
+                let url = &after_paren[..end_url];
+                output.push_str(label);
+                if !url.is_empty() {
+                    output.push_str(" (");
+                    output.push_str(url);
+                    output.push(')');
+                }
+                rest = &after_paren[end_url + 1..];
+                continue;
+            }
+        }
+        output.push('[');
+        output.push_str(label);
+        output.push(']');
+        rest = after_label;
+    }
+
+    output.push_str(rest);
+    output
 }
 
 fn render_statistics_panel(
@@ -1788,8 +2045,8 @@ fn render_task_editor_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let base_total_height = 24;
-    let form_height = 17;
+    let base_total_height = 30;
+    let form_height = 22;
     let preview_height = preview_panel_required_height(&editor.preview_panel, 3);
     let area = anchored_form_rect(
         frame.area(),
@@ -1822,6 +2079,8 @@ fn render_task_editor_popup(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
+            Constraint::Length(5),
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
@@ -1839,9 +2098,20 @@ fn render_task_editor_popup(
         None,
         palette,
     );
-    render_editor_field(
+    render_editor_multiline_field(
         frame,
         form_rows[1],
+        "Description [F8]",
+        &editor.description_value,
+        editor.description_cursor,
+        editor.description_scroll,
+        editor.focus.description,
+        Some("Markdown supported. Enter=newline, Ctrl+E=external editor"),
+        palette,
+    );
+    render_editor_field(
+        frame,
+        form_rows[2],
         "Project [F2]",
         &editor.project_value,
         editor.project_cursor,
@@ -1852,7 +2122,7 @@ fn render_task_editor_popup(
 
     render_editor_field(
         frame,
-        form_rows[2],
+        form_rows[3],
         "Tags [F3]",
         &editor.tags_value,
         editor.tags_cursor,
@@ -1868,7 +2138,7 @@ fn render_task_editor_popup(
             Constraint::Percentage(20),
             Constraint::Percentage(32),
         ])
-        .split(form_rows[3]);
+        .split(form_rows[4]);
     render_editor_field(
         frame,
         due_row[0],
@@ -1901,7 +2171,7 @@ fn render_task_editor_popup(
     );
     render_editor_field(
         frame,
-        form_rows[4],
+        form_rows[5],
         "Recurrence [F7]",
         &editor.recurrence_value,
         editor.recurrence_cursor,
@@ -1916,7 +2186,7 @@ fn render_task_editor_popup(
         let project_anchor = if editor.focus.title {
             form_rows[0]
         } else {
-            form_rows[1]
+            form_rows[2]
         };
         let visible_width = project_anchor.width.saturating_sub(4) as usize;
         let cursor_col = editor_cursor_display_column(
@@ -1947,7 +2217,7 @@ fn render_task_editor_popup(
         let tags_anchor = if editor.focus.title {
             form_rows[0]
         } else {
-            form_rows[2]
+            form_rows[3]
         };
         let visible_width = tags_anchor.width.saturating_sub(4) as usize;
         let cursor_col = editor_cursor_display_column(
@@ -2055,6 +2325,82 @@ fn render_editor_field(
     frame.render_widget(widget, area);
     if focused {
         set_single_line_input_cursor(frame, area, window.cursor_col);
+    }
+}
+
+fn render_editor_multiline_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: &str,
+    cursor: usize,
+    scroll: usize,
+    focused: bool,
+    placeholder: Option<&str>,
+    palette: ThemePalette,
+) {
+    let border_style = if focused {
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.subtle_text)
+    };
+    let lines = value.split('\n').collect::<Vec<_>>();
+    let visible_lines = area.height.saturating_sub(2) as usize;
+    let safe_cursor = cursor.min(value.len());
+    let cursor_line = value[..safe_cursor]
+        .chars()
+        .filter(|character| *character == '\n')
+        .count();
+    let cursor_line_start = value[..safe_cursor]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let cursor_col_chars = UnicodeWidthStr::width(&value[cursor_line_start..safe_cursor]);
+    let effective_scroll = scroll.min(cursor_line);
+    let end = (effective_scroll + visible_lines).min(lines.len().max(1));
+
+    let rendered = if focused {
+        (effective_scroll..end)
+            .map(|index| {
+                Line::from(Span::styled(
+                    lines.get(index).copied().unwrap_or(""),
+                    Style::default().fg(palette.text),
+                ))
+            })
+            .collect::<Vec<_>>()
+    } else if value.is_empty() {
+        vec![Line::from(Span::styled(
+            placeholder.unwrap_or(""),
+            Style::default()
+                .fg(palette.subtle_text)
+                .add_modifier(Modifier::DIM),
+        ))]
+    } else {
+        (effective_scroll..end)
+            .map(|index| Line::from(lines.get(index).copied().unwrap_or("")))
+            .collect::<Vec<_>>()
+    };
+
+    frame.render_widget(
+        Paragraph::new(rendered).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .title(Span::styled(label, border_style))
+                .borders(Borders::ALL)
+                .border_style(border_style),
+        ),
+        area,
+    );
+
+    if focused && area.width > 2 && area.height > 2 && cursor_line >= effective_scroll {
+        let row = (cursor_line - effective_scroll).min(visible_lines.saturating_sub(1)) as u16;
+        let x = area
+            .x
+            .saturating_add(1)
+            .saturating_add((cursor_col_chars as u16).min(area.width.saturating_sub(3)));
+        let y = area.y.saturating_add(1).saturating_add(row);
+        frame.set_cursor_position((x, y));
     }
 }
 
@@ -2264,16 +2610,20 @@ fn render_editor_calendar(
 fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "F1-F7 fields  ↑/↓ suggestions  F8 calendar  F9 clear due",
+            "F1-F8 fields  Ctrl+Enter save  Ctrl+E ext editor  F8/F9 calendar  F9 clear due",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
     }
 
     Line::from(vec![
-        Span::styled("F1-F7", Style::default().fg(palette.subtle_text)),
+        Span::styled("F1-F8", Style::default().fg(palette.subtle_text)),
         Span::raw(" fields  "),
-        Span::styled("F8", Style::default().fg(palette.subtle_text)),
+        Span::styled("Ctrl+↵", Style::default().fg(palette.subtle_text)),
+        Span::raw(" save  "),
+        Span::styled("Ctrl+e", Style::default().fg(palette.subtle_text)),
+        Span::raw(" ext  "),
+        Span::styled("F8/F9", Style::default().fg(palette.subtle_text)),
         Span::raw(" 󰃭  "),
         Span::styled("F9", Style::default().fg(palette.subtle_text)),
         Span::raw(" due  "),
@@ -3184,7 +3534,7 @@ fn render_tag_sort_popup(
 fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "↑/↓ move  Tab accept #/@  Enter save  Esc cancel",
+            "↑/↓ move  Tab accept #/@  Enter save  Ctrl+e full editor  Esc cancel",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
@@ -3197,6 +3547,8 @@ fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'s
         Span::raw(" #/@  "),
         Span::styled("󰌑", Style::default().fg(palette.subtle_text)),
         Span::raw(" save  "),
+        Span::styled("Ctrl+e", Style::default().fg(palette.subtle_text)),
+        Span::raw(" full  "),
         Span::styled(symbols.voided, Style::default().fg(palette.subtle_text)),
         Span::raw(" esc"),
     ])
@@ -4449,26 +4801,6 @@ fn format_due_label(due: &crate::domain::TaskDue, today: NaiveDate) -> String {
     } else {
         day_label
     }
-}
-
-fn format_recurring_rule(value: &str) -> String {
-    value
-        .split_whitespace()
-        .map(capitalize_word)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn capitalize_word(word: &str) -> String {
-    let mut characters = word.chars();
-    let Some(first) = characters.next() else {
-        return String::new();
-    };
-
-    let mut output = String::new();
-    output.extend(first.to_uppercase());
-    output.push_str(characters.as_str());
-    output
 }
 
 fn time_date(date: NaiveDate) -> TimeDate {
