@@ -2167,11 +2167,11 @@ fn render_tag_editor_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let area = centered_rect(frame.area(), 64, 13);
+    let area = centered_rect(frame.area(), 64, 14);
     frame.render_widget(Clear, area);
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Length(6)])
+        .constraints([Constraint::Length(8), Constraint::Length(6)])
         .split(area);
 
     let form_block = Block::default()
