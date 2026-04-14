@@ -521,7 +521,12 @@ fn render_favorites_panel(
         Line::from(format!("[7] {} Favorites", symbols.favorite)),
         focused_panel == PanelFocus::Favorites,
         palette,
-    );
+    )
+    .title_bottom(favorites_footer_hints(
+        symbols,
+        focused_panel == PanelFocus::Favorites,
+        palette,
+    ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1396,20 +1401,10 @@ fn favorite_item_line(
     };
     let count_text = format!(" {}", row.task_count);
     let name_width = (width as usize)
-        .saturating_sub(symbols.favorite.width())
-        .saturating_sub(1)
         .saturating_sub(marker.width())
         .saturating_sub(count_text.width())
         .max(1);
     let mut spans = vec![
-        Span::styled(
-            format!("{} ", symbols.favorite),
-            if row.is_selected {
-                selection_style
-            } else {
-                selection_style.patch(Style::default().fg(palette.subtle_text))
-            },
-        ),
         Span::styled(
             marker,
             if row.is_selected {
@@ -4674,6 +4669,23 @@ fn filters_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) 
         Span::styled(" o sort  ", Style::default().fg(palette.subtle_text)),
         Span::styled(filter_new_icon, Style::default().fg(palette.accent)),
         Span::styled(" C new ", Style::default().fg(palette.subtle_text)),
+    ])
+    .right_aligned()
+}
+
+fn favorites_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> Line<'static> {
+    if !focused {
+        return Line::from("").right_aligned();
+    }
+
+    Line::from(vec![
+        Span::styled("j/k", Style::default().fg(palette.accent)),
+        Span::styled(" move  ", Style::default().fg(palette.subtle_text)),
+        Span::styled("f", Style::default().fg(palette.accent)),
+        Span::styled(
+            format!(" remove {}", symbols.favorite),
+            Style::default().fg(palette.subtle_text),
+        ),
     ])
     .right_aligned()
 }
