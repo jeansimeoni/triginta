@@ -306,24 +306,27 @@ fn render_navigation_panel(
 ) {
     let content_width = area.width.saturating_sub(2);
     let (mut lines, selected_index) = match app.active_sidebar_tab() {
-        SidebarTab::Navigation => (
-            app.navigation_task_views()
-                .into_iter()
-                .map(|view| {
-                    let selected = app.active_task_view() == view;
-                    selectable_count_line(
-                        &format!("{} {}", task_view_symbol(view, symbols), view.label()),
-                        app.task_count_for_view(view),
-                        selected,
-                        content_width,
-                        palette,
-                    )
-                })
-                .collect::<Vec<_>>(),
-            app.navigation_task_views()
-                .iter()
-                .position(|view| app.active_task_view() == *view),
-        ),
+        SidebarTab::Navigation => {
+            let show_selection = focused_panel == PanelFocus::Navigation;
+            (
+                app.navigation_task_views()
+                    .into_iter()
+                    .map(|view| {
+                        let selected = show_selection && app.active_task_view() == view;
+                        selectable_count_line(
+                            &format!("{} {}", task_view_symbol(view, symbols), view.label()),
+                            app.task_count_for_view(view),
+                            selected,
+                            content_width,
+                            palette,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                app.navigation_task_views()
+                    .iter()
+                    .position(|view| app.active_task_view() == *view),
+            )
+        }
         SidebarTab::Projects => {
             let rows = app.project_tree_rows();
             let selected_index = rows.iter().position(|row| row.is_selected);
