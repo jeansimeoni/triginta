@@ -4147,7 +4147,9 @@ impl App {
             }
             TaskEditorField::Project => {}
             TaskEditorField::Tags => {}
-            TaskEditorField::Priority => {}
+            TaskEditorField::Priority => {
+                Self::sync_editor_title_from_priority_field(editor, reference_date);
+            }
             TaskEditorField::DueDate | TaskEditorField::DueTime => {
                 editor.due_from_title = false;
                 if !editor.recurrence_input.trim().is_empty() {
@@ -4196,6 +4198,19 @@ impl App {
         }
         editor.priority_input = value;
         editor.priority_cursor = editor.priority_input.len();
+    }
+
+    fn sync_editor_title_from_priority_field(
+        editor: &mut TaskEditorState,
+        reference_date: NaiveDate,
+    ) {
+        let (cleaned_title, _) = Self::extract_priority_reference(editor.title_input.as_str());
+        if cleaned_title == editor.title_input {
+            return;
+        }
+        editor.title_input = cleaned_title;
+        editor.title_cursor = editor.title_cursor.min(editor.title_input.len());
+        Self::sync_editor_due_from_title(editor, reference_date);
     }
 
     fn sync_editor_due_from_recurrence(editor: &mut TaskEditorState, reference_date: NaiveDate) {
@@ -7653,6 +7668,46 @@ mod tests {
 
         let editor = app.task_editor_view().expect("editor should be visible");
         assert_eq!(editor.priority_value, "p2");
+    }
+
+    #[test]
+    fn task_editor_priority_field_edit_clears_priority_tokens_from_title() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Prepare deck".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+
+        app.handle_key(crossterm::event::KeyCode::F(1))
+            .expect("focus should switch to title");
+        for character in " p2".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::F(5))
+            .expect("focus should switch to priority");
+        app.handle_key(crossterm::event::KeyCode::Backspace)
+            .expect("priority edit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Backspace)
+            .expect("priority edit should succeed");
+        for character in "p3".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_eq!(editor.priority_value, "p3");
+        assert_eq!(editor.title_value, "Prepare deck");
+        assert_key_value_preview_line(&editor.preview_panel.preview_lines[2], "Priority", "P3");
     }
 
     #[test]
