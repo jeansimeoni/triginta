@@ -632,7 +632,7 @@ fn render_task_details_panel(
             lines.push(Line::from(format!(
                 "Tags: {}",
                 tags.into_iter()
-                    .map(|tag| format!("@{tag}"))
+                    .map(|(tag, _)| format!("@{tag}"))
                     .collect::<Vec<_>>()
                     .join(" ")
             )));
@@ -914,7 +914,8 @@ fn task_project_line(
     let (project_name, project_color) = project_meta_for_task(data, task)
         .map(|(name, color)| (name, palette.project_color(color)))
         .unwrap_or(("Inbox", palette.subtle_text));
-    let tags_text = format_task_tags_for_row(task_tags_for_task(data, task.id).as_slice(), width);
+    let tags = format_task_tags_for_row(task_tags_for_task(data, task.id).as_slice(), width);
+    let tags_width = task_tag_segments_width(tags.as_slice());
     let status_marker = task_status_symbol(task.status, symbols);
     let leading_padding = 2usize
         .saturating_add(status_marker.width())
@@ -951,28 +952,25 @@ fn task_project_line(
                     .saturating_sub(leading_padding as u16)
                     .saturating_sub(symbols.project.width() as u16)
                     .saturating_sub(1)
-                    .saturating_sub(tags_text.width() as u16)
-                    .saturating_sub(if tags_text.is_empty() { 0 } else { 2 })
-                    as usize,
+                    .saturating_sub(tags_width as u16)
+                    .saturating_sub(if tags.is_empty() { 0 } else { 2 }) as usize,
             ),
             name_style,
         ),
     ];
-    if !tags_text.is_empty() {
+    if !tags.is_empty() {
         let current_width = Line::from(spans.clone()).width();
         let min_gap = 2usize;
         let available_for_gap = (width as usize)
             .saturating_sub(current_width)
-            .saturating_sub(tags_text.width());
+            .saturating_sub(tags_width);
         let gap = available_for_gap.max(min_gap);
         spans.push(Span::styled(" ".repeat(gap), base_style));
-        spans.push(Span::styled(
-            tags_text,
-            if selected {
-                base_style
-            } else {
-                base_style.patch(Style::default().fg(palette.subtle_text))
-            },
+        spans.extend(task_tag_segments_spans(
+            tags.as_slice(),
+            base_style,
+            selected,
+            palette,
         ));
     }
     let current_width = Line::from(spans.clone()).width();
@@ -1000,7 +998,10 @@ fn project_meta_for_task<'a>(
         .map(|project| (project.name.as_str(), project.color))
 }
 
-fn task_tags_for_task<'a>(data: &'a ScreenData, task_id: crate::domain::TaskId) -> Vec<&'a str> {
+fn task_tags_for_task<'a>(
+    data: &'a ScreenData,
+    task_id: crate::domain::TaskId,
+) -> Vec<(&'a str, TagColor)> {
     let mut tags = data
         .task_tag_links
         .iter()
@@ -1011,23 +1012,29 @@ fn task_tags_for_task<'a>(data: &'a ScreenData, task_id: crate::domain::TaskId) 
             data.tags
                 .iter()
                 .find(|tag| tag.id == *tag_id && tag.deleted_at.is_none())
-                .map(|tag| tag.name.as_str())
+                .map(|tag| (tag.name.as_str(), tag.color))
         })
         .collect::<Vec<_>>();
-    tags.sort_by_key(|name| name.to_lowercase());
+    tags.sort_by_key(|(name, _)| name.to_lowercase());
     tags
 }
 
-fn format_task_tags_for_row(tags: &[&str], width: u16) -> String {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskTagRowSegment {
+    text: String,
+    color: Option<TagColor>,
+}
+
+fn format_task_tags_for_row(tags: &[(&str, TagColor)], width: u16) -> Vec<TaskTagRowSegment> {
     if tags.is_empty() {
-        return String::new();
+        return Vec::new();
     }
     let max_width = (width as usize / 2).max(8);
-    let mut chunks = Vec::new();
+    let mut segments = Vec::new();
     let mut used = 0usize;
-    for tag in tags {
+    for (tag, color) in tags {
         let chunk = format!("@{tag}");
-        let next = if chunks.is_empty() {
+        let next = if segments.is_empty() {
             chunk.width()
         } else {
             chunk.width() + 1
@@ -1036,18 +1043,65 @@ fn format_task_tags_for_row(tags: &[&str], width: u16) -> String {
             break;
         }
         used += next;
-        chunks.push(chunk);
+        segments.push(TaskTagRowSegment {
+            text: chunk,
+            color: Some(*color),
+        });
     }
-    let remaining = tags.len().saturating_sub(chunks.len());
+    let remaining = tags.len().saturating_sub(segments.len());
     if remaining > 0 {
         let suffix = format!("+{remaining}");
-        if !chunks.is_empty() && used + suffix.width() + 1 <= max_width {
-            chunks.push(suffix);
-        } else if chunks.is_empty() && suffix.width() <= max_width {
-            chunks.push(suffix);
+        if !segments.is_empty() && used + suffix.width() + 1 <= max_width {
+            segments.push(TaskTagRowSegment {
+                text: suffix,
+                color: None,
+            });
+        } else if segments.is_empty() && suffix.width() <= max_width {
+            segments.push(TaskTagRowSegment {
+                text: suffix,
+                color: None,
+            });
         }
     }
-    chunks.join(" ")
+    segments
+}
+
+fn task_tag_segments_width(segments: &[TaskTagRowSegment]) -> usize {
+    segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            if index == 0 {
+                segment.text.width()
+            } else {
+                segment.text.width() + 1
+            }
+        })
+        .sum()
+}
+
+fn task_tag_segments_spans(
+    segments: &[TaskTagRowSegment],
+    base_style: Style,
+    selected: bool,
+    palette: ThemePalette,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" ", base_style));
+        }
+        let style = if selected {
+            base_style
+        } else if let Some(color) = segment.color {
+            base_style
+                .patch(Style::default().fg(palette.project_color(project_color_for_tag(color))))
+        } else {
+            base_style.patch(Style::default().fg(palette.subtle_text))
+        };
+        spans.push(Span::styled(segment.text.clone(), style));
+    }
+    spans
 }
 
 fn project_tree_line(
@@ -3537,7 +3591,8 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 
 #[cfg(test)]
 mod tests {
-    use super::input_window_view;
+    use super::{TaskTagRowSegment, format_task_tags_for_row, input_window_view};
+    use crate::domain::TagColor;
 
     #[test]
     fn input_window_view_keeps_full_text_when_it_fits() {
@@ -3572,6 +3627,29 @@ mod tests {
         let view = input_window_view("abc", 10, 5);
         assert_eq!(view.text, "abc");
         assert_eq!(view.cursor_col, 3);
+    }
+
+    #[test]
+    fn format_task_tags_for_row_keeps_tag_colors_and_adds_overflow_suffix() {
+        let tags = vec![
+            ("deepwork", TagColor::Blue),
+            ("focus", TagColor::Red),
+            ("planning", TagColor::Teal),
+        ];
+        let rendered = format_task_tags_for_row(tags.as_slice(), 24);
+        assert_eq!(
+            rendered,
+            vec![
+                TaskTagRowSegment {
+                    text: "@deepwork".to_string(),
+                    color: Some(TagColor::Blue),
+                },
+                TaskTagRowSegment {
+                    text: "+2".to_string(),
+                    color: None,
+                },
+            ]
+        );
     }
 }
 
