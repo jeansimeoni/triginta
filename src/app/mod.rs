@@ -12,15 +12,16 @@ use tracing::info;
 
 use crate::{
     config::{
-        AppConfig, AppPaths, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings,
-        init_tracing, load_app_config, save_app_config,
+        AppConfig, AppPaths, GlyphMode, ProjectSortOrder, TagSortOrder, TaskSortOrder,
+        TimerSettings, init_tracing, load_app_config, save_app_config,
     },
     domain::{
         DayHistorySummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate,
-        SessionEntry, SessionKind, SessionOutcome, Task, TaskId, TaskStatus, TaskUpdate,
+        SessionEntry, SessionKind, SessionOutcome, Tag, TagColor, TagId, TagUpdate, Task, TaskId,
+        TaskStatus, TaskUpdate,
     },
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
-    storage::{Database, PomodoroRepository, ProjectRepository, TaskRepository},
+    storage::{Database, PomodoroRepository, ProjectRepository, TagRepository, TaskRepository},
     task_nlp::{next_recurring_due, parse_due_input, parse_due_time_input, parse_task_input},
     theme::ThemePalette,
     ui,
@@ -399,6 +400,8 @@ pub struct TimerView {
 pub struct ScreenData {
     pub tasks: Vec<Task>,
     pub projects: Vec<Project>,
+    pub tags: Vec<Tag>,
+    pub task_tag_links: Vec<(TaskId, TagId)>,
     pub history_entries: Vec<SessionEntry>,
     pub today_stats: HistoryStats,
     pub weekly_summaries: Vec<DayHistorySummary>,
@@ -410,6 +413,7 @@ struct TaskInputState {
     value: String,
     cursor: usize,
     project_id: ProjectId,
+    tag_suggestion_index: usize,
     suggestion_index: usize,
 }
 
@@ -417,15 +421,17 @@ struct TaskInputState {
 enum TaskEditorField {
     Title,
     Project,
+    Tags,
     DueDate,
     DueTime,
     Recurrence,
 }
 
 impl TaskEditorField {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Title,
         Self::Project,
+        Self::Tags,
         Self::DueDate,
         Self::DueTime,
         Self::Recurrence,
@@ -435,9 +441,10 @@ impl TaskEditorField {
         match self {
             Self::Title => 0,
             Self::Project => 1,
-            Self::DueDate => 2,
-            Self::DueTime => 3,
-            Self::Recurrence => 4,
+            Self::Tags => 2,
+            Self::DueDate => 3,
+            Self::DueTime => 4,
+            Self::Recurrence => 5,
         }
     }
 
@@ -462,6 +469,8 @@ struct TaskEditorState {
     project_input: String,
     project_cursor: usize,
     project_id: ProjectId,
+    tags_input: String,
+    tags_cursor: usize,
     suggestion_index: usize,
     due_date_input: String,
     due_date_cursor: usize,
@@ -575,6 +584,11 @@ struct ProjectSortPopupState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TagSortPopupState {
+    selected_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskSearchMode {
     TimerAssignment,
     HistoryAssignment(i64),
@@ -589,6 +603,8 @@ pub struct TaskInputView {
     pub show_project_assignment: bool,
     pub project_suggestions: Vec<String>,
     pub selected_project_suggestion: usize,
+    pub tag_suggestions: Vec<String>,
+    pub selected_tag_suggestion: usize,
     pub due_preview: Option<TaskDuePreviewView>,
     pub preview_panel: FormPreviewPanelView,
 }
@@ -603,6 +619,7 @@ pub struct CalendarPickerView {
 pub struct TaskEditorFocusView {
     pub title: bool,
     pub project: bool,
+    pub tags: bool,
     pub due_date: bool,
     pub due_time: bool,
     pub recurrence: bool,
@@ -617,6 +634,10 @@ pub struct TaskEditorView {
     pub project_cursor: usize,
     pub project_suggestions: Vec<String>,
     pub selected_project_suggestion: usize,
+    pub tags_value: String,
+    pub tags_cursor: usize,
+    pub tag_suggestions: Vec<String>,
+    pub selected_tag_suggestion: usize,
     pub due_date_value: String,
     pub due_date_cursor: usize,
     pub due_time_value: String,
@@ -698,6 +719,7 @@ struct ParsedTaskDraft {
     cleaned_title: String,
     due: Option<crate::domain::TaskDue>,
     project_id: ProjectId,
+    tag_queries: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -796,6 +818,95 @@ pub struct ProjectSortPopupView {
     pub title: &'static str,
     pub selected_index: usize,
     pub options: Vec<ProjectSortOptionView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagListRowView {
+    pub tag_id: Option<TagId>,
+    pub name: String,
+    pub is_favorite: bool,
+    pub color: Option<TagColor>,
+    pub task_count: usize,
+    pub is_selected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TagEditorField {
+    Name,
+    Color,
+    Favorite,
+}
+
+impl TagEditorField {
+    const ALL: [Self; 3] = [Self::Name, Self::Color, Self::Favorite];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Name => 0,
+            Self::Color => 1,
+            Self::Favorite => 2,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self::ALL[index.min(Self::ALL.len().saturating_sub(1))]
+    }
+
+    fn next(self) -> Self {
+        Self::from_index((self.index() + 1).min(Self::ALL.len().saturating_sub(1)))
+    }
+
+    fn previous(self) -> Self {
+        Self::from_index(self.index().saturating_sub(1))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TagEditorState {
+    tag_id: Option<TagId>,
+    name_input: String,
+    name_cursor: usize,
+    color_index: usize,
+    is_favorite: bool,
+    focused_field: TagEditorField,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagEditorFocusView {
+    pub name: bool,
+    pub color: bool,
+    pub favorite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagEditorView {
+    pub title: &'static str,
+    pub name_value: String,
+    pub name_cursor: usize,
+    pub color_label: String,
+    pub color_value: TagColor,
+    pub is_favorite: bool,
+    pub focus: TagEditorFocusView,
+    pub preview_panel: FormPreviewPanelView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagDeleteConfirmationView {
+    pub tag_id: TagId,
+    pub tag_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagSortOptionView {
+    pub label: &'static str,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagSortPopupView {
+    pub title: &'static str,
+    pub selected_index: usize,
+    pub options: Vec<TagSortOptionView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -908,12 +1019,70 @@ const FILTERS_TAGS_SHORTCUTS: &[ShortcutTip] = &[
         description: "switch tab",
     },
     ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "move tag",
+    },
+    ShortcutTip {
+        keys: "C/e/d",
+        description: "new/edit/delete tag",
+    },
+    ShortcutTip {
+        keys: "o",
+        description: "sort",
+    },
+    ShortcutTip {
+        keys: "J/K",
+        description: "reorder (manual)",
+    },
+    ShortcutTip {
+        keys: "f",
+        description: "toggle favorite",
+    },
+    ShortcutTip {
+        keys: "c",
+        description: "new task with tag",
+    },
+    ShortcutTip {
         keys: "Enter",
         description: "open task list",
     },
     ShortcutTip {
         keys: "/",
         description: "search",
+    },
+];
+
+const TAG_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter",
+        description: "save",
+    },
+    ShortcutTip {
+        keys: "Esc",
+        description: "cancel",
+    },
+    ShortcutTip {
+        keys: "Tab/S-Tab",
+        description: "next/prev field",
+    },
+    ShortcutTip {
+        keys: "F1-F3",
+        description: "jump to field",
+    },
+    ShortcutTip {
+        keys: "h/l or j/k",
+        description: "change value",
+    },
+];
+
+const TAG_DELETE_CONFIRMATION_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter/y",
+        description: "confirm",
+    },
+    ShortcutTip {
+        keys: "Esc/n",
+        description: "cancel",
     },
 ];
 
@@ -1042,16 +1211,16 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "next/prev field",
     },
     ShortcutTip {
-        keys: "F1-F5",
+        keys: "F1-F6",
         description: "jump to field",
     },
     ShortcutTip {
-        keys: "j/k or ↑/↓",
-        description: "project suggestions",
+        keys: "F8",
+        description: "open calendar",
     },
     ShortcutTip {
-        keys: "F6",
-        description: "open calendar",
+        keys: "j/k or ↑/↓",
+        description: "suggestions",
     },
     ShortcutTip {
         keys: "F7",
@@ -1182,17 +1351,21 @@ pub struct App {
     history_scroll: usize,
     selected_task_id: Option<TaskId>,
     selected_project_id: Option<ProjectId>,
+    selected_tag_id: Option<TagId>,
     assigned_task_id: Option<TaskId>,
     active_focus_task_id: Option<TaskId>,
     task_input: Option<TaskInputState>,
     task_editor: Option<TaskEditorState>,
     project_editor: Option<ProjectEditorState>,
+    tag_editor: Option<TagEditorState>,
     task_search: Option<TaskSearchState>,
     panel_search_states: PanelSearchStates,
     task_sort_popup: Option<TaskSortPopupState>,
     project_sort_popup: Option<ProjectSortPopupState>,
+    tag_sort_popup: Option<TagSortPopupState>,
     delete_confirmation: Option<TaskId>,
     project_delete_confirmation: Option<ProjectId>,
+    tag_delete_confirmation: Option<TagId>,
     help_open: bool,
     help_scroll: usize,
     help_viewport_lines: usize,
@@ -1204,11 +1377,13 @@ impl App {
     fn task_input_parse(&self, raw: &str, fallback_project_id: ProjectId) -> ParsedTaskDraft {
         let (without_project_tokens, project_id) =
             self.extract_project_reference(raw, fallback_project_id);
-        let parsed = parse_task_input(without_project_tokens.as_str(), self.today());
+        let (without_tag_tokens, tag_queries) = self.extract_tag_references(without_project_tokens);
+        let parsed = parse_task_input(without_tag_tokens.as_str(), self.today());
         ParsedTaskDraft {
             cleaned_title: parsed.cleaned_title,
             due: parsed.due,
             project_id,
+            tag_queries,
         }
     }
 
@@ -1221,6 +1396,9 @@ impl App {
     ) -> Self {
         if !config.ui.persist_project_list_sort {
             config.ui.project_list_sort = ProjectSortOrder::Manual;
+        }
+        if !config.ui.persist_tag_list_sort {
+            config.ui.tag_list_sort = TagSortOrder::Manual;
         }
         let glyph_mode = config.ui.glyph_mode;
         let timer_settings = config.timer.clone();
@@ -1241,17 +1419,21 @@ impl App {
             history_scroll: 0,
             selected_task_id: None,
             selected_project_id: None,
+            selected_tag_id: None,
             assigned_task_id: None,
             active_focus_task_id: None,
             task_input: None,
             task_editor: None,
             project_editor: None,
+            tag_editor: None,
             task_search: None,
             panel_search_states: PanelSearchStates::default(),
             task_sort_popup: None,
             project_sort_popup: None,
+            tag_sort_popup: None,
             delete_confirmation: None,
             project_delete_confirmation: None,
+            tag_delete_confirmation: None,
             help_open: false,
             help_scroll: 0,
             help_viewport_lines: 0,
@@ -1346,19 +1528,44 @@ impl App {
             .collect()
     }
 
-    pub fn filters_tags_lines(&self) -> Vec<&'static str> {
-        const PLACEHOLDER_ROWS: &[&str] = &[
-            "Filters and tags are reserved here.",
-            "Project metadata now occupies the third tab.",
-        ];
+    pub fn tags_rows(&self) -> Vec<TagListRowView> {
         let query = self
             .panel_search_query(PanelSearchTarget::FiltersTags)
             .unwrap_or("");
-        PLACEHOLDER_ROWS
+        let mut rows = vec![TagListRowView {
+            tag_id: None,
+            name: "All Tags".to_string(),
+            is_favorite: false,
+            color: None,
+            task_count: self.tasks_for_tag_filter(None),
+            is_selected: self.selected_tag_id.is_none(),
+        }];
+        let mut tags = self
+            .screen_data
+            .tags
             .iter()
-            .copied()
-            .filter(|line| fuzzy_matches(query, line))
-            .collect()
+            .filter(|tag| tag.deleted_at.is_none())
+            .collect::<Vec<_>>();
+        tags.sort_by(|left, right| self.compare_tags(left, right));
+        rows.extend(tags.into_iter().map(|tag| TagListRowView {
+            tag_id: Some(tag.id),
+            name: tag.name.clone(),
+            is_favorite: tag.is_favorite,
+            color: Some(tag.color),
+            task_count: self.tasks_for_tag_filter(Some(tag.id)),
+            is_selected: self.selected_tag_id == Some(tag.id),
+        }));
+        if !query.is_empty() {
+            rows.retain(|row| fuzzy_matches(query, row.name.as_str()));
+        }
+        rows
+    }
+
+    pub fn has_user_tags(&self) -> bool {
+        self.screen_data
+            .tags
+            .iter()
+            .any(|tag| tag.deleted_at.is_none())
     }
 
     pub fn task_input_view(&self) -> Option<TaskInputView> {
@@ -1370,6 +1577,16 @@ impl App {
                         .into_iter()
                         .take(4)
                         .map(|project| project.name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let tag_suggestions = self
+                .active_tag_query(input.value.as_str(), input.cursor)
+                .map(|(_, _, query)| {
+                    self.tag_suggestions(query.as_str())
+                        .into_iter()
+                        .take(4)
+                        .map(|tag| tag.name.clone())
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -1398,6 +1615,10 @@ impl App {
                 selected_project_suggestion: input
                     .suggestion_index
                     .min(project_suggestions.len().saturating_sub(1)),
+                tag_suggestions: tag_suggestions.clone(),
+                selected_tag_suggestion: input
+                    .tag_suggestion_index
+                    .min(tag_suggestions.len().saturating_sub(1)),
                 due_preview: due_preview.clone(),
                 preview_panel: Self::task_input_preview_panel(
                     show_project_assignment,
@@ -1426,9 +1647,21 @@ impl App {
             } else {
                 Vec::new()
             };
+            let tag_suggestions = if editor.focused_field == TaskEditorField::Tags {
+                self.active_tag_field_query(editor.tags_input.as_str(), editor.tags_cursor)
+                    .map(|(_, _, query)| self.tag_suggestions(query.as_str()))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(4)
+                    .map(|tag| tag.name.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let focus = TaskEditorFocusView {
                 title: editor.focused_field == TaskEditorField::Title,
                 project: editor.focused_field == TaskEditorField::Project,
+                tags: editor.focused_field == TaskEditorField::Tags,
                 due_date: editor.focused_field == TaskEditorField::DueDate,
                 due_time: editor.focused_field == TaskEditorField::DueTime,
                 recurrence: editor.focused_field == TaskEditorField::Recurrence,
@@ -1444,6 +1677,12 @@ impl App {
                 selected_project_suggestion: editor
                     .suggestion_index
                     .min(project_suggestions.len().saturating_sub(1)),
+                tags_value: editor.tags_input.clone(),
+                tags_cursor: editor.tags_cursor,
+                tag_suggestions: tag_suggestions.clone(),
+                selected_tag_suggestion: editor
+                    .suggestion_index
+                    .min(tag_suggestions.len().saturating_sub(1)),
                 due_date_value: editor.due_date_input.clone(),
                 due_date_cursor: editor.due_date_cursor,
                 due_time_value: editor.due_time_input.clone(),
@@ -1458,6 +1697,7 @@ impl App {
                 }),
                 preview_panel: Self::task_editor_preview_panel(
                     editor.project_input.as_str(),
+                    editor.tags_input.as_str(),
                     due_preview.as_ref(),
                     editor.focused_field,
                 ),
@@ -1604,10 +1844,19 @@ impl App {
 
     fn task_editor_preview_panel(
         project_value: &str,
+        tags_value: &str,
         due_preview: Option<&TaskDuePreviewView>,
         focused_field: TaskEditorField,
     ) -> FormPreviewPanelView {
         let mut preview_lines = vec![PreviewLineView::key_value("Project", project_value)];
+        preview_lines.push(PreviewLineView::key_value(
+            "Tags",
+            if tags_value.trim().is_empty() {
+                "-".to_string()
+            } else {
+                tags_value.trim().to_string()
+            },
+        ));
         if let Some(due) = due_preview {
             preview_lines.push(PreviewLineView::emphasized_key_value(
                 "Summary",
@@ -1635,8 +1884,11 @@ impl App {
             TaskEditorField::Project => {
                 vec!["Type in Project to fuzzy-match and use Enter/Tab to accept".to_string()]
             }
+            TaskEditorField::Tags => {
+                vec!["Type @ for selecting tags and use Enter/Tab to accept".to_string()]
+            }
             TaskEditorField::DueDate => {
-                vec!["Type YYYY-MM-DD or use F6 to pick from calendar".to_string()]
+                vec!["Type YYYY-MM-DD or use F8 to pick from calendar".to_string()]
             }
             TaskEditorField::DueTime => {
                 vec!["Type HH:MM (24h) or leave empty for all-day due date".to_string()]
@@ -1752,12 +2004,77 @@ impl App {
         })
     }
 
+    pub fn tag_editor_view(&self) -> Option<TagEditorView> {
+        let editor = self.tag_editor.as_ref()?;
+        let color = TagColor::all()
+            .get(editor.color_index)
+            .copied()
+            .unwrap_or(TagColor::Charcoal);
+        Some(TagEditorView {
+            title: if editor.tag_id.is_some() {
+                "Edit Tag"
+            } else {
+                "New Tag"
+            },
+            name_value: editor.name_input.clone(),
+            name_cursor: editor.name_cursor,
+            color_label: color.label().to_string(),
+            color_value: color,
+            is_favorite: editor.is_favorite,
+            focus: TagEditorFocusView {
+                name: editor.focused_field == TagEditorField::Name,
+                color: editor.focused_field == TagEditorField::Color,
+                favorite: editor.focused_field == TagEditorField::Favorite,
+            },
+            preview_panel: FormPreviewPanelView {
+                preview_lines: Vec::new(),
+                tips: match editor.focused_field {
+                    TagEditorField::Name => {
+                        vec!["Use @name style when typing task titles".to_string()]
+                    }
+                    TagEditorField::Color => vec!["Use ←/→ or h/l to change the color".to_string()],
+                    TagEditorField::Favorite => {
+                        vec!["Use ←/→ or h/l to toggle favorite".to_string()]
+                    }
+                },
+            },
+        })
+    }
+
+    pub fn tag_delete_confirmation_view(&self) -> Option<TagDeleteConfirmationView> {
+        let tag_id = self.tag_delete_confirmation?;
+        let tag = self.screen_data.tags.iter().find(|tag| tag.id == tag_id)?;
+        Some(TagDeleteConfirmationView {
+            tag_id,
+            tag_name: tag.name.clone(),
+        })
+    }
+
+    pub fn tag_sort_popup_view(&self) -> Option<TagSortPopupView> {
+        let popup = self.tag_sort_popup?;
+        Some(TagSortPopupView {
+            title: "Sort Tags",
+            selected_index: popup.selected_index,
+            options: TagSortOrder::all()
+                .iter()
+                .map(|sort_order| TagSortOptionView {
+                    label: sort_order.label(),
+                    is_active: *sort_order == self.config.ui.tag_list_sort,
+                })
+                .collect(),
+        })
+    }
+
     pub fn task_sort_order(&self) -> TaskSortOrder {
         self.config.ui.task_list_sort
     }
 
     pub fn project_sort_order(&self) -> ProjectSortOrder {
         self.config.ui.project_list_sort
+    }
+
+    pub fn tag_sort_order(&self) -> TagSortOrder {
+        self.config.ui.tag_list_sort
     }
 
     pub fn hides_completed_tasks(&self) -> bool {
@@ -1863,7 +2180,10 @@ impl App {
     }
 
     pub fn focused_panel_shortcuts(&self) -> &'static [ShortcutTip] {
-        if self.task_sort_popup.is_some() || self.project_sort_popup.is_some() {
+        if self.task_sort_popup.is_some()
+            || self.project_sort_popup.is_some()
+            || self.tag_sort_popup.is_some()
+        {
             return SORT_POPUP_SHORTCUTS;
         }
         if self.task_editor.is_some() {
@@ -1871,6 +2191,9 @@ impl App {
         }
         if self.project_editor.is_some() {
             return PROJECT_EDITOR_SHORTCUTS;
+        }
+        if self.tag_editor.is_some() {
+            return TAG_EDITOR_SHORTCUTS;
         }
         if self.task_input.is_some() {
             return INPUT_POPUP_SHORTCUTS;
@@ -1884,6 +2207,9 @@ impl App {
         }
         if self.project_delete_confirmation.is_some() {
             return PROJECT_DELETE_CONFIRMATION_SHORTCUTS;
+        }
+        if self.tag_delete_confirmation.is_some() {
+            return TAG_DELETE_CONFIRMATION_SHORTCUTS;
         }
         match self.focused_panel {
             PanelFocus::Timer => TIMER_SHORTCUTS,
@@ -1959,6 +2285,12 @@ impl App {
                 tips: PROJECT_EDITOR_SHORTCUTS,
             });
         }
+        if self.tag_editor.is_some() {
+            sections.push(ShortcutSection {
+                title: "Tag Editor",
+                tips: TAG_EDITOR_SHORTCUTS,
+            });
+        }
         if self.task_search.is_some() {
             sections.push(ShortcutSection {
                 title: "Task Search Popup",
@@ -1983,6 +2315,12 @@ impl App {
                 tips: SORT_POPUP_SHORTCUTS,
             });
         }
+        if self.tag_sort_popup.is_some() {
+            sections.push(ShortcutSection {
+                title: "Tag Sort Popup",
+                tips: SORT_POPUP_SHORTCUTS,
+            });
+        }
         if self.delete_confirmation.is_some() {
             sections.push(ShortcutSection {
                 title: "Delete Confirmation",
@@ -1993,6 +2331,12 @@ impl App {
             sections.push(ShortcutSection {
                 title: "Project Delete Confirmation",
                 tips: PROJECT_DELETE_CONFIRMATION_SHORTCUTS,
+            });
+        }
+        if self.tag_delete_confirmation.is_some() {
+            sections.push(ShortcutSection {
+                title: "Tag Delete Confirmation",
+                tips: TAG_DELETE_CONFIRMATION_SHORTCUTS,
             });
         }
 
@@ -2161,6 +2505,7 @@ impl App {
         self.task_is_active(task)
             && self.task_matches_active_view(task)
             && self.task_matches_selected_project(task)
+            && self.task_matches_selected_tag(task)
             && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
     }
 
@@ -2290,13 +2635,31 @@ impl App {
             PanelSearchTarget::TaskList => {
                 self.sync_task_selection();
             }
-            PanelSearchTarget::FiltersTags => {}
+            PanelSearchTarget::FiltersTags => {
+                let filtered_ids = self
+                    .tags_rows()
+                    .into_iter()
+                    .map(|row| row.tag_id)
+                    .collect::<Vec<_>>();
+                if let Some(first) = filtered_ids.first().copied() {
+                    if !filtered_ids.contains(&self.selected_tag_id) {
+                        self.selected_tag_id = first;
+                    }
+                }
+                self.sync_task_selection();
+            }
         }
     }
 
     fn task_matches_selected_project(&self, task: &Task) -> bool {
         self.selected_project_id
             .map(|project_id| self.project_is_in_subtree(task.project_id, project_id))
+            .unwrap_or(true)
+    }
+
+    fn task_matches_selected_tag(&self, task: &Task) -> bool {
+        self.selected_tag_id
+            .map(|tag_id| self.task_tag_ids(task.id).contains(&tag_id))
             .unwrap_or(true)
     }
 
@@ -2331,6 +2694,21 @@ impl App {
                     && self.task_matches_view(task, self.active_task_view)
                     && project_id
                         .map(|selected| self.project_is_in_subtree(task.project_id, selected))
+                        .unwrap_or(true)
+                    && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
+            })
+            .count()
+    }
+
+    fn tasks_for_tag_filter(&self, tag_id: Option<TagId>) -> usize {
+        self.screen_data
+            .tasks
+            .iter()
+            .filter(|task| {
+                self.task_is_active(task)
+                    && self.task_matches_view(task, self.active_task_view)
+                    && tag_id
+                        .map(|selected| self.task_tag_ids(task.id).contains(&selected))
                         .unwrap_or(true)
                     && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
             })
@@ -2432,6 +2810,241 @@ impl App {
         let project_id = self.resolve_project_input(query, Some(fallback_project_id));
         let cleaned = raw[..start].trim_end().to_string();
         (cleaned, project_id)
+    }
+
+    fn tag_by_id(&self, tag_id: TagId) -> Option<&Tag> {
+        self.screen_data.tags.iter().find(|tag| tag.id == tag_id)
+    }
+
+    fn task_tag_ids(&self, task_id: TaskId) -> Vec<TagId> {
+        self.screen_data
+            .task_tag_links
+            .iter()
+            .filter_map(|(linked_task_id, tag_id)| {
+                if *linked_task_id == task_id {
+                    Some(*tag_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn task_tags(&self, task_id: TaskId) -> Vec<&Tag> {
+        let mut tags = self
+            .task_tag_ids(task_id)
+            .into_iter()
+            .filter_map(|tag_id| self.tag_by_id(tag_id))
+            .filter(|tag| tag.deleted_at.is_none())
+            .collect::<Vec<_>>();
+        tags.sort_by(|left, right| self.compare_tags(left, right));
+        tags
+    }
+
+    fn compare_tags(&self, left: &Tag, right: &Tag) -> std::cmp::Ordering {
+        match self.config.ui.tag_list_sort {
+            TagSortOrder::Manual => left
+                .item_order
+                .cmp(&right.item_order)
+                .then_with(|| self.compare_tag_name(left, right))
+                .then_with(|| left.id.0.cmp(&right.id.0)),
+            TagSortOrder::NameAsc => self
+                .compare_tag_name(left, right)
+                .then_with(|| left.item_order.cmp(&right.item_order))
+                .then_with(|| left.id.0.cmp(&right.id.0)),
+            TagSortOrder::NameDesc => self
+                .compare_tag_name(right, left)
+                .then_with(|| left.item_order.cmp(&right.item_order))
+                .then_with(|| left.id.0.cmp(&right.id.0)),
+            TagSortOrder::TaskCountAsc => self
+                .tasks_for_tag_filter(Some(left.id))
+                .cmp(&self.tasks_for_tag_filter(Some(right.id)))
+                .then_with(|| self.compare_tag_name(left, right))
+                .then_with(|| left.item_order.cmp(&right.item_order))
+                .then_with(|| left.id.0.cmp(&right.id.0)),
+            TagSortOrder::TaskCountDesc => self
+                .tasks_for_tag_filter(Some(right.id))
+                .cmp(&self.tasks_for_tag_filter(Some(left.id)))
+                .then_with(|| self.compare_tag_name(left, right))
+                .then_with(|| left.item_order.cmp(&right.item_order))
+                .then_with(|| left.id.0.cmp(&right.id.0)),
+        }
+    }
+
+    fn compare_tag_name(&self, left: &Tag, right: &Tag) -> std::cmp::Ordering {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.name.cmp(&right.name))
+    }
+
+    fn tag_suggestions(&self, query: &str) -> Vec<&Tag> {
+        let normalized = query.trim().trim_start_matches('@');
+        if normalized.is_empty() {
+            return Vec::new();
+        }
+        let mut matches = self
+            .screen_data
+            .tags
+            .iter()
+            .filter(|tag| tag.deleted_at.is_none())
+            .filter(|tag| fuzzy_matches(normalized, tag.name.as_str()))
+            .collect::<Vec<_>>();
+        let normalized_lower = normalized.to_lowercase();
+        matches.sort_by(|left, right| {
+            let left_lower = left.name.to_lowercase();
+            let right_lower = right.name.to_lowercase();
+            left_lower
+                .starts_with(normalized_lower.as_str())
+                .cmp(&right_lower.starts_with(normalized_lower.as_str()))
+                .reverse()
+                .then_with(|| left_lower.cmp(&right_lower))
+        });
+        matches
+    }
+
+    fn active_tag_query(&self, value: &str, cursor: usize) -> Option<(usize, usize, String)> {
+        let safe_cursor = cursor.min(value.len());
+        let before_cursor = &value[..safe_cursor];
+        let token_start = before_cursor.rfind('@')?;
+        if token_start > 0
+            && !value[..token_start]
+                .chars()
+                .last()
+                .is_some_and(char::is_whitespace)
+        {
+            return None;
+        }
+        let query = value[token_start + 1..safe_cursor].trim_start();
+        if query.is_empty() || query.contains('\n') {
+            return None;
+        }
+        Some((token_start, safe_cursor, query.to_string()))
+    }
+
+    fn active_tag_field_query(&self, value: &str, cursor: usize) -> Option<(usize, usize, String)> {
+        let safe_cursor = cursor.min(value.len());
+        let before_cursor = &value[..safe_cursor];
+        let token_start = before_cursor
+            .rfind(|character: char| character.is_whitespace() || character == ',')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let raw = value[token_start..safe_cursor].trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let query = raw.trim_start_matches('@').trim();
+        if query.is_empty() || query.contains('\n') {
+            return None;
+        }
+        Some((token_start, safe_cursor, query.to_string()))
+    }
+
+    fn resolve_tag_input(&self, query: &str) -> Option<TagId> {
+        let normalized = query.trim().trim_start_matches('@').to_lowercase();
+        if normalized.is_empty() {
+            return None;
+        }
+        self.screen_data
+            .tags
+            .iter()
+            .filter(|tag| tag.deleted_at.is_none())
+            .find(|tag| tag.name.to_lowercase() == normalized)
+            .map(|tag| tag.id)
+            .or_else(|| {
+                self.screen_data
+                    .tags
+                    .iter()
+                    .filter(|tag| tag.deleted_at.is_none())
+                    .find(|tag| fuzzy_matches(normalized.as_str(), tag.name.as_str()))
+                    .map(|tag| tag.id)
+            })
+    }
+
+    fn resolve_or_create_tag_input(
+        &mut self,
+        query: &str,
+        now: DateTime<Local>,
+    ) -> Result<Option<TagId>> {
+        let normalized = query.trim().trim_start_matches('@');
+        if normalized.is_empty() {
+            return Ok(None);
+        }
+        if let Some(tag_id) = self.resolve_tag_input(normalized) {
+            return Ok(Some(tag_id));
+        }
+
+        let color = self.random_tag_color(normalized);
+        let created = self
+            .database
+            .tag_repository()
+            .create(normalized, color, false, now)?;
+        self.screen_data.tags.push(created.clone());
+        Ok(Some(created.id))
+    }
+
+    fn random_tag_color(&self, seed: &str) -> TagColor {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        seed.hash(&mut hasher);
+        Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or(0)
+            .hash(&mut hasher);
+        let index = (hasher.finish() as usize) % TagColor::all().len().max(1);
+        TagColor::all()[index]
+    }
+
+    fn resolve_or_create_tag_queries(
+        &mut self,
+        queries: &[String],
+        now: DateTime<Local>,
+    ) -> Result<Vec<TagId>> {
+        let mut tag_ids = Vec::new();
+        for query in queries {
+            if let Some(tag_id) = self.resolve_or_create_tag_input(query, now)? {
+                if !tag_ids.contains(&tag_id) {
+                    tag_ids.push(tag_id);
+                }
+            }
+        }
+        Ok(tag_ids)
+    }
+
+    fn extract_tag_references(&self, raw: String) -> (String, Vec<String>) {
+        let mut cleaned_parts = Vec::new();
+        let mut tag_queries = Vec::new();
+        for token in raw.split_whitespace() {
+            if let Some(query) = token.strip_prefix('@') {
+                let normalized = query.trim();
+                if !normalized.is_empty() {
+                    let normalized = normalized.to_string();
+                    if !tag_queries.contains(&normalized) {
+                        tag_queries.push(normalized);
+                    }
+                    continue;
+                }
+            }
+            cleaned_parts.push(token.to_string());
+        }
+        (cleaned_parts.join(" "), tag_queries)
+    }
+
+    fn parse_tags_field_queries(&self, value: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        for token in value
+            .split(|character: char| character.is_whitespace() || character == ',')
+            .filter(|token| !token.trim().is_empty())
+        {
+            let query = token.trim().trim_start_matches('@');
+            if !query.is_empty() {
+                let normalized = query.to_string();
+                if !result.contains(&normalized) {
+                    result.push(normalized);
+                }
+            }
+        }
+        result
     }
 
     fn inbox_project_id(&self) -> ProjectId {
@@ -2642,6 +3255,77 @@ impl App {
         true
     }
 
+    fn accept_or_create_task_input_tag_token(
+        &mut self,
+        input: &mut TaskInputState,
+        now: DateTime<Local>,
+    ) -> Result<bool> {
+        let Some((start, end, query)) = self.active_tag_query(input.value.as_str(), input.cursor)
+        else {
+            return Ok(false);
+        };
+        let suggestions = self.tag_suggestions(query.as_str());
+        let tag_name = if let Some(tag) = suggestions
+            .get(
+                input
+                    .tag_suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        {
+            tag.name.clone()
+        } else {
+            let Some(tag_id) = self.resolve_or_create_tag_input(query.as_str(), now)? else {
+                return Ok(false);
+            };
+            self.tag_by_id(tag_id)
+                .map(|tag| tag.name.clone())
+                .unwrap_or_else(|| query.trim().to_string())
+        };
+        input
+            .value
+            .replace_range(start..end, format!("@{} ", tag_name).as_str());
+        input.cursor = (start + tag_name.len() + 2).min(input.value.len());
+        input.tag_suggestion_index = 0;
+        Ok(true)
+    }
+
+    fn accept_or_create_task_editor_tag_token(
+        &mut self,
+        editor: &mut TaskEditorState,
+        now: DateTime<Local>,
+    ) -> Result<bool> {
+        let Some((start, end, query)) =
+            self.active_tag_field_query(editor.tags_input.as_str(), editor.tags_cursor)
+        else {
+            return Ok(false);
+        };
+        let suggestions = self.tag_suggestions(query.as_str());
+        let tag_name = if let Some(tag) = suggestions
+            .get(
+                editor
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        {
+            tag.name.clone()
+        } else {
+            let Some(tag_id) = self.resolve_or_create_tag_input(query.as_str(), now)? else {
+                return Ok(false);
+            };
+            self.tag_by_id(tag_id)
+                .map(|tag| tag.name.clone())
+                .unwrap_or_else(|| query.trim().to_string())
+        };
+        editor
+            .tags_input
+            .replace_range(start..end, format!("@{} ", tag_name).as_str());
+        editor.tags_cursor = (start + tag_name.len() + 2).min(editor.tags_input.len());
+        editor.suggestion_index = 0;
+        Ok(true)
+    }
+
     fn accept_project_editor_parent_suggestion(&self, editor: &mut ProjectEditorState) -> bool {
         let Some((start, end, query)) =
             self.active_project_query(editor.name_input.as_str(), editor.name_cursor)
@@ -2802,9 +3486,25 @@ impl App {
         }
     }
 
+    fn sync_tag_selection(&mut self) {
+        if let Some(tag_id) = self.selected_tag_id {
+            if self
+                .screen_data
+                .tags
+                .iter()
+                .any(|tag| tag.id == tag_id && tag.deleted_at.is_none())
+            {
+                return;
+            }
+            self.selected_tag_id = None;
+        }
+    }
+
     fn refresh_tasks(&mut self) -> Result<()> {
         self.screen_data.tasks = self.database.task_repository().list_all()?;
         self.screen_data.projects = self.database.project_repository().list_all()?;
+        self.screen_data.tags = self.database.tag_repository().list_all()?;
+        self.screen_data.task_tag_links = self.database.tag_repository().list_task_tag_links()?;
         if let Some(task_id) = self.assigned_task_id {
             if !self
                 .screen_data
@@ -2821,6 +3521,7 @@ impl App {
             }
         }
         self.sync_project_selection();
+        self.sync_tag_selection();
         self.sync_task_selection();
         Ok(())
     }
@@ -2940,12 +3641,18 @@ impl App {
     }
 
     fn open_create_task_popup(&mut self) {
+        let initial_value = self
+            .selected_tag_id
+            .and_then(|tag_id| self.tag_by_id(tag_id))
+            .map(|tag| format!("@{} ", tag.name))
+            .unwrap_or_default();
         self.task_input = Some(TaskInputState {
-            value: String::new(),
-            cursor: 0,
+            value: initial_value.clone(),
+            cursor: initial_value.len(),
             project_id: self
                 .selected_project_id
                 .unwrap_or_else(|| self.inbox_project_id()),
+            tag_suggestion_index: 0,
             suggestion_index: 0,
         });
     }
@@ -2976,17 +3683,25 @@ impl App {
         let due_date_cursor = due_date_input.len();
         let due_time_cursor = due_time_input.len();
         let recurrence_cursor = recurrence_input.len();
+        let tags_input = self
+            .task_tags(task.id)
+            .into_iter()
+            .map(|tag| format!("@{}", tag.name))
+            .collect::<Vec<_>>()
+            .join(" ");
 
         self.task_editor = Some(TaskEditorState {
             task_id: task.id,
             title_cursor: task.title.len(),
-            title_input: task.title,
+            title_input: task.title.clone(),
             project_input: self
                 .project_name(task.project_id)
                 .unwrap_or("Inbox")
                 .to_string(),
             project_cursor: self.project_name(task.project_id).unwrap_or("Inbox").len(),
             project_id: task.project_id,
+            tags_input: tags_input.clone(),
+            tags_cursor: tags_input.len(),
             suggestion_index: 0,
             due_date_input,
             due_date_cursor,
@@ -3068,6 +3783,7 @@ impl App {
         match editor.focused_field {
             TaskEditorField::Title => (&mut editor.title_input, &mut editor.title_cursor),
             TaskEditorField::Project => (&mut editor.project_input, &mut editor.project_cursor),
+            TaskEditorField::Tags => (&mut editor.tags_input, &mut editor.tags_cursor),
             TaskEditorField::DueDate => (&mut editor.due_date_input, &mut editor.due_date_cursor),
             TaskEditorField::DueTime => (&mut editor.due_time_input, &mut editor.due_time_cursor),
             TaskEditorField::Recurrence => {
@@ -3156,6 +3872,7 @@ impl App {
         match editor.focused_field {
             TaskEditorField::Title => Self::sync_editor_due_from_title(editor, reference_date),
             TaskEditorField::Project => {}
+            TaskEditorField::Tags => {}
             TaskEditorField::DueDate | TaskEditorField::DueTime => {
                 editor.due_from_title = false;
                 if !editor.recurrence_input.trim().is_empty() {
@@ -3305,6 +4022,16 @@ impl App {
                 due,
             },
         )?;
+        let mut tag_queries = parsed.tag_queries;
+        for query in self.parse_tags_field_queries(editor.tags_input.as_str()) {
+            if !tag_queries.contains(&query) {
+                tag_queries.push(query);
+            }
+        }
+        let tag_ids = self.resolve_or_create_tag_queries(tag_queries.as_slice(), now)?;
+        self.database
+            .tag_repository()
+            .replace_task_tags(editor.task_id, tag_ids.as_slice())?;
         self.refresh_tasks()?;
         self.selected_task_id = Some(editor.task_id);
         Ok(true)
@@ -3488,6 +4215,147 @@ impl App {
             .move_within_parent(project_id, direction)?;
         self.refresh_tasks()?;
         self.selected_project_id = Some(project_id);
+        Ok(())
+    }
+
+    fn move_tag_selection(&mut self, offset: isize) {
+        let rows = self.tags_rows();
+        if rows.is_empty() {
+            self.selected_tag_id = None;
+            return;
+        }
+        let current_index = rows
+            .iter()
+            .position(|row| row.tag_id == self.selected_tag_id)
+            .unwrap_or(0);
+        let next_index = (current_index as isize + offset)
+            .clamp(0, rows.len().saturating_sub(1) as isize) as usize;
+        self.selected_tag_id = rows[next_index].tag_id;
+    }
+
+    fn open_create_tag_popup(&mut self) {
+        self.tag_editor = Some(TagEditorState {
+            tag_id: None,
+            name_input: String::new(),
+            name_cursor: 0,
+            color_index: TagColor::all()
+                .iter()
+                .position(|color| *color == TagColor::Charcoal)
+                .unwrap_or(0),
+            is_favorite: false,
+            focused_field: TagEditorField::Name,
+        });
+    }
+
+    fn open_edit_tag_popup(&mut self) {
+        let Some(tag_id) = self.selected_tag_id else {
+            return;
+        };
+        let Some(tag) = self.tag_by_id(tag_id).cloned() else {
+            return;
+        };
+        let color_index = TagColor::all()
+            .iter()
+            .position(|color| *color == tag.color)
+            .unwrap_or(0);
+        self.tag_editor = Some(TagEditorState {
+            tag_id: Some(tag.id),
+            name_input: tag.name.clone(),
+            name_cursor: tag.name.len(),
+            color_index,
+            is_favorite: tag.is_favorite,
+            focused_field: TagEditorField::Name,
+        });
+    }
+
+    fn open_tag_delete_confirmation(&mut self) {
+        let Some(tag_id) = self.selected_tag_id else {
+            return;
+        };
+        if self.tag_by_id(tag_id).is_some() {
+            self.tag_delete_confirmation = Some(tag_id);
+        }
+    }
+
+    fn open_tag_sort_popup(&mut self) {
+        let selected_index = TagSortOrder::all()
+            .iter()
+            .position(|sort_order| *sort_order == self.config.ui.tag_list_sort)
+            .unwrap_or(0);
+        self.tag_sort_popup = Some(TagSortPopupState { selected_index });
+    }
+
+    fn apply_tag_sort_order(&mut self, sort_order: TagSortOrder) -> Result<()> {
+        self.config.ui.tag_list_sort = sort_order;
+        if self.config.ui.persist_tag_list_sort {
+            self.persist_ui_preferences()?;
+        }
+        self.sync_tag_selection();
+        Ok(())
+    }
+
+    fn reorder_selected_tag(&mut self, direction: isize) -> Result<()> {
+        if self.config.ui.tag_list_sort != TagSortOrder::Manual {
+            return Ok(());
+        }
+        let Some(tag_id) = self.selected_tag_id else {
+            return Ok(());
+        };
+        self.database
+            .tag_repository()
+            .move_within_list(tag_id, direction)?;
+        self.refresh_tasks()?;
+        self.selected_tag_id = Some(tag_id);
+        Ok(())
+    }
+
+    fn toggle_selected_tag_favorite(&mut self) -> Result<()> {
+        let Some(tag_id) = self.selected_tag_id else {
+            return Ok(());
+        };
+        let Some(tag) = self.tag_by_id(tag_id).cloned() else {
+            return Ok(());
+        };
+        self.database.tag_repository().update(
+            tag_id,
+            &TagUpdate {
+                name: tag.name,
+                color: tag.color,
+                is_favorite: !tag.is_favorite,
+            },
+        )?;
+        self.refresh_tasks()?;
+        Ok(())
+    }
+
+    fn submit_tag_editor(&mut self, editor: TagEditorState, now: DateTime<Local>) -> Result<()> {
+        let name = editor.name_input.trim();
+        if name.is_empty() {
+            self.tag_editor = Some(editor);
+            return Ok(());
+        }
+        let color = TagColor::all()
+            .get(editor.color_index)
+            .copied()
+            .unwrap_or(TagColor::Charcoal);
+        if let Some(tag_id) = editor.tag_id {
+            self.database.tag_repository().update(
+                tag_id,
+                &TagUpdate {
+                    name: name.to_string(),
+                    color,
+                    is_favorite: editor.is_favorite,
+                },
+            )?;
+            self.selected_tag_id = Some(tag_id);
+        } else {
+            let tag =
+                self.database
+                    .tag_repository()
+                    .create(name, color, editor.is_favorite, now)?;
+            self.selected_tag_id = Some(tag.id);
+        }
+        self.refresh_tasks()?;
         Ok(())
     }
 
@@ -3786,6 +4654,31 @@ impl App {
             return Ok(true);
         }
 
+        if let Some(mut popup) = self.tag_sort_popup.take() {
+            match code {
+                KeyCode::Esc | KeyCode::Char('o') => {}
+                KeyCode::Enter => {
+                    if let Some(sort_order) = TagSortOrder::all().get(popup.selected_index).copied()
+                    {
+                        self.apply_tag_sort_order(sort_order)?;
+                    }
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let last_index = TagSortOrder::all().len().saturating_sub(1);
+                    popup.selected_index = (popup.selected_index + 1).min(last_index);
+                    self.tag_sort_popup = Some(popup);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    popup.selected_index = popup.selected_index.saturating_sub(1);
+                    self.tag_sort_popup = Some(popup);
+                }
+                _ => {
+                    self.tag_sort_popup = Some(popup);
+                }
+            }
+            return Ok(true);
+        }
+
         if let Some(mut search) = self.task_search.take() {
             match code {
                 KeyCode::Esc => {}
@@ -3884,6 +4777,136 @@ impl App {
                     self.project_delete_confirmation = None;
                 }
                 _ => {}
+            }
+            return Ok(true);
+        }
+
+        if let Some(tag_id) = self.tag_delete_confirmation {
+            match code {
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    self.database.tag_repository().delete(tag_id, now)?;
+                    self.tag_delete_confirmation = None;
+                    self.refresh_tasks()?;
+                }
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    self.tag_delete_confirmation = None;
+                }
+                _ => {}
+            }
+            return Ok(true);
+        }
+
+        if let Some(mut editor) = self.tag_editor.take() {
+            match code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => {
+                    self.submit_tag_editor(editor, now)?;
+                }
+                KeyCode::Tab => {
+                    editor.focused_field = editor.focused_field.next();
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::BackTab => {
+                    editor.focused_field = editor.focused_field.previous();
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::F(1) => {
+                    editor.focused_field = TagEditorField::Name;
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::F(2) => {
+                    editor.focused_field = TagEditorField::Color;
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::F(3) => {
+                    editor.focused_field = TagEditorField::Favorite;
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::Backspace if editor.focused_field == TagEditorField::Name => {
+                    if editor.name_cursor > 0 {
+                        let previous_index = editor.name_input[..editor.name_cursor]
+                            .char_indices()
+                            .last()
+                            .map(|(index, _)| index)
+                            .unwrap_or(0);
+                        editor.name_input.drain(previous_index..editor.name_cursor);
+                        editor.name_cursor = previous_index;
+                    }
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::Delete if editor.focused_field == TagEditorField::Name => {
+                    if editor.name_cursor < editor.name_input.len() {
+                        let next_index = editor.name_input[editor.name_cursor..]
+                            .char_indices()
+                            .nth(1)
+                            .map(|(offset, _)| editor.name_cursor + offset)
+                            .unwrap_or(editor.name_input.len());
+                        editor.name_input.drain(editor.name_cursor..next_index);
+                    }
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::Home if editor.focused_field == TagEditorField::Name => {
+                    editor.name_cursor = 0;
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::Left if editor.focused_field == TagEditorField::Name => {
+                    if editor.name_cursor > 0 {
+                        editor.name_cursor = editor.name_input[..editor.name_cursor]
+                            .char_indices()
+                            .last()
+                            .map(|(index, _)| index)
+                            .unwrap_or(0);
+                    }
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::Right if editor.focused_field == TagEditorField::Name => {
+                    if editor.name_cursor < editor.name_input.len() {
+                        editor.name_cursor = editor.name_input[editor.name_cursor..]
+                            .char_indices()
+                            .nth(1)
+                            .map(|(offset, _)| editor.name_cursor + offset)
+                            .unwrap_or(editor.name_input.len());
+                    }
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::End if editor.focused_field == TagEditorField::Name => {
+                    editor.name_cursor = editor.name_input.len();
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::Left | KeyCode::Char('h') | KeyCode::Up | KeyCode::Char('k')
+                    if editor.focused_field == TagEditorField::Color =>
+                {
+                    editor.color_index = editor.color_index.saturating_sub(1);
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Down | KeyCode::Char('j')
+                    if editor.focused_field == TagEditorField::Color =>
+                {
+                    editor.color_index =
+                        (editor.color_index + 1).min(TagColor::all().len().saturating_sub(1));
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::Left
+                | KeyCode::Char('h')
+                | KeyCode::Up
+                | KeyCode::Char('k')
+                | KeyCode::Right
+                | KeyCode::Char('l')
+                | KeyCode::Down
+                | KeyCode::Char('j')
+                    if editor.focused_field == TagEditorField::Favorite =>
+                {
+                    editor.is_favorite = !editor.is_favorite;
+                    self.tag_editor = Some(editor);
+                }
+                KeyCode::Char(character) if editor.focused_field == TagEditorField::Name => {
+                    editor.name_input.insert(editor.name_cursor, character);
+                    editor.name_cursor += character.len_utf8();
+                    self.tag_editor = Some(editor);
+                }
+                _ => {
+                    self.tag_editor = Some(editor);
+                }
             }
             return Ok(true);
         }
@@ -4229,6 +5252,12 @@ impl App {
                             }
                         }
                     }
+                    if editor.focused_field == TaskEditorField::Tags
+                        && self.accept_or_create_task_editor_tag_token(&mut editor, now)?
+                    {
+                        self.task_editor = Some(editor);
+                        return Ok(true);
+                    }
                     return self.submit_task_editor(editor, now);
                 }
                 KeyCode::Tab => {
@@ -4260,6 +5289,12 @@ impl App {
                             }
                         }
                     }
+                    if editor.focused_field == TaskEditorField::Tags
+                        && self.accept_or_create_task_editor_tag_token(&mut editor, now)?
+                    {
+                        self.task_editor = Some(editor);
+                        return Ok(true);
+                    }
                     editor.focused_field = editor.focused_field.next();
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
@@ -4280,16 +5315,21 @@ impl App {
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(3) => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::DueDate);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Tags);
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(4) => {
-                    Self::focus_editor_field(&mut editor, TaskEditorField::DueTime);
+                    Self::focus_editor_field(&mut editor, TaskEditorField::DueDate);
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(5) => {
+                    Self::focus_editor_field(&mut editor, TaskEditorField::DueTime);
+                    editor.suggestion_index = 0;
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::F(6) => {
                     Self::focus_editor_field(&mut editor, TaskEditorField::Recurrence);
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
@@ -4314,7 +5354,30 @@ impl App {
                     editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::F(6) if editor.focused_field == TaskEditorField::DueDate => {
+                KeyCode::Down | KeyCode::Char('j')
+                    if editor.focused_field == TaskEditorField::Tags
+                        && self
+                            .active_tag_field_query(editor.tags_input.as_str(), editor.tags_cursor)
+                            .is_some() =>
+                {
+                    let last_index = self
+                        .active_tag_field_query(editor.tags_input.as_str(), editor.tags_cursor)
+                        .map(|(_, _, query)| self.tag_suggestions(query.as_str()).len())
+                        .unwrap_or(0)
+                        .saturating_sub(1);
+                    editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Up | KeyCode::Char('k')
+                    if editor.focused_field == TaskEditorField::Tags
+                        && self
+                            .active_tag_field_query(editor.tags_input.as_str(), editor.tags_cursor)
+                            .is_some() =>
+                {
+                    editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::F(8) if editor.focused_field == TaskEditorField::DueDate => {
                     Self::open_editor_calendar(&mut editor, now.date_naive());
                     self.task_editor = Some(editor);
                 }
@@ -4363,7 +5426,13 @@ impl App {
         match code {
             KeyCode::Esc => {}
             KeyCode::Tab => {
-                let _ = self.accept_task_input_project_suggestion(&mut input);
+                let accepted_project = self.accept_task_input_project_suggestion(&mut input);
+                let accepted_tag = if accepted_project {
+                    false
+                } else {
+                    self.accept_or_create_task_input_tag_token(&mut input, now)?
+                };
+                let _ = accepted_project || accepted_tag;
                 self.task_input = Some(input);
             }
             KeyCode::Down => {
@@ -4375,15 +5444,32 @@ impl App {
                         .len()
                         .saturating_sub(1);
                     input.suggestion_index = (input.suggestion_index + 1).min(last_index);
+                } else if let Some((_, _, query)) =
+                    self.active_tag_query(input.value.as_str(), input.cursor)
+                {
+                    let last_index = self.tag_suggestions(query.as_str()).len().saturating_sub(1);
+                    input.tag_suggestion_index = (input.tag_suggestion_index + 1).min(last_index);
                 }
                 self.task_input = Some(input);
             }
             KeyCode::Up => {
-                input.suggestion_index = input.suggestion_index.saturating_sub(1);
+                if self
+                    .active_project_query(input.value.as_str(), input.cursor)
+                    .is_some()
+                {
+                    input.suggestion_index = input.suggestion_index.saturating_sub(1);
+                } else if self
+                    .active_tag_query(input.value.as_str(), input.cursor)
+                    .is_some()
+                {
+                    input.tag_suggestion_index = input.tag_suggestion_index.saturating_sub(1);
+                }
                 self.task_input = Some(input);
             }
             KeyCode::Enter => {
-                if self.accept_task_input_project_suggestion(&mut input) {
+                if self.accept_task_input_project_suggestion(&mut input)
+                    || self.accept_or_create_task_input_tag_token(&mut input, now)?
+                {
                     self.task_input = Some(input);
                     return Ok(true);
                 }
@@ -4399,42 +5485,54 @@ impl App {
                     parsed.due.as_ref(),
                     now,
                 )?;
+                let tag_ids =
+                    self.resolve_or_create_tag_queries(parsed.tag_queries.as_slice(), now)?;
+                self.database
+                    .tag_repository()
+                    .replace_task_tags(task.id, tag_ids.as_slice())?;
                 self.refresh_tasks()?;
                 self.selected_task_id = Some(task.id);
             }
             KeyCode::Backspace => {
                 Self::delete_input_char_before_cursor(&mut input);
                 input.suggestion_index = 0;
+                input.tag_suggestion_index = 0;
                 self.task_input = Some(input);
             }
             KeyCode::Delete => {
                 Self::delete_input_char_at_cursor(&mut input);
                 input.suggestion_index = 0;
+                input.tag_suggestion_index = 0;
                 self.task_input = Some(input);
             }
             KeyCode::Home => {
                 Self::move_input_cursor_home(&mut input);
                 input.suggestion_index = 0;
+                input.tag_suggestion_index = 0;
                 self.task_input = Some(input);
             }
             KeyCode::Left => {
                 Self::move_input_cursor_left(&mut input);
                 input.suggestion_index = 0;
+                input.tag_suggestion_index = 0;
                 self.task_input = Some(input);
             }
             KeyCode::Right => {
                 Self::move_input_cursor_right(&mut input);
                 input.suggestion_index = 0;
+                input.tag_suggestion_index = 0;
                 self.task_input = Some(input);
             }
             KeyCode::End => {
                 Self::move_input_cursor_end(&mut input);
                 input.suggestion_index = 0;
+                input.tag_suggestion_index = 0;
                 self.task_input = Some(input);
             }
             KeyCode::Char(character) => {
                 Self::insert_input_char(&mut input, character);
                 input.suggestion_index = 0;
+                input.tag_suggestion_index = 0;
                 self.task_input = Some(input);
             }
             _ => {
@@ -4772,14 +5870,14 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down if self.focused_panel == PanelFocus::Navigation => {
                 match self.active_sidebar_tab {
                     SidebarTab::Navigation => self.select_next_task_view(),
-                    SidebarTab::FiltersTags => {}
+                    SidebarTab::FiltersTags => self.move_tag_selection(1),
                     SidebarTab::Projects => self.move_project_selection(1),
                 }
             }
             KeyCode::Char('k') | KeyCode::Up if self.focused_panel == PanelFocus::Navigation => {
                 match self.active_sidebar_tab {
                     SidebarTab::Navigation => self.select_previous_task_view(),
-                    SidebarTab::FiltersTags => {}
+                    SidebarTab::FiltersTags => self.move_tag_selection(-1),
                     SidebarTab::Projects => self.move_project_selection(-1),
                 }
             }
@@ -4787,7 +5885,7 @@ impl App {
                 const SIDEBAR_PAGE_STEP: isize = 5;
                 match self.active_sidebar_tab {
                     SidebarTab::Navigation => self.move_task_view_selection(SIDEBAR_PAGE_STEP),
-                    SidebarTab::FiltersTags => {}
+                    SidebarTab::FiltersTags => self.move_tag_selection(SIDEBAR_PAGE_STEP),
                     SidebarTab::Projects => self.move_project_selection(SIDEBAR_PAGE_STEP),
                 }
             }
@@ -4795,14 +5893,16 @@ impl App {
                 const SIDEBAR_PAGE_STEP: isize = 5;
                 match self.active_sidebar_tab {
                     SidebarTab::Navigation => self.move_task_view_selection(-SIDEBAR_PAGE_STEP),
-                    SidebarTab::FiltersTags => {}
+                    SidebarTab::FiltersTags => self.move_tag_selection(-SIDEBAR_PAGE_STEP),
                     SidebarTab::Projects => self.move_project_selection(-SIDEBAR_PAGE_STEP),
                 }
             }
             KeyCode::Home if self.focused_panel == PanelFocus::Navigation => {
                 match self.active_sidebar_tab {
                     SidebarTab::Navigation => self.select_first_navigation_task_view(),
-                    SidebarTab::FiltersTags => {}
+                    SidebarTab::FiltersTags => {
+                        self.selected_tag_id = self.tags_rows().first().and_then(|row| row.tag_id)
+                    }
                     SidebarTab::Projects => {
                         self.selected_project_id = self
                             .project_tree_rows()
@@ -4814,7 +5914,9 @@ impl App {
             KeyCode::End if self.focused_panel == PanelFocus::Navigation => {
                 match self.active_sidebar_tab {
                     SidebarTab::Navigation => self.select_last_navigation_task_view(),
-                    SidebarTab::FiltersTags => {}
+                    SidebarTab::FiltersTags => {
+                        self.selected_tag_id = self.tags_rows().last().and_then(|row| row.tag_id)
+                    }
                     SidebarTab::Projects => {
                         self.selected_project_id = self
                             .project_tree_rows()
@@ -4824,8 +5926,55 @@ impl App {
                 }
             }
             KeyCode::Enter if self.focused_panel == PanelFocus::Navigation => {
+                if self.active_sidebar_tab == SidebarTab::FiltersTags {
+                    self.selected_project_id = None;
+                } else if self.active_sidebar_tab == SidebarTab::Projects {
+                    self.selected_tag_id = None;
+                }
                 self.focused_panel = PanelFocus::RightPane;
                 self.active_right_panel_tab = RightPanelTab::Tasks;
+            }
+            KeyCode::Char('C')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::FiltersTags =>
+            {
+                self.open_create_tag_popup();
+            }
+            KeyCode::Char('e')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::FiltersTags =>
+            {
+                self.open_edit_tag_popup();
+            }
+            KeyCode::Char('d')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::FiltersTags =>
+            {
+                self.open_tag_delete_confirmation();
+            }
+            KeyCode::Char('f')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::FiltersTags =>
+            {
+                self.toggle_selected_tag_favorite()?;
+            }
+            KeyCode::Char('o')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::FiltersTags =>
+            {
+                self.open_tag_sort_popup();
+            }
+            KeyCode::Char('J')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::FiltersTags =>
+            {
+                self.reorder_selected_tag(1)?;
+            }
+            KeyCode::Char('K')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::FiltersTags =>
+            {
+                self.reorder_selected_tag(-1)?;
             }
             KeyCode::Char('C')
                 if self.focused_panel == PanelFocus::Navigation
@@ -5152,6 +6301,8 @@ pub fn run(options: RunOptions) -> Result<()> {
     let screen_data = ScreenData {
         tasks: database.task_repository().list_all()?,
         projects: database.project_repository().list_all()?,
+        tags: database.tag_repository().list_all()?,
+        task_tag_links: database.tag_repository().list_task_tag_links()?,
         history_entries: database
             .pomodoro_repository()
             .list_day(started_at, ended_at)?,
@@ -5735,9 +6886,9 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(3))
+        app.handle_key(crossterm::event::KeyCode::F(4))
             .expect("focus should switch to due date");
-        app.handle_key(crossterm::event::KeyCode::F(6))
+        app.handle_key(crossterm::event::KeyCode::F(8))
             .expect("calendar should open");
         assert!(
             app.task_editor_view()
@@ -5786,7 +6937,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(5))
+        app.handle_key(crossterm::event::KeyCode::F(6))
             .expect("focus should switch to recurrence");
         for character in "every monday at 9am".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))
@@ -5810,6 +6961,8 @@ mod tests {
             project_input: "Inbox".to_string(),
             project_cursor: "Inbox".len(),
             project_id: ProjectId(1),
+            tags_input: String::new(),
+            tags_cursor: 0,
             suggestion_index: 0,
             due_date_input: "2026-04-13".to_string(),
             due_date_cursor: "2026-04-13".len(),
@@ -5851,7 +7004,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(3))
+        app.handle_key(crossterm::event::KeyCode::F(4))
             .expect("focus should switch to due date");
         for _ in 0.."YYYY-MM-DD".len() {
             app.handle_key(crossterm::event::KeyCode::Backspace).ok();
@@ -5860,7 +7013,7 @@ mod tests {
             app.handle_key(crossterm::event::KeyCode::Char(character))
                 .expect("date typing should succeed");
         }
-        app.handle_key(crossterm::event::KeyCode::F(4))
+        app.handle_key(crossterm::event::KeyCode::F(5))
             .expect("focus should switch to due time");
         for character in "3pm".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))
@@ -6076,15 +7229,15 @@ mod tests {
             vec!["Press # for selecting a project".to_string()]
         );
 
-        app.handle_key(crossterm::event::KeyCode::F(3))
+        app.handle_key(crossterm::event::KeyCode::F(4))
             .expect("focus should switch");
         let editor = app.task_editor_view().expect("editor should be visible");
         assert_eq!(
             editor.preview_panel.tips,
-            vec!["Type YYYY-MM-DD or use F6 to pick from calendar".to_string()]
+            vec!["Type YYYY-MM-DD or use F8 to pick from calendar".to_string()]
         );
 
-        app.handle_key(crossterm::event::KeyCode::F(5))
+        app.handle_key(crossterm::event::KeyCode::F(6))
             .expect("focus should switch");
         let editor = app.task_editor_view().expect("editor should be visible");
         assert_eq!(
@@ -7542,7 +8695,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(5))
+        app.handle_key(crossterm::event::KeyCode::F(6))
             .expect("focus should switch to recurrence");
         for character in "every day".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))

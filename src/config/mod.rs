@@ -186,6 +186,51 @@ impl ProjectSortOrder {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TagSortOrder {
+    NameAsc,
+    NameDesc,
+    TaskCountAsc,
+    TaskCountDesc,
+    #[default]
+    Manual,
+}
+
+impl TagSortOrder {
+    const ALL: [Self; 5] = [
+        Self::NameAsc,
+        Self::NameDesc,
+        Self::TaskCountAsc,
+        Self::TaskCountDesc,
+        Self::Manual,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NameAsc => "Name A-Z",
+            Self::NameDesc => "Name Z-A",
+            Self::TaskCountAsc => "Task Count ↑",
+            Self::TaskCountDesc => "Task Count ↓",
+            Self::Manual => "Manual",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::NameAsc => "name ↑",
+            Self::NameDesc => "name ↓",
+            Self::TaskCountAsc => "tasks ↑",
+            Self::TaskCountDesc => "tasks ↓",
+            Self::Manual => "manual",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimerSettings {
     pub pomodoro_length: Duration,
@@ -255,6 +300,8 @@ pub struct UiConfig {
     pub task_list_sort: TaskSortOrder,
     pub project_list_sort: ProjectSortOrder,
     pub persist_project_list_sort: bool,
+    pub tag_list_sort: TagSortOrder,
+    pub persist_tag_list_sort: bool,
     pub hide_completed_tasks: bool,
 }
 
@@ -266,6 +313,8 @@ impl Default for UiConfig {
             task_list_sort: TaskSortOrder::default(),
             project_list_sort: ProjectSortOrder::default(),
             persist_project_list_sort: false,
+            tag_list_sort: TagSortOrder::default(),
+            persist_tag_list_sort: false,
             hide_completed_tasks: true,
         }
     }

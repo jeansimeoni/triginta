@@ -6,7 +6,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
     DayHistorySummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate, SessionEntry,
-    SessionKind, SessionOutcome, Task, TaskDue, TaskId, TaskStatus, TaskUpdate,
+    SessionKind, SessionOutcome, Tag, TagColor, TagId, TagUpdate, Task, TaskDue, TaskId,
+    TaskStatus, TaskUpdate,
 };
 
 // Keeping the schema as a string literal makes bootstrap simple for this early
@@ -39,6 +40,28 @@ CREATE TABLE IF NOT EXISTS tasks (
     due_string TEXT,
     due_is_recurring INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY(project_id) REFERENCES projects(id)
+);
+
+CREATE TABLE IF NOT EXISTS tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT 'charcoal',
+    is_favorite INTEGER NOT NULL DEFAULT 0,
+    item_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name_active
+    ON tags(lower(name))
+    WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS task_tags (
+    task_id INTEGER NOT NULL,
+    tag_id INTEGER NOT NULL,
+    PRIMARY KEY (task_id, tag_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(id),
+    FOREIGN KEY(tag_id) REFERENCES tags(id)
 );
 
 CREATE TABLE IF NOT EXISTS pomodoros (
@@ -104,6 +127,22 @@ pub trait ProjectRepository {
     fn update(&self, project_id: ProjectId, update: &ProjectUpdate) -> Result<Project>;
     fn move_within_parent(&self, project_id: ProjectId, direction: isize) -> Result<()>;
     fn delete(&self, project_id: ProjectId, now: DateTime<Local>) -> Result<()>;
+}
+
+pub trait TagRepository {
+    fn list_all(&self) -> Result<Vec<Tag>>;
+    fn create(
+        &self,
+        name: &str,
+        color: TagColor,
+        is_favorite: bool,
+        now: DateTime<Local>,
+    ) -> Result<Tag>;
+    fn update(&self, tag_id: TagId, update: &TagUpdate) -> Result<Tag>;
+    fn move_within_list(&self, tag_id: TagId, direction: isize) -> Result<()>;
+    fn delete(&self, tag_id: TagId, now: DateTime<Local>) -> Result<()>;
+    fn list_task_tag_links(&self) -> Result<Vec<(TaskId, TagId)>>;
+    fn replace_task_tags(&self, task_id: TaskId, tag_ids: &[TagId]) -> Result<()>;
 }
 
 pub trait PomodoroRepository {
@@ -237,6 +276,12 @@ impl Database {
 
     pub fn project_repository(&self) -> SqliteProjectRepository<'_> {
         SqliteProjectRepository {
+            connection: &self.connection,
+        }
+    }
+
+    pub fn tag_repository(&self) -> SqliteTagRepository<'_> {
+        SqliteTagRepository {
             connection: &self.connection,
         }
     }
@@ -741,6 +786,215 @@ impl SqliteProjectRepository<'_> {
     }
 }
 
+pub struct SqliteTagRepository<'a> {
+    connection: &'a Connection,
+}
+
+impl TagRepository for SqliteTagRepository<'_> {
+    fn list_all(&self) -> Result<Vec<Tag>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, color, is_favorite, item_order, created_at, deleted_at
+             FROM tags
+             ORDER BY item_order ASC, name COLLATE NOCASE ASC, id ASC",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(Tag {
+                id: TagId(row.get(0)?),
+                name: row.get(1)?,
+                color: TagColor::from_db(row.get::<_, String>(2)?.as_str()),
+                is_favorite: row.get::<_, i64>(3)? != 0,
+                item_order: row.get(4)?,
+                created_at: row.get(5)?,
+                deleted_at: row.get(6)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load tags")
+    }
+
+    fn create(
+        &self,
+        name: &str,
+        color: TagColor,
+        is_favorite: bool,
+        now: DateTime<Local>,
+    ) -> Result<Tag> {
+        let item_order = self.next_item_order()?;
+        self.connection
+            .execute(
+                "INSERT INTO tags(name, color, is_favorite, item_order, created_at, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+                params![
+                    name,
+                    color.as_str(),
+                    if is_favorite { 1_i64 } else { 0_i64 },
+                    item_order,
+                    now
+                ],
+            )
+            .context("failed to create tag")?;
+        self.load_tag(TagId(self.connection.last_insert_rowid()))?
+            .context("created tag could not be reloaded")
+    }
+
+    fn update(&self, tag_id: TagId, update: &TagUpdate) -> Result<Tag> {
+        let current = self
+            .load_tag(tag_id)?
+            .context("tag to update does not exist")?;
+        if current.deleted_at.is_some() {
+            bail!("tag is deleted");
+        }
+
+        self.connection
+            .execute(
+                "UPDATE tags
+                 SET name = ?1, color = ?2, is_favorite = ?3
+                 WHERE id = ?4",
+                params![
+                    update.name,
+                    update.color.as_str(),
+                    if update.is_favorite { 1_i64 } else { 0_i64 },
+                    tag_id.0
+                ],
+            )
+            .with_context(|| format!("failed to update tag {}", tag_id.0))?;
+
+        self.load_tag(tag_id)?
+            .context("updated tag could not be reloaded")
+    }
+
+    fn move_within_list(&self, tag_id: TagId, direction: isize) -> Result<()> {
+        if direction == 0 {
+            return Ok(());
+        }
+        let Some(tag) = self.load_tag(tag_id)? else {
+            return Ok(());
+        };
+        if tag.deleted_at.is_some() {
+            return Ok(());
+        }
+
+        let mut ids = self.active_tag_ids()?;
+        let Some(current_index) = ids.iter().position(|id| *id == tag_id) else {
+            return Ok(());
+        };
+        let target_index = (current_index as isize + direction)
+            .clamp(0, ids.len().saturating_sub(1) as isize) as usize;
+        if target_index == current_index {
+            return Ok(());
+        }
+
+        ids.remove(current_index);
+        ids.insert(target_index, tag_id);
+        let mut statement = self
+            .connection
+            .prepare("UPDATE tags SET item_order = ?1 WHERE id = ?2")?;
+        for (index, id) in ids.iter().enumerate() {
+            statement.execute(params![index as i64 + 1, id.0])?;
+        }
+        Ok(())
+    }
+
+    fn delete(&self, tag_id: TagId, now: DateTime<Local>) -> Result<()> {
+        let tag = self
+            .load_tag(tag_id)?
+            .context("tag to delete does not exist")?;
+        if tag.deleted_at.is_some() {
+            return Ok(());
+        }
+        self.connection
+            .execute(
+                "UPDATE tags SET deleted_at = ?1 WHERE id = ?2",
+                params![now, tag_id.0],
+            )
+            .with_context(|| format!("failed to soft-delete tag {}", tag_id.0))?;
+        self.connection
+            .execute("DELETE FROM task_tags WHERE tag_id = ?1", params![tag_id.0])
+            .with_context(|| format!("failed to detach task-tag links for {}", tag_id.0))?;
+        Ok(())
+    }
+
+    fn list_task_tag_links(&self) -> Result<Vec<(TaskId, TagId)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT task_tags.task_id, task_tags.tag_id
+             FROM task_tags
+             INNER JOIN tags ON tags.id = task_tags.tag_id
+             WHERE tags.deleted_at IS NULL",
+        )?;
+        let rows = statement.query_map([], |row| Ok((TaskId(row.get(0)?), TagId(row.get(1)?))))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load task-tag links")
+    }
+
+    fn replace_task_tags(&self, task_id: TaskId, tag_ids: &[TagId]) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM task_tags WHERE task_id = ?1",
+            params![task_id.0],
+        )?;
+        {
+            let mut statement =
+                transaction.prepare("INSERT INTO task_tags(task_id, tag_id) VALUES (?1, ?2)")?;
+            for tag_id in tag_ids {
+                statement.execute(params![task_id.0, tag_id.0])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+impl SqliteTagRepository<'_> {
+    fn load_tag(&self, tag_id: TagId) -> Result<Option<Tag>> {
+        self.connection
+            .query_row(
+                "SELECT id, name, color, is_favorite, item_order, created_at, deleted_at
+                 FROM tags
+                 WHERE id = ?1",
+                params![tag_id.0],
+                |row| {
+                    Ok(Tag {
+                        id: TagId(row.get(0)?),
+                        name: row.get(1)?,
+                        color: TagColor::from_db(row.get::<_, String>(2)?.as_str()),
+                        is_favorite: row.get::<_, i64>(3)? != 0,
+                        item_order: row.get(4)?,
+                        created_at: row.get(5)?,
+                        deleted_at: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load tag")
+    }
+
+    fn next_item_order(&self) -> Result<i64> {
+        self.connection
+            .query_row(
+                "SELECT COALESCE(MAX(item_order), -1) + 1
+                 FROM tags
+                 WHERE deleted_at IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to calculate next tag order")
+    }
+
+    fn active_tag_ids(&self) -> Result<Vec<TagId>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id
+             FROM tags
+             WHERE deleted_at IS NULL
+             ORDER BY item_order ASC, name COLLATE NOCASE ASC, id ASC",
+        )?;
+        let rows = statement.query_map([], |row| Ok(TagId(row.get(0)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load active tag ids")
+    }
+}
+
 pub struct SqlitePomodoroRepository<'a> {
     connection: &'a Connection,
 }
@@ -947,9 +1201,11 @@ mod tests {
     use anyhow::Result;
     use chrono::{Local, NaiveDate};
 
-    use crate::domain::{ProjectColor, ProjectUpdate, TaskDue, TaskStatus, TaskUpdate};
+    use crate::domain::{
+        ProjectColor, ProjectUpdate, TagColor, TagUpdate, TaskDue, TaskStatus, TaskUpdate,
+    };
 
-    use super::{Database, PomodoroRepository, ProjectRepository, TaskRepository};
+    use super::{Database, PomodoroRepository, ProjectRepository, TagRepository, TaskRepository};
 
     #[test]
     fn in_memory_database_bootstraps_empty_state() -> Result<()> {
@@ -1235,6 +1491,48 @@ mod tests {
             .expect_err("inbox update should fail");
 
         assert!(error.to_string().contains("inbox project cannot be edited"));
+        Ok(())
+    }
+
+    #[test]
+    fn tag_repository_supports_crud_reorder_and_detach() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let tags = database.tag_repository();
+        let tasks = database.task_repository();
+        let inbox = database.project_repository().inbox_project_id()?;
+
+        let alpha = tags.create("alpha", TagColor::Blue, false, Local::now())?;
+        let beta = tags.create("beta", TagColor::Red, true, Local::now())?;
+        let task = tasks.create("Write docs", inbox, None, Local::now())?;
+
+        tags.replace_task_tags(task.id, &[alpha.id, beta.id])?;
+        let links = tags.list_task_tag_links()?;
+        assert_eq!(links.len(), 2);
+
+        let updated = tags.update(
+            beta.id,
+            &TagUpdate {
+                name: "beta-updated".to_string(),
+                color: TagColor::Green,
+                is_favorite: false,
+            },
+        )?;
+        assert_eq!(updated.name, "beta-updated");
+        assert_eq!(updated.color, TagColor::Green);
+        assert!(!updated.is_favorite);
+
+        tags.move_within_list(beta.id, -1)?;
+        let ordered = tags
+            .list_all()?
+            .into_iter()
+            .filter(|tag| tag.deleted_at.is_none())
+            .map(|tag| tag.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, vec![beta.id, alpha.id]);
+
+        tags.delete(beta.id, Local::now())?;
+        let links_after_delete = tags.list_task_tag_links()?;
+        assert_eq!(links_after_delete, vec![(task.id, alpha.id)]);
         Ok(())
     }
 }

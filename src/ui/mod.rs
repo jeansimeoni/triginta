@@ -16,11 +16,14 @@ use crate::{
         App, CalendarPickerView, CycleEntryState, DeleteConfirmationView, FormPreviewPanelView,
         HistoryPanelTab, PanelFocus, PreviewLineView, ProjectDeleteConfirmationView,
         ProjectEditorView, ProjectSortPopupView, ProjectTreeRowView, RightPanelTab, ScreenData,
-        ShortcutSection, ShortcutTip, SidebarTab, TaskEditorView, TaskInputView, TaskSearchView,
+        ShortcutSection, ShortcutTip, SidebarTab, TagDeleteConfirmationView, TagEditorView,
+        TagListRowView, TagSortPopupView, TaskEditorView, TaskInputView, TaskSearchView,
         TaskSortPopupView, TaskView, TimerPhase,
     },
     config::GlyphMode,
-    domain::{DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, Task, TaskStatus},
+    domain::{
+        DayHistorySummary, SessionEntry, SessionKind, SessionOutcome, TagColor, Task, TaskStatus,
+    },
     theme::ThemePalette,
 };
 use chrono::{Datelike, Local, NaiveDate};
@@ -319,13 +322,22 @@ fn render_navigation_panel(
                 .iter()
                 .position(|view| app.active_task_view() == *view),
         ),
-        SidebarTab::FiltersTags => (
-            app.filters_tags_lines()
-                .into_iter()
-                .map(Line::from)
-                .collect::<Vec<_>>(),
-            None,
-        ),
+        SidebarTab::FiltersTags => {
+            let rows = app.tags_rows();
+            let selected_index = rows.iter().position(|row| row.is_selected);
+            if rows.is_empty() {
+                (vec![Line::from("No matching tags.")], selected_index)
+            } else if rows.len() == 1 && !app.has_user_tags() {
+                (vec![Line::from("No tags yet.")], selected_index)
+            } else {
+                (
+                    rows.into_iter()
+                        .map(|row| tag_list_line(row, symbols, content_width, palette))
+                        .collect::<Vec<_>>(),
+                    selected_index,
+                )
+            }
+        }
         SidebarTab::Projects => {
             let rows = app.project_tree_rows();
             let selected_index = rows.iter().position(|row| row.is_selected);
@@ -348,12 +360,15 @@ fn render_navigation_panel(
     }
 
     let footer = match app.active_sidebar_tab() {
+        SidebarTab::FiltersTags => tags_sort_footer(app, symbols, palette),
         SidebarTab::Projects => projects_sort_footer(app, symbols, palette),
-        SidebarTab::Navigation | SidebarTab::FiltersTags => Line::from(""),
+        SidebarTab::Navigation => Line::from(""),
     };
     let footer_hints = match app.active_sidebar_tab() {
         SidebarTab::Navigation => navigation_footer_hint(symbols, palette),
-        SidebarTab::FiltersTags => Line::from("").right_aligned(),
+        SidebarTab::FiltersTags => {
+            tags_footer_hints(symbols, focused_panel == PanelFocus::Navigation, palette)
+        }
         SidebarTab::Projects => {
             projects_footer_hints(symbols, focused_panel == PanelFocus::Navigation, palette)
         }
@@ -611,6 +626,16 @@ fn render_task_details_panel(
         }
         if let Some(project_name) = project_name_for_task(app.screen_data(), task) {
             lines.push(Line::from(format!("Project: {project_name}")));
+        }
+        let tags = task_tags_for_task(app.screen_data(), task.id);
+        if !tags.is_empty() {
+            lines.push(Line::from(format!(
+                "Tags: {}",
+                tags.into_iter()
+                    .map(|tag| format!("@{tag}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )));
         }
         lines
     } else {
@@ -889,6 +914,7 @@ fn task_project_line(
     let (project_name, project_color) = project_meta_for_task(data, task)
         .map(|(name, color)| (name, palette.project_color(color)))
         .unwrap_or(("Inbox", palette.subtle_text));
+    let tags_text = format_task_tags_for_row(task_tags_for_task(data, task.id).as_slice(), width);
     let status_marker = task_status_symbol(task.status, symbols);
     let leading_padding = 2usize
         .saturating_add(status_marker.width())
@@ -924,11 +950,31 @@ fn task_project_line(
                 width
                     .saturating_sub(leading_padding as u16)
                     .saturating_sub(symbols.project.width() as u16)
-                    .saturating_sub(1) as usize,
+                    .saturating_sub(1)
+                    .saturating_sub(tags_text.width() as u16)
+                    .saturating_sub(if tags_text.is_empty() { 0 } else { 2 })
+                    as usize,
             ),
             name_style,
         ),
     ];
+    if !tags_text.is_empty() {
+        let current_width = Line::from(spans.clone()).width();
+        let min_gap = 2usize;
+        let available_for_gap = (width as usize)
+            .saturating_sub(current_width)
+            .saturating_sub(tags_text.width());
+        let gap = available_for_gap.max(min_gap);
+        spans.push(Span::styled(" ".repeat(gap), base_style));
+        spans.push(Span::styled(
+            tags_text,
+            if selected {
+                base_style
+            } else {
+                base_style.patch(Style::default().fg(palette.subtle_text))
+            },
+        ));
+    }
     let current_width = Line::from(spans.clone()).width();
     let padding = (width as usize).saturating_sub(current_width);
     if padding > 0 {
@@ -952,6 +998,56 @@ fn project_meta_for_task<'a>(
         .iter()
         .find(|project| project.id == task.project_id)
         .map(|project| (project.name.as_str(), project.color))
+}
+
+fn task_tags_for_task<'a>(data: &'a ScreenData, task_id: crate::domain::TaskId) -> Vec<&'a str> {
+    let mut tags = data
+        .task_tag_links
+        .iter()
+        .filter_map(|(linked_task_id, tag_id)| {
+            if *linked_task_id != task_id {
+                return None;
+            }
+            data.tags
+                .iter()
+                .find(|tag| tag.id == *tag_id && tag.deleted_at.is_none())
+                .map(|tag| tag.name.as_str())
+        })
+        .collect::<Vec<_>>();
+    tags.sort_by_key(|name| name.to_lowercase());
+    tags
+}
+
+fn format_task_tags_for_row(tags: &[&str], width: u16) -> String {
+    if tags.is_empty() {
+        return String::new();
+    }
+    let max_width = (width as usize / 2).max(8);
+    let mut chunks = Vec::new();
+    let mut used = 0usize;
+    for tag in tags {
+        let chunk = format!("@{tag}");
+        let next = if chunks.is_empty() {
+            chunk.width()
+        } else {
+            chunk.width() + 1
+        };
+        if used + next > max_width {
+            break;
+        }
+        used += next;
+        chunks.push(chunk);
+    }
+    let remaining = tags.len().saturating_sub(chunks.len());
+    if remaining > 0 {
+        let suffix = format!("+{remaining}");
+        if !chunks.is_empty() && used + suffix.width() + 1 <= max_width {
+            chunks.push(suffix);
+        } else if chunks.is_empty() && suffix.width() <= max_width {
+            chunks.push(suffix);
+        }
+    }
+    chunks.join(" ")
 }
 
 fn project_tree_line(
@@ -1026,6 +1122,78 @@ fn project_tree_line(
     Line::from(spans)
 }
 
+fn tag_list_line(
+    row: TagListRowView,
+    symbols: Symbols,
+    width: u16,
+    palette: ThemePalette,
+) -> Line<'static> {
+    let mut label = String::new();
+    if row.is_favorite {
+        label.push_str(symbols.favorite);
+        label.push(' ');
+    }
+    let color = row
+        .color
+        .map(|color| palette.project_color(project_color_for_tag(color)))
+        .unwrap_or(palette.text);
+    let selection_style = if row.is_selected {
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.border)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let count_text = format!(" {}", row.task_count);
+    let name_width = (width as usize)
+        .saturating_sub(label.width())
+        .saturating_sub(symbols.tag.width())
+        .saturating_sub(3)
+        .saturating_sub(count_text.width())
+        .max(1);
+    let mut spans = vec![
+        Span::styled(
+            label,
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(palette.subtle_text))
+            },
+        ),
+        Span::styled(
+            format!("{} ", symbols.tag),
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(color))
+            },
+        ),
+        Span::styled(
+            ellipsize_end(row.name.as_str(), name_width),
+            if row.is_selected {
+                selection_style
+            } else {
+                selection_style.patch(Style::default().fg(color))
+            },
+        ),
+        Span::styled(
+            count_text,
+            if row.is_selected {
+                Style::default().fg(palette.subtle_text).bg(palette.border)
+            } else {
+                Style::default().fg(palette.subtle_text)
+            },
+        ),
+    ];
+    let current_width = Line::from(spans.clone()).width();
+    let padding = (width as usize).saturating_sub(current_width);
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), selection_style));
+    }
+    Line::from(spans)
+}
+
 fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palette: ThemePalette) {
     if app.is_help_open() {
         render_help_dialog(frame, app, palette);
@@ -1035,6 +1203,12 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
     if let Some(sort_popup) = app.project_sort_popup_view() {
         let anchor = project_sort_popup_anchor(frame.area());
         render_project_sort_popup(frame, &sort_popup, anchor, symbols, palette);
+        return;
+    }
+
+    if let Some(sort_popup) = app.tag_sort_popup_view() {
+        let anchor = project_sort_popup_anchor(frame.area());
+        render_tag_sort_popup(frame, &sort_popup, anchor, symbols, palette);
         return;
     }
 
@@ -1059,6 +1233,11 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
         return;
     }
 
+    if let Some(editor) = app.tag_editor_view() {
+        render_tag_editor_popup(frame, &editor, symbols, palette);
+        return;
+    }
+
     if let Some(input) = app.task_input_view() {
         render_task_input_popup(frame, &input, symbols, palette);
         return;
@@ -1066,6 +1245,11 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
 
     if let Some(confirmation) = app.project_delete_confirmation_view() {
         render_project_delete_confirmation(frame, &confirmation, symbols, palette);
+        return;
+    }
+
+    if let Some(confirmation) = app.tag_delete_confirmation_view() {
+        render_tag_delete_confirmation(frame, &confirmation, symbols, palette);
         return;
     }
 
@@ -1292,7 +1476,19 @@ fn render_task_input_popup(
     render_form_preview_panel(frame, sections[1], &input.preview_panel, palette);
     let input_area = sections[0];
 
-    if !input.project_suggestions.is_empty() {
+    if !input.tag_suggestions.is_empty() {
+        let dropdown_height = input.tag_suggestions.len().min(4) as u16 + 2;
+        let visible_width = input_area.width.saturating_sub(4) as usize;
+        let cursor_col = editor_cursor_display_column(&input.value, input.cursor, visible_width);
+        let dropdown_area = project_parent_dropdown_rect(
+            frame.area(),
+            input_area,
+            cursor_col as u16,
+            project_parent_dropdown_width(input.tag_suggestions.as_slice()),
+            dropdown_height,
+        );
+        render_task_tag_suggestions(frame, dropdown_area, input, palette);
+    } else if !input.project_suggestions.is_empty() {
         let dropdown_height = input.project_suggestions.len().min(4) as u16 + 2;
         let visible_width = input_area.width.saturating_sub(4) as usize;
         let cursor_col = editor_cursor_display_column(&input.value, input.cursor, visible_width);
@@ -1398,12 +1594,12 @@ fn render_task_editor_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let area = centered_rect(frame.area(), 96, 21);
+    let area = centered_rect(frame.area(), 96, 24);
     frame.render_widget(Clear, area);
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(14), Constraint::Length(6)])
+        .constraints([Constraint::Length(17), Constraint::Length(6)])
         .split(area);
     let form_block = Block::default()
         .title(Span::styled(
@@ -1420,6 +1616,7 @@ fn render_task_editor_popup(
     let form_rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
@@ -1448,14 +1645,25 @@ fn render_task_editor_popup(
         palette,
     );
 
+    render_editor_field(
+        frame,
+        form_rows[2],
+        "Tags [F3]",
+        &editor.tags_value,
+        editor.tags_cursor,
+        editor.focus.tags,
+        Some("@work @deep"),
+        palette,
+    );
+
     let due_row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-        .split(form_rows[2]);
+        .split(form_rows[3]);
     render_editor_field(
         frame,
         due_row[0],
-        "Due Date [F3]",
+        "Due Date [F4]",
         &editor.due_date_value,
         editor.due_date_cursor,
         editor.focus.due_date,
@@ -1465,7 +1673,7 @@ fn render_task_editor_popup(
     render_editor_field(
         frame,
         due_row[1],
-        "Due Time [F4]",
+        "Due Time [F5]",
         &editor.due_time_value,
         editor.due_time_cursor,
         editor.focus.due_time,
@@ -1474,8 +1682,8 @@ fn render_task_editor_popup(
     );
     render_editor_field(
         frame,
-        form_rows[3],
-        "Recurrence [F5]",
+        form_rows[4],
+        "Recurrence [F6]",
         &editor.recurrence_value,
         editor.recurrence_cursor,
         editor.focus.recurrence,
@@ -1500,6 +1708,21 @@ fn render_task_editor_popup(
             dropdown_height,
         );
         render_editor_project_suggestions(frame, dropdown_area, editor, palette);
+    }
+
+    if editor.focus.tags && !editor.tag_suggestions.is_empty() {
+        let dropdown_height = editor.tag_suggestions.len().min(4) as u16 + 2;
+        let visible_width = form_rows[2].width.saturating_sub(4) as usize;
+        let cursor_col =
+            editor_cursor_display_column(&editor.tags_value, editor.tags_cursor, visible_width);
+        let dropdown_area = project_parent_dropdown_rect(
+            frame.area(),
+            form_rows[2],
+            cursor_col as u16,
+            project_parent_dropdown_width(editor.tag_suggestions.as_slice()),
+            dropdown_height,
+        );
+        render_editor_tag_suggestions(frame, dropdown_area, editor, palette);
     }
 
     if let Some(calendar) = editor.calendar {
@@ -1608,6 +1831,58 @@ fn render_editor_project_suggestions(
     );
 }
 
+fn render_editor_tag_suggestions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &TaskEditorView,
+    palette: ThemePalette,
+) {
+    let content_width = area.width.saturating_sub(2) as usize;
+    let lines = editor
+        .tag_suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let style = if index
+                == editor
+                    .selected_tag_suggestion
+                    .min(editor.tag_suggestions.len().saturating_sub(1))
+            {
+                Style::default()
+                    .fg(palette.text)
+                    .bg(palette.border)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            let value = ellipsize_end(suggestion, content_width);
+            let padding = " ".repeat(content_width.saturating_sub(value.width()));
+            Line::from(vec![Span::styled(format!("{value}{padding}"), style)])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        "Tag",
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            )
+            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+        area,
+    );
+}
+
 fn render_editor_calendar(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1658,14 +1933,16 @@ fn render_editor_calendar(
 fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "↑/↓ project  F6 calendar  F7 clear due  Enter save",
+            "F1-F6 fields  ↑/↓ suggestions  F8 calendar  F7 clear due",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
     }
 
     Line::from(vec![
-        Span::styled("F6", Style::default().fg(palette.subtle_text)),
+        Span::styled("F1-F6", Style::default().fg(palette.subtle_text)),
+        Span::raw(" fields  "),
+        Span::styled("F8", Style::default().fg(palette.subtle_text)),
         Span::raw(" 󰃭  "),
         Span::styled("F7", Style::default().fg(palette.subtle_text)),
         Span::raw(" due  "),
@@ -1884,6 +2161,108 @@ fn render_project_editor_popup(
     }
 }
 
+fn render_tag_editor_popup(
+    frame: &mut Frame<'_>,
+    editor: &TagEditorView,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let area = centered_rect(frame.area(), 64, 13);
+    frame.render_widget(Clear, area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Length(6)])
+        .split(area);
+
+    let form_block = Block::default()
+        .title(Span::styled(
+            editor.title,
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(project_editor_shortcuts_line(symbols, palette))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent));
+    let form_inner = form_block.inner(sections[0]);
+    frame.render_widget(form_block, sections[0]);
+    let form_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(3)])
+        .split(form_inner);
+
+    render_editor_field(
+        frame,
+        form_rows[0],
+        "Name [F1]",
+        &editor.name_value,
+        editor.name_cursor,
+        editor.focus.name,
+        Some("Use @ in task title to assign"),
+        palette,
+    );
+    let meta_columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(form_rows[1]);
+    render_project_value_field(
+        frame,
+        meta_columns[0],
+        "Color [F2]",
+        &editor.color_label,
+        editor.focus.color,
+        Some(Style::default().fg(palette.project_color(project_color_for_tag(editor.color_value)))),
+        palette,
+    );
+    render_project_value_field(
+        frame,
+        meta_columns[1],
+        "Favorite [F3]",
+        if editor.is_favorite { "yes" } else { "no" },
+        editor.focus.favorite,
+        None,
+        palette,
+    );
+
+    render_form_preview_panel(frame, sections[1], &editor.preview_panel, palette);
+}
+
+fn render_tag_delete_confirmation(
+    frame: &mut Frame<'_>,
+    confirmation: &TagDeleteConfirmationView,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let area = centered_rect(frame.area(), 64, 7);
+    frame.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from("Remove this tag?"),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("\"{}\"", confirmation.tag_name),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Tag assignments will be detached from tasks."),
+        Line::from("Tasks themselves are kept."),
+    ];
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                "Remove Tag",
+                Style::default()
+                    .fg(palette.error)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .title_bottom(confirm_shortcuts_line(symbols, palette))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.error)),
+    );
+
+    frame.render_widget(popup, area);
+}
+
 fn render_form_preview_panel(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -2055,6 +2434,58 @@ fn render_task_project_suggestions(
                 Block::default()
                     .title(Span::styled(
                         "Project",
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            )
+            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+        area,
+    );
+}
+
+fn render_task_tag_suggestions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    input: &TaskInputView,
+    palette: ThemePalette,
+) {
+    let content_width = area.width.saturating_sub(2) as usize;
+    let lines = input
+        .tag_suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let style = if index
+                == input
+                    .selected_tag_suggestion
+                    .min(input.tag_suggestions.len().saturating_sub(1))
+            {
+                Style::default()
+                    .fg(palette.text)
+                    .bg(palette.border)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            let value = ellipsize_end(suggestion, content_width);
+            let padding = " ".repeat(content_width.saturating_sub(value.width()));
+            Line::from(vec![Span::styled(format!("{value}{padding}"), style)])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        "Tag",
                         Style::default()
                             .fg(palette.accent)
                             .add_modifier(Modifier::BOLD),
@@ -2247,10 +2678,57 @@ fn render_project_sort_popup(
     frame.render_widget(widget, area);
 }
 
+fn render_tag_sort_popup(
+    frame: &mut Frame<'_>,
+    popup: &TagSortPopupView,
+    anchor: Rect,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let width = 24;
+    let height = popup.options.len() as u16 + 2;
+    let area = anchored_dropdown_rect(frame.area(), anchor, width, height);
+    frame.render_widget(Clear, area);
+
+    let lines = popup
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let selected = popup.selected_index == index;
+            let marker = if option.is_active {
+                if symbols.tasks == "#" { "* " } else { "󰄵 " }
+            } else {
+                "  "
+            };
+            selectable_line(
+                &format!("{marker}{}", option.label),
+                selected,
+                area.width.saturating_sub(2),
+                palette,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                popup.title,
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.accent)),
+    );
+
+    frame.render_widget(widget, area);
+}
+
 fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.tasks == "#" {
         return Line::from(vec![Span::styled(
-            "↑/↓ move  Tab accept project  Enter save  Esc cancel",
+            "↑/↓ move  Tab accept #/@  Enter save  Esc cancel",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
@@ -2260,7 +2738,7 @@ fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'s
         Span::styled("↑/↓", Style::default().fg(palette.subtle_text)),
         Span::raw(" move  "),
         Span::styled("⇥", Style::default().fg(palette.subtle_text)),
-        Span::raw(" project  "),
+        Span::raw(" #/@  "),
         Span::styled("󰌑", Style::default().fg(palette.subtle_text)),
         Span::raw(" save  "),
         Span::styled(symbols.voided, Style::default().fg(palette.subtle_text)),
@@ -2689,6 +3167,18 @@ fn projects_sort_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> L
     )])
 }
 
+fn tags_sort_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    let sort_prefix = if symbols.tasks == "#" {
+        "sort"
+    } else {
+        symbols.sort
+    };
+    Line::from(vec![Span::styled(
+        format!(" {} {} ", sort_prefix, app.tag_sort_order().short_label()),
+        Style::default().fg(palette.subtle_text),
+    )])
+}
+
 fn projects_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> Line<'static> {
     if !focused {
         return Line::from("").right_aligned();
@@ -2700,6 +3190,22 @@ fn projects_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette)
         Span::styled(symbols.sort, Style::default().fg(palette.accent)),
         Span::styled(" o sort  ", Style::default().fg(palette.subtle_text)),
         Span::styled(project_new_icon, Style::default().fg(palette.accent)),
+        Span::styled(" C new  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.tasks, Style::default().fg(palette.accent)),
+        Span::styled(" c ", Style::default().fg(palette.subtle_text)),
+    ])
+    .right_aligned()
+}
+
+fn tags_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> Line<'static> {
+    if !focused {
+        return Line::from("").right_aligned();
+    }
+    let tag_new_icon = if symbols.tasks == "#" { "+" } else { "✚" };
+    Line::from(vec![
+        Span::styled(symbols.sort, Style::default().fg(palette.accent)),
+        Span::styled(" o sort  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(tag_new_icon, Style::default().fg(palette.accent)),
         Span::styled(" C new  ", Style::default().fg(palette.subtle_text)),
         Span::styled(symbols.tasks, Style::default().fg(palette.accent)),
         Span::styled(" c ", Style::default().fg(palette.subtle_text)),
@@ -3093,6 +3599,7 @@ struct Symbols {
     timer: &'static str,
     favorite: &'static str,
     project: &'static str,
+    tag: &'static str,
     tasks: &'static str,
     inbox: &'static str,
     today: &'static str,
@@ -3119,6 +3626,7 @@ impl Symbols {
                 timer: "*",
                 favorite: "*",
                 project: "P",
+                tag: "@",
                 tasks: "#",
                 inbox: "I",
                 today: "T",
@@ -3141,6 +3649,7 @@ impl Symbols {
                 timer: "󰔛",
                 favorite: "󰓎",
                 project: "󰉋",
+                tag: "󰓹",
                 tasks: "󰄱",
                 inbox: "󰏆",
                 today: "󰃰",
@@ -3160,6 +3669,31 @@ impl Symbols {
                 bar_empty: "░",
             },
         }
+    }
+}
+
+fn project_color_for_tag(color: TagColor) -> crate::domain::ProjectColor {
+    match color {
+        TagColor::BerryRed => crate::domain::ProjectColor::BerryRed,
+        TagColor::Red => crate::domain::ProjectColor::Red,
+        TagColor::Orange => crate::domain::ProjectColor::Orange,
+        TagColor::Yellow => crate::domain::ProjectColor::Yellow,
+        TagColor::OliveGreen => crate::domain::ProjectColor::OliveGreen,
+        TagColor::LimeGreen => crate::domain::ProjectColor::LimeGreen,
+        TagColor::Green => crate::domain::ProjectColor::Green,
+        TagColor::MintGreen => crate::domain::ProjectColor::MintGreen,
+        TagColor::Teal => crate::domain::ProjectColor::Teal,
+        TagColor::SkyBlue => crate::domain::ProjectColor::SkyBlue,
+        TagColor::LightBlue => crate::domain::ProjectColor::LightBlue,
+        TagColor::Blue => crate::domain::ProjectColor::Blue,
+        TagColor::Grape => crate::domain::ProjectColor::Grape,
+        TagColor::Violet => crate::domain::ProjectColor::Violet,
+        TagColor::Lavender => crate::domain::ProjectColor::Lavender,
+        TagColor::Magenta => crate::domain::ProjectColor::Magenta,
+        TagColor::Salmon => crate::domain::ProjectColor::Salmon,
+        TagColor::Charcoal => crate::domain::ProjectColor::Charcoal,
+        TagColor::Grey => crate::domain::ProjectColor::Grey,
+        TagColor::Taupe => crate::domain::ProjectColor::Taupe,
     }
 }
 

@@ -10,6 +10,9 @@ pub struct TaskId(pub i64);
 pub struct ProjectId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TagId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PomodoroId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -141,6 +144,134 @@ impl ProjectColor {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TagColor {
+    BerryRed,
+    Red,
+    Orange,
+    Yellow,
+    OliveGreen,
+    LimeGreen,
+    Green,
+    MintGreen,
+    Teal,
+    SkyBlue,
+    LightBlue,
+    Blue,
+    Grape,
+    Violet,
+    Lavender,
+    Magenta,
+    Salmon,
+    Charcoal,
+    Grey,
+    Taupe,
+}
+
+impl TagColor {
+    const ALL: [Self; 20] = [
+        Self::BerryRed,
+        Self::Red,
+        Self::Orange,
+        Self::Yellow,
+        Self::OliveGreen,
+        Self::LimeGreen,
+        Self::Green,
+        Self::MintGreen,
+        Self::Teal,
+        Self::SkyBlue,
+        Self::LightBlue,
+        Self::Blue,
+        Self::Grape,
+        Self::Violet,
+        Self::Lavender,
+        Self::Magenta,
+        Self::Salmon,
+        Self::Charcoal,
+        Self::Grey,
+        Self::Taupe,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BerryRed => "berry_red",
+            Self::Red => "red",
+            Self::Orange => "orange",
+            Self::Yellow => "yellow",
+            Self::OliveGreen => "olive_green",
+            Self::LimeGreen => "lime_green",
+            Self::Green => "green",
+            Self::MintGreen => "mint_green",
+            Self::Teal => "teal",
+            Self::SkyBlue => "sky_blue",
+            Self::LightBlue => "light_blue",
+            Self::Blue => "blue",
+            Self::Grape => "grape",
+            Self::Violet => "violet",
+            Self::Lavender => "lavender",
+            Self::Magenta => "magenta",
+            Self::Salmon => "salmon",
+            Self::Charcoal => "charcoal",
+            Self::Grey => "grey",
+            Self::Taupe => "taupe",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BerryRed => "Berry Red",
+            Self::Red => "Red",
+            Self::Orange => "Orange",
+            Self::Yellow => "Yellow",
+            Self::OliveGreen => "Olive Green",
+            Self::LimeGreen => "Lime Green",
+            Self::Green => "Green",
+            Self::MintGreen => "Mint Green",
+            Self::Teal => "Teal",
+            Self::SkyBlue => "Sky Blue",
+            Self::LightBlue => "Light Blue",
+            Self::Blue => "Blue",
+            Self::Grape => "Grape",
+            Self::Violet => "Violet",
+            Self::Lavender => "Lavender",
+            Self::Magenta => "Magenta",
+            Self::Salmon => "Salmon",
+            Self::Charcoal => "Charcoal",
+            Self::Grey => "Grey",
+            Self::Taupe => "Taupe",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "berry_red" => Self::BerryRed,
+            "red" => Self::Red,
+            "orange" => Self::Orange,
+            "yellow" => Self::Yellow,
+            "olive_green" => Self::OliveGreen,
+            "lime_green" => Self::LimeGreen,
+            "green" => Self::Green,
+            "mint_green" => Self::MintGreen,
+            "teal" => Self::Teal,
+            "sky_blue" => Self::SkyBlue,
+            "light_blue" => Self::LightBlue,
+            "blue" => Self::Blue,
+            "grape" => Self::Grape,
+            "violet" => Self::Violet,
+            "lavender" => Self::Lavender,
+            "magenta" => Self::Magenta,
+            "salmon" => Self::Salmon,
+            "grey" => Self::Grey,
+            "taupe" => Self::Taupe,
+            _ => Self::Charcoal,
+        }
+    }
+}
+
 // Enums in Rust are tagged unions built into the language.
 // This is much closer to "an enum plus guaranteed exhaustive handling" than a
 // plain C enum, because `match` must cover every variant.
@@ -220,6 +351,24 @@ pub struct ProjectUpdate {
     pub name: String,
     pub parent_project_id: Option<ProjectId>,
     pub color: ProjectColor,
+    pub is_favorite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tag {
+    pub id: TagId,
+    pub name: String,
+    pub color: TagColor,
+    pub is_favorite: bool,
+    pub item_order: i64,
+    pub created_at: DateTime<Local>,
+    pub deleted_at: Option<DateTime<Local>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagUpdate {
+    pub name: String,
+    pub color: TagColor,
     pub is_favorite: bool,
 }
 

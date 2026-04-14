@@ -31,6 +31,8 @@ theme = "catppuccin-mocha"
 task_list_sort = "due-asc"
 project_list_sort = "manual"
 persist_project_list_sort = false
+tag_list_sort = "manual"
+persist_tag_list_sort = false
 hide_completed_tasks = true
 
 [timer]
@@ -49,6 +51,8 @@ ui:
   task_list_sort: due-asc
   project_list_sort: manual
   persist_project_list_sort: false
+  tag_list_sort: manual
+  persist_tag_list_sort: false
   hide_completed_tasks: true
 
 timer:
@@ -131,6 +135,35 @@ Default:
 When `false` (default), Triginta always starts with `manual` sorting in the
 Projects tab, regardless of the previously selected sort. When `true`,
 Triginta persists and restores the selected project sort order.
+
+Allowed values:
+
+- `true`
+- `false`
+
+Default:
+
+- `false`
+
+`ui.tag_list_sort` controls the default tag-list ordering used in panel 4
+(Filters & Tags tab in the Navigation panel).
+
+Allowed values:
+
+- `name-asc`
+- `name-desc`
+- `task-count-asc`
+- `task-count-desc`
+- `manual`
+
+Default:
+
+- `manual`
+
+`ui.persist_tag_list_sort` controls startup behavior for tag sorting.
+When `false` (default), Triginta always starts with `manual` sorting in the
+Filters & Tags tab, regardless of the previously selected sort. When `true`,
+Triginta persists and restores the selected tag sort order.
 
 Allowed values:
 
