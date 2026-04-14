@@ -1644,6 +1644,12 @@ impl App {
 
     pub fn task_editor_view(&self) -> Option<TaskEditorView> {
         self.task_editor.as_ref().map(|editor| {
+            let title_project_query = if editor.focused_field == TaskEditorField::Title {
+                self.active_project_query(editor.title_input.as_str(), editor.title_cursor)
+                    .map(|(_, _, query)| query)
+            } else {
+                None
+            };
             let current_project_name = self.project_name(editor.project_id).unwrap_or("Inbox");
             let show_project_suggestions = editor.focused_field == TaskEditorField::Project
                 && !editor.project_input.trim().is_empty()
@@ -1651,7 +1657,13 @@ impl App {
                     .project_input
                     .trim()
                     .eq_ignore_ascii_case(current_project_name);
-            let project_suggestions = if show_project_suggestions {
+            let project_suggestions = if let Some(query) = title_project_query {
+                self.project_suggestions(query.as_str())
+                    .into_iter()
+                    .take(4)
+                    .map(|project| project.name.clone())
+                    .collect::<Vec<_>>()
+            } else if show_project_suggestions {
                 self.project_suggestions(editor.project_input.as_str())
                     .into_iter()
                     .take(4)
@@ -1660,7 +1672,19 @@ impl App {
             } else {
                 Vec::new()
             };
-            let tag_suggestions = if editor.focused_field == TaskEditorField::Tags {
+            let title_tag_query = if editor.focused_field == TaskEditorField::Title {
+                self.active_tag_query(editor.title_input.as_str(), editor.title_cursor)
+                    .map(|(_, _, query)| query)
+            } else {
+                None
+            };
+            let tag_suggestions = if let Some(query) = title_tag_query {
+                self.tag_suggestions(query.as_str())
+                    .into_iter()
+                    .take(4)
+                    .map(|tag| tag.name.clone())
+                    .collect::<Vec<_>>()
+            } else if editor.focused_field == TaskEditorField::Tags {
                 self.active_tag_field_query(editor.tags_input.as_str(), editor.tags_cursor)
                     .map(|(_, _, query)| self.tag_suggestions(query.as_str()))
                     .unwrap_or_default()
@@ -1671,7 +1695,19 @@ impl App {
             } else {
                 Vec::new()
             };
-            let priority_suggestions = if editor.focused_field == TaskEditorField::Priority {
+            let title_priority_query = if editor.focused_field == TaskEditorField::Title {
+                self.active_priority_query(editor.title_input.as_str(), editor.title_cursor)
+                    .map(|(_, _, query)| query)
+            } else {
+                None
+            };
+            let priority_suggestions = if let Some(query) = title_priority_query {
+                self.priority_suggestions(query.as_str())
+                    .into_iter()
+                    .take(4)
+                    .map(|priority| priority.to_string())
+                    .collect::<Vec<_>>()
+            } else if editor.focused_field == TaskEditorField::Priority {
                 self.priority_suggestions(editor.priority_input.as_str())
                     .into_iter()
                     .take(4)
@@ -3104,6 +3140,33 @@ impl App {
         Some((token_start, safe_cursor, query.to_string()))
     }
 
+    fn active_priority_query(&self, value: &str, cursor: usize) -> Option<(usize, usize, String)> {
+        let safe_cursor = cursor.min(value.len());
+        let before_cursor = &value[..safe_cursor];
+        let token_start = before_cursor
+            .char_indices()
+            .rev()
+            .find_map(|(index, character)| {
+                if character.is_whitespace() {
+                    Some(index + character.len_utf8())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let query = value[token_start..safe_cursor].trim_start();
+        if query.is_empty()
+            || query.contains('\n')
+            || !query
+                .chars()
+                .next()
+                .is_some_and(|character| character == 'p' || character == 'P')
+        {
+            return None;
+        }
+        Some((token_start, safe_cursor, query.to_string()))
+    }
+
     fn resolve_tag_input(&self, query: &str) -> Option<TagId> {
         let normalized = query.trim().trim_start_matches('@').to_lowercase();
         if normalized.is_empty() {
@@ -3490,6 +3553,51 @@ impl App {
         true
     }
 
+    fn accept_task_editor_title_project_suggestion(
+        &self,
+        editor: &mut TaskEditorState,
+        reference_date: NaiveDate,
+    ) -> bool {
+        let Some((start, end, query)) =
+            self.active_project_query(editor.title_input.as_str(), editor.title_cursor)
+        else {
+            return false;
+        };
+        if let Some((_, matched_length)) = self.matched_project_prefix(query.as_str(), None) {
+            let remainder = query[matched_length..].trim_start();
+            if !remainder.is_empty() {
+                return false;
+            }
+        }
+        let suggestions = self.project_suggestions(query.as_str());
+        let Some(project) = suggestions
+            .get(
+                editor
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        else {
+            return false;
+        };
+
+        editor.project_id = project.id;
+        editor.project_input = project.name.clone();
+        editor.project_cursor = editor.project_input.len();
+        editor
+            .title_input
+            .replace_range(start..end, format!("#{} ", project.name).as_str());
+        editor.title_cursor = (start + project.name.len() + 2).min(editor.title_input.len());
+        editor.suggestion_index = 0;
+        while editor.title_cursor < editor.title_input.len()
+            && editor.title_input[editor.title_cursor..].starts_with(' ')
+        {
+            editor.title_input.remove(editor.title_cursor);
+        }
+        Self::after_editor_text_change(editor, reference_date);
+        true
+    }
+
     fn accept_or_create_task_input_tag_token(
         &mut self,
         input: &mut TaskInputState,
@@ -3565,6 +3673,79 @@ impl App {
         editor.tags_cursor = (start + tag_name.len() + 2).min(editor.tags_input.len());
         editor.suggestion_index = 0;
         Ok(true)
+    }
+
+    fn accept_or_create_task_editor_title_tag_token(
+        &mut self,
+        editor: &mut TaskEditorState,
+        now: DateTime<Local>,
+    ) -> Result<bool> {
+        let Some((start, end, query)) =
+            self.active_tag_query(editor.title_input.as_str(), editor.title_cursor)
+        else {
+            return Ok(false);
+        };
+        if let Some(matched_length) = self.matched_tag_prefix(query.as_str()) {
+            let remainder = query[matched_length..].trim_start();
+            if !remainder.is_empty() {
+                return Ok(false);
+            }
+        }
+        let suggestions = self.tag_suggestions(query.as_str());
+        let tag_name = if let Some(tag) = suggestions
+            .get(
+                editor
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        {
+            tag.name.clone()
+        } else {
+            let Some(tag_id) = self.resolve_or_create_tag_input(query.as_str(), now)? else {
+                return Ok(false);
+            };
+            self.tag_by_id(tag_id)
+                .map(|tag| tag.name.clone())
+                .unwrap_or_else(|| query.trim().to_string())
+        };
+        editor
+            .title_input
+            .replace_range(start..end, format!("@{} ", tag_name).as_str());
+        editor.title_cursor = (start + tag_name.len() + 2).min(editor.title_input.len());
+        editor.suggestion_index = 0;
+        Self::after_editor_text_change(editor, now.date_naive());
+        Ok(true)
+    }
+
+    fn accept_task_editor_title_priority_suggestion(
+        &self,
+        editor: &mut TaskEditorState,
+        reference_date: NaiveDate,
+    ) -> bool {
+        let Some((start, end, query)) =
+            self.active_priority_query(editor.title_input.as_str(), editor.title_cursor)
+        else {
+            return false;
+        };
+        let suggestions = self.priority_suggestions(query.as_str());
+        let Some(priority) = suggestions
+            .get(
+                editor
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        else {
+            return false;
+        };
+        editor
+            .title_input
+            .replace_range(start..end, format!("{priority} ").as_str());
+        editor.title_cursor = (start + priority.len() + 1).min(editor.title_input.len());
+        editor.suggestion_index = 0;
+        Self::after_editor_text_change(editor, reference_date);
+        true
     }
 
     fn accept_project_editor_parent_suggestion(&self, editor: &mut ProjectEditorState) -> bool {
@@ -5531,6 +5712,34 @@ impl App {
             match code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => {
+                    if editor.focused_field == TaskEditorField::Title {
+                        if self.accept_task_editor_title_project_suggestion(
+                            &mut editor,
+                            now.date_naive(),
+                        ) {
+                            self.task_editor = Some(editor);
+                            return Ok(true);
+                        }
+                        if self
+                            .active_tag_query(editor.title_input.as_str(), editor.title_cursor)
+                            .is_some_and(|(_, _, query)| {
+                                !query.chars().any(char::is_whitespace)
+                                    && !self.has_exact_tag_name(query.as_str())
+                            })
+                            && self
+                                .accept_or_create_task_editor_title_tag_token(&mut editor, now)?
+                        {
+                            self.task_editor = Some(editor);
+                            return Ok(true);
+                        }
+                        if self.accept_task_editor_title_priority_suggestion(
+                            &mut editor,
+                            now.date_naive(),
+                        ) {
+                            self.task_editor = Some(editor);
+                            return Ok(true);
+                        }
+                    }
                     if editor.focused_field == TaskEditorField::Project {
                         let query = editor.project_input.trim();
                         if !query.is_empty() {
@@ -5574,6 +5783,26 @@ impl App {
                     return self.submit_task_editor(editor, now);
                 }
                 KeyCode::Tab => {
+                    if editor.focused_field == TaskEditorField::Title {
+                        if self.accept_task_editor_title_project_suggestion(
+                            &mut editor,
+                            now.date_naive(),
+                        ) {
+                            self.task_editor = Some(editor);
+                            return Ok(true);
+                        }
+                        if self.accept_or_create_task_editor_title_tag_token(&mut editor, now)? {
+                            self.task_editor = Some(editor);
+                            return Ok(true);
+                        }
+                        if self.accept_task_editor_title_priority_suggestion(
+                            &mut editor,
+                            now.date_naive(),
+                        ) {
+                            self.task_editor = Some(editor);
+                            return Ok(true);
+                        }
+                    }
                     if editor.focused_field == TaskEditorField::Project {
                         let query = editor.project_input.trim();
                         if !query.is_empty() {
@@ -5671,6 +5900,47 @@ impl App {
                     if editor.focused_field == TaskEditorField::Project =>
                 {
                     editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Down if editor.focused_field == TaskEditorField::Title => {
+                    if let Some((_, _, query)) =
+                        self.active_project_query(editor.title_input.as_str(), editor.title_cursor)
+                    {
+                        let last_index = self
+                            .project_suggestions(query.as_str())
+                            .len()
+                            .saturating_sub(1);
+                        editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
+                    } else if let Some((_, _, query)) =
+                        self.active_tag_query(editor.title_input.as_str(), editor.title_cursor)
+                    {
+                        let last_index =
+                            self.tag_suggestions(query.as_str()).len().saturating_sub(1);
+                        editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
+                    } else if let Some((_, _, query)) =
+                        self.active_priority_query(editor.title_input.as_str(), editor.title_cursor)
+                    {
+                        let last_index = self
+                            .priority_suggestions(query.as_str())
+                            .len()
+                            .saturating_sub(1);
+                        editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
+                    }
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Up if editor.focused_field == TaskEditorField::Title => {
+                    if self
+                        .active_project_query(editor.title_input.as_str(), editor.title_cursor)
+                        .is_some()
+                        || self
+                            .active_tag_query(editor.title_input.as_str(), editor.title_cursor)
+                            .is_some()
+                        || self
+                            .active_priority_query(editor.title_input.as_str(), editor.title_cursor)
+                            .is_some()
+                    {
+                        editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
+                    }
                     self.task_editor = Some(editor);
                 }
                 KeyCode::Down if editor.focused_field == TaskEditorField::Priority => {
@@ -7708,6 +7978,102 @@ mod tests {
         assert_eq!(editor.priority_value, "p3");
         assert_eq!(editor.title_value, "Prepare deck");
         assert_key_value_preview_line(&editor.preview_panel.preview_lines[2], "Priority", "P3");
+    }
+
+    #[test]
+    fn task_editor_title_hash_query_shows_project_suggestions() {
+        let mut app = test_app();
+        app.database
+            .project_repository()
+            .create(
+                "Another Project",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::F(1))
+            .expect("focus should switch to title");
+        for character in " #Ano".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert!(!editor.project_suggestions.is_empty());
+    }
+
+    #[test]
+    fn task_editor_title_at_query_shows_tag_suggestions() {
+        let mut app = test_app();
+        app.database
+            .tag_repository()
+            .create("Work", TagColor::Blue, false, Local::now())
+            .expect("tag should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::F(1))
+            .expect("focus should switch to title");
+        for character in " @Wo".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert!(!editor.tag_suggestions.is_empty());
+    }
+
+    #[test]
+    fn task_editor_title_p_query_shows_priority_suggestions() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::F(1))
+            .expect("focus should switch to title");
+        for character in " p".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert!(!editor.priority_suggestions.is_empty());
     }
 
     #[test]

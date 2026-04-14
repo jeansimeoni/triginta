@@ -1882,17 +1882,30 @@ fn render_task_editor_popup(
     );
     render_form_preview_panel(frame, sections[1], &editor.preview_panel, palette);
 
-    if editor.focus.project && !editor.project_suggestions.is_empty() {
+    if (editor.focus.project || editor.focus.title) && !editor.project_suggestions.is_empty() {
         let dropdown_height = editor.project_suggestions.len().min(4) as u16 + 2;
-        let visible_width = form_rows[1].width.saturating_sub(4) as usize;
+        let project_anchor = if editor.focus.title {
+            form_rows[0]
+        } else {
+            form_rows[1]
+        };
+        let visible_width = project_anchor.width.saturating_sub(4) as usize;
         let cursor_col = editor_cursor_display_column(
-            &editor.project_value,
-            editor.project_cursor,
+            if editor.focus.title {
+                &editor.title_value
+            } else {
+                &editor.project_value
+            },
+            if editor.focus.title {
+                editor.title_cursor
+            } else {
+                editor.project_cursor
+            },
             visible_width,
         );
         let dropdown_area = project_parent_dropdown_rect(
             frame.area(),
-            form_rows[1],
+            project_anchor,
             cursor_col as u16,
             project_parent_dropdown_width(editor.project_suggestions.as_slice()),
             dropdown_height,
@@ -1900,14 +1913,30 @@ fn render_task_editor_popup(
         render_editor_project_suggestions(frame, dropdown_area, editor, palette);
     }
 
-    if editor.focus.tags && !editor.tag_suggestions.is_empty() {
+    if (editor.focus.tags || editor.focus.title) && !editor.tag_suggestions.is_empty() {
         let dropdown_height = editor.tag_suggestions.len().min(4) as u16 + 2;
-        let visible_width = form_rows[2].width.saturating_sub(4) as usize;
-        let cursor_col =
-            editor_cursor_display_column(&editor.tags_value, editor.tags_cursor, visible_width);
+        let tags_anchor = if editor.focus.title {
+            form_rows[0]
+        } else {
+            form_rows[2]
+        };
+        let visible_width = tags_anchor.width.saturating_sub(4) as usize;
+        let cursor_col = editor_cursor_display_column(
+            if editor.focus.title {
+                &editor.title_value
+            } else {
+                &editor.tags_value
+            },
+            if editor.focus.title {
+                editor.title_cursor
+            } else {
+                editor.tags_cursor
+            },
+            visible_width,
+        );
         let dropdown_area = project_parent_dropdown_rect(
             frame.area(),
-            form_rows[2],
+            tags_anchor,
             cursor_col as u16,
             project_parent_dropdown_width(editor.tag_suggestions.as_slice()),
             dropdown_height,
@@ -1915,17 +1944,30 @@ fn render_task_editor_popup(
         render_editor_tag_suggestions(frame, dropdown_area, editor, palette);
     }
 
-    if editor.focus.priority && !editor.priority_suggestions.is_empty() {
+    if (editor.focus.priority || editor.focus.title) && !editor.priority_suggestions.is_empty() {
         let dropdown_height = editor.priority_suggestions.len().min(4) as u16 + 2;
-        let visible_width = due_row[1].width.saturating_sub(4) as usize;
+        let priority_anchor = if editor.focus.title {
+            form_rows[0]
+        } else {
+            due_row[1]
+        };
+        let visible_width = priority_anchor.width.saturating_sub(4) as usize;
         let cursor_col = editor_cursor_display_column(
-            &editor.priority_value,
-            editor.priority_cursor,
+            if editor.focus.title {
+                &editor.title_value
+            } else {
+                &editor.priority_value
+            },
+            if editor.focus.title {
+                editor.title_cursor
+            } else {
+                editor.priority_cursor
+            },
             visible_width,
         );
         let dropdown_area = project_parent_dropdown_rect(
             frame.area(),
-            due_row[1],
+            priority_anchor,
             cursor_col as u16,
             project_parent_dropdown_width(editor.priority_suggestions.as_slice()),
             dropdown_height,
