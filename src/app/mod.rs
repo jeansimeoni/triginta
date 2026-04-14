@@ -1375,10 +1375,11 @@ pub struct App {
 
 impl App {
     fn task_input_parse(&self, raw: &str, fallback_project_id: ProjectId) -> ParsedTaskDraft {
+        let (without_tag_tokens, tag_queries) = self.extract_tag_references(raw.to_string());
         let (without_project_tokens, project_id) =
-            self.extract_project_reference(raw, fallback_project_id);
-        let (without_tag_tokens, tag_queries) = self.extract_tag_references(without_project_tokens);
-        let parsed = parse_task_input(without_tag_tokens.as_str(), self.today());
+            self.extract_project_reference(without_tag_tokens.as_str(), fallback_project_id);
+        let content = without_project_tokens;
+        let parsed = parse_task_input(content.as_str(), self.today());
         ParsedTaskDraft {
             cleaned_title: parsed.cleaned_title,
             due: parsed.due,
@@ -2879,6 +2880,27 @@ impl App {
             .then_with(|| left.name.cmp(&right.name))
     }
 
+    fn matched_tag_prefix(&self, query: &str) -> Option<usize> {
+        let normalized_query = query.trim_start();
+        self.screen_data
+            .tags
+            .iter()
+            .filter(|tag| tag.deleted_at.is_none())
+            .filter_map(|tag| {
+                let name = tag.name.as_str();
+                let query_prefix = normalized_query.get(..name.len())?;
+                if !query_prefix.eq_ignore_ascii_case(name) {
+                    return None;
+                }
+                let next = normalized_query[name.len()..].chars().next();
+                if next.is_some_and(|character| !character.is_whitespace()) {
+                    return None;
+                }
+                Some(name.len())
+            })
+            .max()
+    }
+
     fn tag_suggestions(&self, query: &str) -> Vec<&Tag> {
         let normalized = query.trim().trim_start_matches('@');
         if normalized.is_empty() {
@@ -2902,6 +2924,17 @@ impl App {
                 .then_with(|| left_lower.cmp(&right_lower))
         });
         matches
+    }
+
+    fn has_exact_tag_name(&self, query: &str) -> bool {
+        let normalized = query.trim().trim_start_matches('@');
+        if normalized.is_empty() {
+            return false;
+        }
+        self.screen_data
+            .tags
+            .iter()
+            .any(|tag| tag.deleted_at.is_none() && tag.name.eq_ignore_ascii_case(normalized))
     }
 
     fn active_tag_query(&self, value: &str, cursor: usize) -> Option<(usize, usize, String)> {
@@ -3024,10 +3057,27 @@ impl App {
 
         while let Some((start, end, query)) = Self::next_tag_reference(raw.as_str(), cursor) {
             cleaned.push_str(&raw[cursor..start]);
-            if !tag_queries.contains(&query) {
-                tag_queries.push(query);
+            let segment = &raw[start + 1..end];
+            let leading_whitespace = segment.len().saturating_sub(segment.trim_start().len());
+            let trimmed = segment.trim_start().trim_end();
+            let (normalized, consume_end) =
+                if let Some(matched_length) = self.matched_tag_prefix(trimmed) {
+                    let remainder = trimmed[matched_length..].trim_start();
+                    if remainder.is_empty() {
+                        (trimmed.to_string(), end)
+                    } else {
+                        (
+                            trimmed[..matched_length].trim().to_string(),
+                            start + 1 + leading_whitespace + matched_length,
+                        )
+                    }
+                } else {
+                    (query, end)
+                };
+            if !normalized.is_empty() && !tag_queries.contains(&normalized) {
+                tag_queries.push(normalized);
             }
-            cursor = end;
+            cursor = consume_end;
         }
 
         if cursor < raw.len() {
@@ -3285,6 +3335,12 @@ impl App {
         else {
             return false;
         };
+        if let Some((_, matched_length)) = self.matched_project_prefix(query.as_str(), None) {
+            let remainder = query[matched_length..].trim_start();
+            if !remainder.is_empty() {
+                return false;
+            }
+        }
         let suggestions = self.project_suggestions(query.as_str());
         let Some(project) = suggestions
             .get(
@@ -3318,6 +3374,12 @@ impl App {
         else {
             return Ok(false);
         };
+        if let Some(matched_length) = self.matched_tag_prefix(query.as_str()) {
+            let remainder = query[matched_length..].trim_start();
+            if !remainder.is_empty() {
+                return Ok(false);
+            }
+        }
         let suggestions = self.tag_suggestions(query.as_str());
         let tag_name = if let Some(tag) = suggestions
             .get(
@@ -5521,8 +5583,17 @@ impl App {
                 self.task_input = Some(input);
             }
             KeyCode::Enter => {
-                if self.accept_task_input_project_suggestion(&mut input)
-                    || self.accept_or_create_task_input_tag_token(&mut input, now)?
+                if self.accept_task_input_project_suggestion(&mut input) {
+                    self.task_input = Some(input);
+                    return Ok(true);
+                }
+                if self
+                    .active_tag_query(input.value.as_str(), input.cursor)
+                    .is_some_and(|(_, _, query)| {
+                        !query.chars().any(char::is_whitespace)
+                            && !self.has_exact_tag_name(query.as_str())
+                    })
+                    && self.accept_or_create_task_input_tag_token(&mut input, now)?
                 {
                     self.task_input = Some(input);
                     return Ok(true);
@@ -6517,8 +6588,8 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 
     use crate::config::{AppConfig, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings};
-    use crate::domain::{ProjectColor, ProjectId, TaskDue, TaskId, TaskStatus};
-    use crate::storage::{Database, ProjectRepository, TaskRepository};
+    use crate::domain::{ProjectColor, ProjectId, TagColor, TaskDue, TaskId, TaskStatus};
+    use crate::storage::{Database, ProjectRepository, TagRepository, TaskRepository};
     use crate::task_nlp::parse_task_input;
     use crate::theme::ThemePalette;
 
@@ -7493,6 +7564,260 @@ mod tests {
             app.parse_tags_field_queries("@Deep Work @Personal".trim()),
             vec!["Deep Work".to_string(), "Personal".to_string()]
         );
+    }
+
+    #[test]
+    fn create_popup_single_enter_parses_tags_project_and_due_from_inline_text() {
+        let mut app = test_app();
+        let project = app
+            .database
+            .project_repository()
+            .create(
+                "Another Project",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "@Work @Next Action #Another Project And another task tomorrow".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should submit task");
+
+        assert!(app.task_input_view().is_none());
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "And another task");
+        assert_eq!(task.project_id, project.id);
+        assert_eq!(
+            task.due.as_ref().map(|due| due.date),
+            Some(app.today() + chrono::Days::new(1))
+        );
+
+        let task_tags = app
+            .task_tags(task.id)
+            .into_iter()
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            task_tags,
+            vec!["Work".to_string(), "Next Action".to_string()]
+        );
+    }
+
+    #[test]
+    fn create_popup_single_enter_parses_project_first_then_tags_and_due() {
+        let mut app = test_app();
+        let project = app
+            .database
+            .project_repository()
+            .create(
+                "Another Project",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.database
+            .tag_repository()
+            .create("Work", TagColor::Blue, false, Local::now())
+            .expect("work tag should create");
+        app.database
+            .tag_repository()
+            .create("Next Action", TagColor::Green, false, Local::now())
+            .expect("next action tag should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "#Another Project @Work @Next Action And another task tomorrow".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should submit task");
+
+        assert!(app.task_input_view().is_none());
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "And another task");
+        assert_eq!(task.project_id, project.id);
+        assert_eq!(
+            task.due.as_ref().map(|due| due.date),
+            Some(app.today() + chrono::Days::new(1))
+        );
+
+        let task_tags = app
+            .task_tags(task.id)
+            .into_iter()
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            task_tags,
+            vec!["Work".to_string(), "Next Action".to_string()]
+        );
+    }
+
+    #[test]
+    fn create_popup_single_enter_parses_tag_project_tag_title_recurring_tag() {
+        let mut app = test_app();
+        let project = app
+            .database
+            .project_repository()
+            .create(
+                "Another Project",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.database
+            .tag_repository()
+            .create("Work", TagColor::Blue, false, Local::now())
+            .expect("work tag should create");
+        app.database
+            .tag_repository()
+            .create("Next Action", TagColor::Green, false, Local::now())
+            .expect("next action tag should create");
+        app.database
+            .tag_repository()
+            .create("Urgent", TagColor::Red, false, Local::now())
+            .expect("urgent tag should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "@Work #Another Project @Next Action Finish docs every day @Urgent".chars()
+        {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should submit task");
+
+        assert!(app.task_input_view().is_none());
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "Finish docs");
+        assert_eq!(task.project_id, project.id);
+        assert!(task.due.as_ref().is_some_and(|due| due.is_recurring));
+
+        let mut task_tags = app
+            .task_tags(task.id)
+            .into_iter()
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        task_tags.sort();
+        assert_eq!(
+            task_tags,
+            vec![
+                "Next Action".to_string(),
+                "Urgent".to_string(),
+                "Work".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn create_popup_single_enter_parses_tag_title_project_tag_due_tag() {
+        let mut app = test_app();
+        let project = app
+            .database
+            .project_repository()
+            .create(
+                "Another Project",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.database
+            .tag_repository()
+            .create("Work", TagColor::Blue, false, Local::now())
+            .expect("work tag should create");
+        app.database
+            .tag_repository()
+            .create("Next Action", TagColor::Green, false, Local::now())
+            .expect("next action tag should create");
+        app.database
+            .tag_repository()
+            .create("Urgent", TagColor::Red, false, Local::now())
+            .expect("urgent tag should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "@Work Finish docs #Another Project @Next Action tomorrow @Urgent".chars()
+        {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should submit task");
+
+        assert!(app.task_input_view().is_none());
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "Finish docs");
+        assert_eq!(task.project_id, project.id);
+        assert_eq!(
+            task.due.as_ref().map(|due| due.date),
+            Some(app.today() + chrono::Days::new(1))
+        );
+
+        let mut task_tags = app
+            .task_tags(task.id)
+            .into_iter()
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        task_tags.sort();
+        assert_eq!(
+            task_tags,
+            vec![
+                "Next Action".to_string(),
+                "Urgent".to_string(),
+                "Work".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn create_popup_enter_accepts_active_inline_tag_suggestion() {
+        let mut app = test_app();
+        app.database
+            .tag_repository()
+            .create("Work", TagColor::Blue, false, Local::now())
+            .expect("work tag should create");
+        app.database
+            .tag_repository()
+            .create("Next Action", TagColor::Green, false, Local::now())
+            .expect("next action tag should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "@Work @next".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should accept active tag");
+
+        let input = app
+            .task_input_view()
+            .expect("input popup should stay open after tag acceptance");
+        assert_eq!(input.value, "@Work @Next Action ");
     }
 
     #[test]
