@@ -5169,7 +5169,7 @@ fn format_history_row(
     let timing = format!(
         "{}/{}",
         format_compact_duration(row.focus_seconds),
-        format_compact_duration(row.break_seconds)
+        format_compact_break_duration(row.break_seconds)
     );
     let prefix = format!("{}  {}  {}", row.started_at.format("%H:%M"), symbol, timing);
     let task_text = row.task_title.as_deref().unwrap_or("-");
@@ -5621,6 +5621,15 @@ fn format_compact_duration(total_seconds: u32) -> String {
     }
 }
 
+fn format_compact_break_duration(total_seconds: u32) -> String {
+    if total_seconds > 60 {
+        let rounded_minutes = ((total_seconds as f64) / 60.0).round() as u32;
+        format!("{rounded_minutes:02}m")
+    } else {
+        format_compact_duration(total_seconds)
+    }
+}
+
 fn assigned_task_line(
     app: &App,
     _symbols: Symbols,
@@ -5908,11 +5917,12 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 mod tests {
     use super::{
         FormPreviewPanelView, PreviewLineView, STATUS_BAR_GLOBAL_SHORTCUTS, TaskTagRowSegment,
-        footer_with_filter_indicator, format_task_tags_for_row, history_footer_hints,
-        input_window_view, is_status_bar_global_focus_tip, markdown_first_plain_line,
-        markdown_inline_spans, markdown_inline_tokens, navigation_group_status_bar_tips,
-        preview_panel_lines, preview_panel_required_height, statistics_footer_hints,
-        status_bar_keys_label, task_details_footer_hints, timer_footer_hints,
+        footer_with_filter_indicator, format_compact_break_duration, format_task_tags_for_row,
+        history_footer_hints, input_window_view, is_status_bar_global_focus_tip,
+        markdown_first_plain_line, markdown_inline_spans, markdown_inline_tokens,
+        navigation_group_status_bar_tips, preview_panel_lines, preview_panel_required_height,
+        statistics_footer_hints, status_bar_keys_label, task_details_footer_hints,
+        timer_footer_hints,
     };
     use crate::app::{ShortcutTip, SidebarTab};
     use crate::config::GlyphMode;
@@ -6247,6 +6257,21 @@ mod tests {
         assert!(projects.iter().any(|tip| tip.description == "new task"));
         assert!(tags.iter().any(|tip| tip.description == "new task"));
         assert!(!filters.iter().any(|tip| tip.description == "new task"));
+    }
+
+    #[test]
+    fn compact_break_duration_rounds_to_minutes_when_over_one_minute() {
+        assert_eq!(format_compact_break_duration(61), "01m");
+        assert_eq!(format_compact_break_duration(89), "01m");
+        assert_eq!(format_compact_break_duration(90), "02m");
+        assert_eq!(format_compact_break_duration(125), "02m");
+    }
+
+    #[test]
+    fn compact_break_duration_keeps_seconds_when_one_minute_or_less() {
+        assert_eq!(format_compact_break_duration(0), "00m");
+        assert_eq!(format_compact_break_duration(45), "45s");
+        assert_eq!(format_compact_break_duration(60), "01m");
     }
 }
 
