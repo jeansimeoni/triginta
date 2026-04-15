@@ -4991,16 +4991,11 @@ fn assigned_task_line(
 }
 
 fn assigned_note_line(app: &App, palette: ThemePalette, width: u16) -> Line<'static> {
-    let note = app.pending_focus_note();
-    let first_line = note
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(str::trim);
-    match first_line {
+    match markdown_first_plain_line(app.pending_focus_note(), palette) {
         Some(line) => Line::from(vec![
             Span::styled("Notes: ", Style::default().fg(palette.subtle_text)),
             Span::styled(
-                ellipsize_end(line, width.saturating_sub(7) as usize),
+                ellipsize_end(line.as_str(), width.saturating_sub(7) as usize),
                 Style::default().fg(palette.text),
             ),
         ]),
@@ -5009,6 +5004,21 @@ fn assigned_note_line(app: &App, palette: ThemePalette, width: u16) -> Line<'sta
             Style::default().fg(palette.subtle_text),
         )]),
     }
+}
+
+fn markdown_first_plain_line(markdown: &str, palette: ThemePalette) -> Option<String> {
+    markdown_to_lines(markdown, palette)
+        .into_iter()
+        .map(|rendered| {
+            rendered
+                .line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .map(|line| line.trim().to_string())
+        .find(|line| !line.is_empty())
 }
 
 fn timer_color(phase: TimerPhase, palette: ThemePalette) -> Color {
@@ -5203,8 +5213,9 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 mod tests {
     use super::{
         FormPreviewPanelView, PreviewLineView, Symbols, TaskTagRowSegment,
-        format_task_tags_for_row, input_window_view, markdown_inline_spans, markdown_inline_tokens,
-        preview_panel_lines, preview_panel_required_height,
+        format_task_tags_for_row, input_window_view, markdown_first_plain_line,
+        markdown_inline_spans, markdown_inline_tokens, preview_panel_lines,
+        preview_panel_required_height,
     };
     use crate::config::GlyphMode;
     use crate::domain::TagColor;
@@ -5423,6 +5434,13 @@ mod tests {
         assert_eq!(inline.hyperlinks[0].start_col, 6);
         assert_eq!(inline.hyperlinks[0].text, "Rust");
         assert_eq!(inline.hyperlinks[0].url, "https://www.rust-lang.org/");
+    }
+
+    #[test]
+    fn markdown_first_plain_line_strips_inline_markdown_markers() {
+        let line = markdown_first_plain_line("**Bold** and `code` text", test_palette())
+            .expect("plain preview line should exist");
+        assert_eq!(line, "Bold and code text");
     }
 }
 
