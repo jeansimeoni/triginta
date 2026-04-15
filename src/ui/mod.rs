@@ -2564,44 +2564,143 @@ fn help_lines(
 
 fn footer_shortcuts_line(app: &App, symbols: Symbols, width: usize) -> String {
     let mut tips = Vec::new();
-    tips.extend_from_slice(&[
-        ShortcutTip {
-            keys: "1-5",
-            description: "focus",
-        },
-        ShortcutTip {
-            keys: "Tab",
-            description: "next panel",
-        },
-        ShortcutTip {
-            keys: "?",
-            description: "help",
-        },
-        ShortcutTip {
-            keys: "q",
-            description: "quit",
-        },
-    ]);
-    tips.extend_from_slice(app.focused_panel_shortcuts());
+    tips.extend_from_slice(STATUS_BAR_GLOBAL_SHORTCUTS);
+    tips.extend(status_bar_panel_shortcuts(app));
 
     let mut parts = Vec::new();
     for tip in tips {
-        parts.push(format!(
+        let part = format!(
             "{} {}",
             status_bar_keys_label(tip.keys, symbols),
             tip.description
-        ));
+        );
+        if !parts.contains(&part) {
+            parts.push(part);
+        }
     }
 
     fit_footer_parts(parts.as_slice(), width)
 }
 
-fn status_bar_keys_label(keys: &str, symbols: Symbols) -> String {
-    if !symbols.is_ascii() && keys == "/" {
-        symbols.search.to_string()
-    } else {
-        keys.to_string()
+fn status_bar_panel_shortcuts(app: &App) -> Vec<ShortcutTip> {
+    if app.focused_panel() == PanelFocus::Navigation {
+        return navigation_group_status_bar_tips(app.active_sidebar_tab());
     }
+
+    app.focused_panel_shortcuts()
+        .iter()
+        .copied()
+        .filter(|tip| !is_status_bar_global_focus_tip(tip))
+        .collect()
+}
+
+fn status_bar_keys_label(keys: &str, symbols: Symbols) -> String {
+    if symbols.is_ascii() {
+        return keys.to_string();
+    }
+
+    if keys == "/" {
+        return symbols.search.to_string();
+    }
+
+    let mut rendered = keys.to_string();
+    for (from, to) in [
+        ("Shift+Tab", "⇤"),
+        ("S-Tab", "⇤"),
+        ("Tab", "⇥"),
+        ("Enter", "↵"),
+        ("Esc", "⎋"),
+        ("Space", "␠"),
+        ("Left Arrow", "←"),
+        ("Right Arrow", "→"),
+        ("Up Arrow", "↑"),
+        ("Down Arrow", "↓"),
+    ] {
+        rendered = rendered.replace(from, to);
+    }
+
+    rendered
+}
+
+const STATUS_BAR_GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "1-8/Tab",
+        description: "focus panel",
+    },
+    ShortcutTip {
+        keys: "?",
+        description: "help",
+    },
+    ShortcutTip {
+        keys: "q",
+        description: "quit",
+    },
+];
+
+fn is_status_bar_global_focus_tip(tip: &ShortcutTip) -> bool {
+    let compact = tip.keys.replace(' ', "").to_ascii_lowercase();
+    compact.contains("1-8") && compact.contains("tab")
+}
+
+fn navigation_group_status_bar_tips(active_tab: SidebarTab) -> Vec<ShortcutTip> {
+    let mut tips = vec![
+        ShortcutTip {
+            keys: "j/k or ↑/↓",
+            description: "move",
+        },
+        ShortcutTip {
+            keys: "PgUp/PgDn",
+            description: "page",
+        },
+        ShortcutTip {
+            keys: "Home/End",
+            description: "jump first/last",
+        },
+    ];
+
+    if matches!(
+        active_tab,
+        SidebarTab::Projects | SidebarTab::Tags | SidebarTab::Filters
+    ) {
+        tips.extend([
+            ShortcutTip {
+                keys: "C/e/d",
+                description: "new/edit/delete",
+            },
+            ShortcutTip {
+                keys: "o",
+                description: "sort",
+            },
+            ShortcutTip {
+                keys: "J/K",
+                description: "reorder",
+            },
+            ShortcutTip {
+                keys: "f",
+                description: "toggle favorite",
+            },
+        ]);
+    }
+
+    if matches!(active_tab, SidebarTab::Projects | SidebarTab::Tags) {
+        tips.push(ShortcutTip {
+            keys: "c",
+            description: "new task",
+        });
+    }
+
+    tips.extend([
+        ShortcutTip {
+            keys: "Enter",
+            description: "open task list",
+        },
+        ShortcutTip {
+            keys: "/",
+            description: "search",
+        },
+    ]);
+
+    tips
 }
 
 fn fit_footer_parts(parts: &[String], width: usize) -> String {
@@ -5375,11 +5474,14 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 #[cfg(test)]
 mod tests {
     use super::{
-        FormPreviewPanelView, PreviewLineView, TaskTagRowSegment, format_task_tags_for_row,
-        history_footer_hints, input_window_view, markdown_first_plain_line, markdown_inline_spans,
-        markdown_inline_tokens, preview_panel_lines, preview_panel_required_height,
-        statistics_footer_hints, task_details_footer_hints, timer_footer_hints,
+        FormPreviewPanelView, PreviewLineView, STATUS_BAR_GLOBAL_SHORTCUTS, TaskTagRowSegment,
+        format_task_tags_for_row, history_footer_hints, input_window_view,
+        is_status_bar_global_focus_tip, markdown_first_plain_line, markdown_inline_spans,
+        markdown_inline_tokens, navigation_group_status_bar_tips, preview_panel_lines,
+        preview_panel_required_height, statistics_footer_hints, status_bar_keys_label,
+        task_details_footer_hints, timer_footer_hints,
     };
+    use crate::app::{ShortcutTip, SidebarTab};
     use crate::config::GlyphMode;
     use crate::domain::TagColor;
     use crate::theme::{ProjectColorPalette, ThemePalette};
@@ -5640,6 +5742,68 @@ mod tests {
 
         assert!(ascii.contains("run"));
         assert!(!nerd.contains("run"));
+    }
+
+    #[test]
+    fn status_bar_global_shortcuts_use_compact_focus_tip() {
+        assert_eq!(STATUS_BAR_GLOBAL_SHORTCUTS[0].keys, "1-8/Tab");
+        assert_eq!(STATUS_BAR_GLOBAL_SHORTCUTS[0].description, "focus panel");
+    }
+
+    #[test]
+    fn status_bar_global_focus_filter_detects_duplicate_focus_entries() {
+        let tip = ShortcutTip {
+            keys: "1-8 / Tab",
+            description: "change focus",
+        };
+        assert!(is_status_bar_global_focus_tip(&tip));
+    }
+
+    #[test]
+    fn status_bar_keys_label_keeps_ascii_tokens() {
+        let symbols = Symbols::new(GlyphMode::Ascii);
+        assert_eq!(
+            status_bar_keys_label("Tab/S-Tab Enter Esc Space", symbols),
+            "Tab/S-Tab Enter Esc Space"
+        );
+    }
+
+    #[test]
+    fn status_bar_keys_label_uses_nerd_mode_glyphs_for_common_keys() {
+        let symbols = Symbols::new(GlyphMode::NerdFonts);
+        let rendered = status_bar_keys_label("Tab/S-Tab Enter Esc Space", symbols);
+        assert!(rendered.contains("⇥"));
+        assert!(rendered.contains("⇤"));
+        assert!(rendered.contains("↵"));
+        assert!(rendered.contains("⎋"));
+        assert!(rendered.contains("␠"));
+    }
+
+    #[test]
+    fn navigation_group_status_bar_tips_hide_switch_tab_hint() {
+        let tips = navigation_group_status_bar_tips(SidebarTab::Projects);
+        assert!(!tips.iter().any(|tip| tip.description == "switch tab"));
+    }
+
+    #[test]
+    fn navigation_group_status_bar_tips_keep_common_order() {
+        let tips = navigation_group_status_bar_tips(SidebarTab::Filters);
+        assert_eq!(tips[0].description, "move");
+        assert_eq!(tips[1].description, "page");
+        assert_eq!(tips[2].description, "jump first/last");
+        assert_eq!(tips[tips.len() - 2].description, "open task list");
+        assert_eq!(tips[tips.len() - 1].description, "search");
+    }
+
+    #[test]
+    fn navigation_group_status_bar_tips_limit_new_task_to_projects_and_tags() {
+        let projects = navigation_group_status_bar_tips(SidebarTab::Projects);
+        let tags = navigation_group_status_bar_tips(SidebarTab::Tags);
+        let filters = navigation_group_status_bar_tips(SidebarTab::Filters);
+
+        assert!(projects.iter().any(|tip| tip.description == "new task"));
+        assert!(tags.iter().any(|tip| tip.description == "new task"));
+        assert!(!filters.iter().any(|tip| tip.description == "new task"));
     }
 }
 
