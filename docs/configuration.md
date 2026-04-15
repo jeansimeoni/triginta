@@ -42,6 +42,9 @@ pomodoro_length = "25m"
 short_break_length = "5m"
 long_break_length = "15m"
 long_break_interval = 4
+
+[stats]
+daily_target = "150m"
 ```
 
 ### YAML example
@@ -64,6 +67,9 @@ timer:
   short_break_length: 5m
   long_break_length: 15m
   long_break_interval: 4
+
+stats:
+  daily_target: 150m
 ```
 
 ## UI
@@ -208,6 +214,22 @@ Allowed values:
 Default:
 
 - `false`
+
+## Stats
+
+`stats.daily_target` sets the daily focus-time goal used by panel 8 statistics.
+This target is compared against completed focus sessions for the current day.
+
+Allowed values:
+
+- any positive duration string or seconds integer accepted by the duration parser
+  (examples: `"90m"`, `"2h"`, `5400`)
+
+Default:
+
+- `150m`
+
+If omitted, Triginta uses the default.
 
 ## Theme Files
 

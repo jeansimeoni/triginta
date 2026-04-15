@@ -18,9 +18,10 @@ use crate::{
         TaskSortOrder, TimerSettings, init_tracing, load_app_config, save_app_config,
     },
     domain::{
-        DayHistorySummary, Filter, FilterColor, FilterId, FilterUpdate, HistoryStats, Project,
-        ProjectColor, ProjectId, ProjectUpdate, SessionEntry, SessionKind, SessionOutcome, Tag,
-        TagColor, TagId, TagUpdate, Task, TaskId, TaskPriority, TaskStatus, TaskUpdate,
+        DayHistorySummary, Filter, FilterColor, FilterId, FilterUpdate, FocusDaySummary,
+        FocusHourSummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate,
+        SessionEntry, SessionKind, SessionOutcome, Tag, TagColor, TagId, TagUpdate, Task, TaskId,
+        TaskPriority, TaskStatus, TaskUpdate,
     },
     filters,
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
@@ -418,6 +419,8 @@ pub struct ScreenData {
     pub today_stats: HistoryStats,
     pub weekly_summaries: Vec<DayHistorySummary>,
     pub weekly_stats: HistoryStats,
+    pub completed_focus_days_30: Vec<FocusDaySummary>,
+    pub completed_focus_hours_30: Vec<FocusHourSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -2840,6 +2843,10 @@ impl App {
 
     pub fn timer_settings(&self) -> &TimerSettings {
         &self.timer_settings
+    }
+
+    pub fn daily_focus_target_minutes(&self) -> u32 {
+        self.config.stats.daily_target.as_secs().div_ceil(60) as u32
     }
 
     pub fn timer_view(&self) -> TimerView {
@@ -9044,6 +9051,7 @@ impl App {
         let now = Local::now();
         let (started_at, ended_at) = today_bounds(now);
         let (weekly_started_at, weekly_ended_at) = last_7_days_bounds(now);
+        let (monthly_started_at, monthly_ended_at) = last_30_days_bounds(now);
         self.screen_data.history_entries = self
             .database
             .pomodoro_repository()
@@ -9060,6 +9068,14 @@ impl App {
             .database
             .pomodoro_repository()
             .stats_for_day(weekly_started_at, weekly_ended_at)?;
+        self.screen_data.completed_focus_days_30 = self
+            .database
+            .pomodoro_repository()
+            .summarize_completed_focus_days(monthly_started_at, monthly_ended_at)?;
+        self.screen_data.completed_focus_hours_30 = self
+            .database
+            .pomodoro_repository()
+            .summarize_completed_focus_hours(monthly_started_at, monthly_ended_at)?;
         self.history_scroll = self.history_scroll.min(self.max_history_scroll());
         Ok(())
     }
@@ -9154,6 +9170,7 @@ pub fn run(options: RunOptions) -> Result<()> {
     let now = Local::now();
     let (started_at, ended_at) = today_bounds(now);
     let (weekly_started_at, weekly_ended_at) = last_7_days_bounds(now);
+    let (monthly_started_at, monthly_ended_at) = last_30_days_bounds(now);
     let screen_data = ScreenData {
         tasks: database.task_repository().list_all()?,
         projects: database.project_repository().list_all()?,
@@ -9172,6 +9189,12 @@ pub fn run(options: RunOptions) -> Result<()> {
         weekly_stats: database
             .pomodoro_repository()
             .stats_for_day(weekly_started_at, weekly_ended_at)?,
+        completed_focus_days_30: database
+            .pomodoro_repository()
+            .summarize_completed_focus_days(monthly_started_at, monthly_ended_at)?,
+        completed_focus_hours_30: database
+            .pomodoro_repository()
+            .summarize_completed_focus_hours(monthly_started_at, monthly_ended_at)?,
     };
 
     let provider = DisabledTodoistProvider;
@@ -9316,6 +9339,18 @@ fn today_bounds(now: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>) {
 fn last_7_days_bounds(now: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>) {
     let (_, today_end) = today_bounds(now);
     let start_date = now.date_naive() - chrono::Days::new(6);
+    let start = start_date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight should be valid")
+        .and_local_timezone(Local)
+        .single()
+        .expect("local midnight should be representable");
+    (start, today_end)
+}
+
+fn last_30_days_bounds(now: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>) {
+    let (_, today_end) = today_bounds(now);
+    let start_date = now.date_naive() - chrono::Days::new(29);
     let start = start_date
         .and_hms_opt(0, 0, 0)
         .expect("midnight should be valid")

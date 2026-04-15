@@ -5,9 +5,10 @@ use chrono::{DateTime, Local, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
-    DayHistorySummary, Filter, FilterColor, FilterId, FilterUpdate, HistoryStats, Project,
-    ProjectColor, ProjectId, ProjectUpdate, SessionEntry, SessionKind, SessionOutcome, Tag,
-    TagColor, TagId, TagUpdate, Task, TaskDue, TaskId, TaskPriority, TaskStatus, TaskUpdate,
+    DayHistorySummary, Filter, FilterColor, FilterId, FilterUpdate, FocusDaySummary,
+    FocusHourSummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate, SessionEntry,
+    SessionKind, SessionOutcome, Tag, TagColor, TagId, TagUpdate, Task, TaskDue, TaskId,
+    TaskPriority, TaskStatus, TaskUpdate,
 };
 
 // Keeping the schema as a string literal makes bootstrap simple for this early
@@ -195,6 +196,16 @@ pub trait PomodoroRepository {
         started_at: DateTime<Local>,
         ended_at: DateTime<Local>,
     ) -> Result<Vec<DayHistorySummary>>;
+    fn summarize_completed_focus_days(
+        &self,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+    ) -> Result<Vec<FocusDaySummary>>;
+    fn summarize_completed_focus_hours(
+        &self,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+    ) -> Result<Vec<FocusHourSummary>>;
     fn create(
         &self,
         task_id: Option<TaskId>,
@@ -1396,6 +1407,62 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
             .context("failed to summarize history by day")
     }
 
+    fn summarize_completed_focus_days(
+        &self,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+    ) -> Result<Vec<FocusDaySummary>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                DATE(started_at) AS day,
+                COALESCE(SUM(duration_seconds), 0) AS focus_seconds
+             FROM session_history
+             WHERE started_at >= ?1 AND started_at < ?2
+               AND kind IN ('focus', 'work')
+               AND outcome = 'completed'
+             GROUP BY DATE(started_at)
+             ORDER BY DATE(started_at) ASC",
+        )?;
+
+        let rows = statement.query_map(params![started_at, ended_at], |row| {
+            Ok(FocusDaySummary {
+                day: row.get(0)?,
+                focus_seconds: row.get::<_, i64>(1)? as u32,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to summarize completed focus by day")
+    }
+
+    fn summarize_completed_focus_hours(
+        &self,
+        started_at: DateTime<Local>,
+        ended_at: DateTime<Local>,
+    ) -> Result<Vec<FocusHourSummary>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                CAST(strftime('%H', started_at) AS INTEGER) AS hour,
+                COALESCE(SUM(duration_seconds), 0) AS focus_seconds
+             FROM session_history
+             WHERE started_at >= ?1 AND started_at < ?2
+               AND kind IN ('focus', 'work')
+               AND outcome = 'completed'
+             GROUP BY CAST(strftime('%H', started_at) AS INTEGER)
+             ORDER BY CAST(strftime('%H', started_at) AS INTEGER) ASC",
+        )?;
+
+        let rows = statement.query_map(params![started_at, ended_at], |row| {
+            Ok(FocusHourSummary {
+                hour: row.get::<_, i64>(0)? as u8,
+                focus_seconds: row.get::<_, i64>(1)? as u32,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to summarize completed focus by hour")
+    }
+
     fn create(
         &self,
         task_id: Option<TaskId>,
@@ -1501,6 +1568,7 @@ mod tests {
         FilterColor, FilterUpdate, ProjectColor, ProjectUpdate, TagColor, TagUpdate, TaskDue,
         TaskPriority, TaskStatus, TaskUpdate,
     };
+    use crate::domain::{SessionKind, SessionOutcome};
 
     use super::{
         Database, FilterRepository, PomodoroRepository, ProjectRepository, TagRepository,
@@ -1538,6 +1606,106 @@ mod tests {
         assert_eq!(stats.total_work_seconds, 0);
         assert_eq!(stats.total_break_seconds, 0);
         assert_eq!(stats.completed_tasks, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn pomodoro_repository_summarizes_completed_focus_for_stats_panels() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let repository = database.pomodoro_repository();
+        let day = Local::now().date_naive();
+        let day_start = day
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight should be valid")
+            .and_local_timezone(Local)
+            .single()
+            .expect("local midnight should be representable");
+        let range_start = day_start - chrono::Duration::days(1);
+        let range_end = day_start + chrono::Duration::days(1);
+
+        let start_9 = day
+            .and_hms_opt(9, 0, 0)
+            .expect("time should be valid")
+            .and_local_timezone(Local)
+            .single()
+            .expect("time should be representable");
+        let end_9 = start_9 + chrono::Duration::minutes(25);
+        repository.record_session_entry(
+            None,
+            "",
+            SessionKind::Focus,
+            SessionOutcome::Completed,
+            None,
+            start_9,
+            end_9,
+            1500,
+        )?;
+
+        let start_11 = day
+            .and_hms_opt(11, 0, 0)
+            .expect("time should be valid")
+            .and_local_timezone(Local)
+            .single()
+            .expect("time should be representable");
+        let end_11 = start_11 + chrono::Duration::minutes(25);
+        repository.record_session_entry(
+            None,
+            "",
+            SessionKind::Focus,
+            SessionOutcome::Voided,
+            None,
+            start_11,
+            end_11,
+            1500,
+        )?;
+
+        let start_14 = day
+            .and_hms_opt(14, 0, 0)
+            .expect("time should be valid")
+            .and_local_timezone(Local)
+            .single()
+            .expect("time should be representable");
+        let end_14 = start_14 + chrono::Duration::minutes(20);
+        repository.record_session_entry(
+            None,
+            "",
+            SessionKind::Focus,
+            SessionOutcome::Completed,
+            None,
+            start_14,
+            end_14,
+            1200,
+        )?;
+
+        let break_start = day
+            .and_hms_opt(15, 0, 0)
+            .expect("time should be valid")
+            .and_local_timezone(Local)
+            .single()
+            .expect("time should be representable");
+        let break_end = break_start + chrono::Duration::minutes(5);
+        repository.record_session_entry(
+            None,
+            "",
+            SessionKind::ShortBreak,
+            SessionOutcome::Completed,
+            None,
+            break_start,
+            break_end,
+            300,
+        )?;
+
+        let day_summary = repository.summarize_completed_focus_days(range_start, range_end)?;
+        assert_eq!(day_summary.len(), 1);
+        assert_eq!(day_summary[0].day, day);
+        assert_eq!(day_summary[0].focus_seconds, 2700);
+
+        let hourly = repository.summarize_completed_focus_hours(range_start, range_end)?;
+        assert_eq!(hourly.len(), 2);
+        let mut seconds = hourly.iter().map(|bucket| bucket.focus_seconds).collect::<Vec<_>>();
+        seconds.sort_unstable();
+        assert_eq!(seconds, vec![1200, 1500]);
 
         Ok(())
     }

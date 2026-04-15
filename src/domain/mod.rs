@@ -656,6 +656,18 @@ pub struct DayHistorySummary {
     pub break_seconds: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusDaySummary {
+    pub day: chrono::NaiveDate,
+    pub focus_seconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusHourSummary {
+    pub hour: u8,
+    pub focus_seconds: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HistoryStats {
     pub total_sessions: usize,

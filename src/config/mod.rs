@@ -341,9 +341,32 @@ impl TimerSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatsSettings {
+    pub daily_target: Duration,
+}
+
+impl Default for StatsSettings {
+    fn default() -> Self {
+        Self {
+            daily_target: Duration::from_secs(150 * 60),
+        }
+    }
+}
+
+impl StatsSettings {
+    fn validate(&self) -> Result<()> {
+        if self.daily_target.is_zero() {
+            bail!("stats.daily-target must be greater than zero");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     pub ui: UiConfig,
     pub timer: TimerSettings,
+    pub stats: StatsSettings,
 }
 
 impl Default for AppConfig {
@@ -351,6 +374,7 @@ impl Default for AppConfig {
         Self {
             ui: UiConfig::default(),
             timer: TimerSettings::default(),
+            stats: StatsSettings::default(),
         }
     }
 }
@@ -392,6 +416,7 @@ impl Default for UiConfig {
 struct AppConfigFile {
     ui: UiConfig,
     timer: TimerConfigFile,
+    stats: StatsConfigFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -415,6 +440,16 @@ struct TimerConfigFile {
     long_break_interval: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+struct StatsConfigFile {
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
+    daily_target: Duration,
+}
+
 impl Default for TimerConfigFile {
     fn default() -> Self {
         let defaults = TimerSettings::default();
@@ -423,6 +458,15 @@ impl Default for TimerConfigFile {
             short_break_length: defaults.short_break_length,
             long_break_length: defaults.long_break_length,
             long_break_interval: defaults.long_break_interval,
+        }
+    }
+}
+
+impl Default for StatsConfigFile {
+    fn default() -> Self {
+        let defaults = StatsSettings::default();
+        Self {
+            daily_target: defaults.daily_target,
         }
     }
 }
@@ -437,6 +481,9 @@ impl From<AppConfigFile> for AppConfig {
                 long_break_length: value.timer.long_break_length,
                 long_break_interval: value.timer.long_break_interval,
             },
+            stats: StatsSettings {
+                daily_target: value.stats.daily_target,
+            },
         }
     }
 }
@@ -450,6 +497,9 @@ impl From<&AppConfig> for AppConfigFile {
                 short_break_length: value.timer.short_break_length,
                 long_break_length: value.timer.long_break_length,
                 long_break_interval: value.timer.long_break_interval,
+            },
+            stats: StatsConfigFile {
+                daily_target: value.stats.daily_target,
             },
         }
     }
@@ -508,11 +558,13 @@ pub fn load_app_config(paths: &AppPaths) -> Result<AppConfig> {
 
     let config = AppConfig::from(file_config);
     config.timer.validate()?;
+    config.stats.validate()?;
     Ok(config)
 }
 
 pub fn save_app_config(paths: &AppPaths, config: &AppConfig) -> Result<()> {
     config.timer.validate()?;
+    config.stats.validate()?;
     paths.ensure_dirs()?;
 
     let (path, format) = active_config_path(paths)?
@@ -726,6 +778,9 @@ pomodoro_length = "30m"
 short_break_length = "7m"
 long_break_length = "20m"
 long_break_interval = 5
+
+[stats]
+daily_target = "2h"
 "#,
         )
         .expect("config should be written");
@@ -739,6 +794,7 @@ long_break_interval = 5
         assert!(!config.ui.hide_completed_tasks);
         assert_eq!(config.timer.long_break_interval, 5);
         assert_eq!(config.timer.pomodoro_length, Duration::from_secs(30 * 60));
+        assert_eq!(config.stats.daily_target, Duration::from_secs(2 * 60 * 60));
     }
 
     #[test]
@@ -761,6 +817,8 @@ timer:
   short_break_length: 300
   long_break_length: 900
   long_break_interval: 4
+stats:
+  daily_target: 5400
 "#,
         )
         .expect("config should be written");
@@ -776,6 +834,7 @@ timer:
         assert_eq!(config.timer.short_break_length, Duration::from_secs(300));
         assert_eq!(config.timer.long_break_length, Duration::from_secs(900));
         assert_eq!(config.timer.long_break_interval, 4);
+        assert_eq!(config.stats.daily_target, Duration::from_secs(5400));
     }
 
     #[test]
@@ -818,6 +877,7 @@ timer:
         assert!(saved.contains("project_list_sort = \"task-count-asc\""));
         assert!(saved.contains("persist_project_list_sort = true"));
         assert!(saved.contains("hide_completed_tasks = false"));
+        assert!(saved.contains("daily_target = \"150m\""));
     }
 
     #[test]
@@ -852,7 +912,26 @@ timer:
         assert!(saved.contains("project_list_sort: name-asc"));
         assert!(saved.contains("persist_project_list_sort: true"));
         assert!(saved.contains("hide_completed_tasks: false"));
+        assert!(saved.contains("daily_target: 150m"));
         assert!(!paths.config_toml_path.exists());
+    }
+
+    #[test]
+    fn load_app_config_rejects_zero_stats_daily_target() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+        paths.ensure_dirs().expect("dirs should exist");
+        fs::write(
+            &paths.config_toml_path,
+            r#"[stats]
+daily_target = "0m"
+"#,
+        )
+        .expect("config should be written");
+
+        let error = load_app_config(&paths).expect_err("zero target should fail validation");
+        assert!(!error.to_string().is_empty());
     }
 
     #[test]

@@ -1,10 +1,13 @@
+use std::collections::HashMap;
+
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+        Axis, Bar, BarChart, BarGroup, Block, Borders, Chart, Clear, Dataset, GraphType,
+        Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
         calendar::{CalendarEventStore, Monthly},
     },
 };
@@ -110,14 +113,9 @@ fn render_right_panel(
         RightPanelTab::Tasks => {
             render_tasks_workspace(frame, app, area, symbols, app.focused_panel(), palette)
         }
-        RightPanelTab::Statistics => render_statistics_panel(
-            frame,
-            app.screen_data(),
-            area,
-            symbols,
-            app.focused_panel(),
-            palette,
-        ),
+        RightPanelTab::Statistics => {
+            render_statistics_panel(frame, app, area, symbols, app.focused_panel(), palette)
+        }
     }
 }
 
@@ -923,16 +921,23 @@ fn statistics_footer_indicator(
     data: &ScreenData,
     symbols: Symbols,
     palette: ThemePalette,
+    today_focus_minutes: u32,
+    target_minutes: u32,
+    progress_percent: u32,
 ) -> Line<'static> {
     Line::from(vec![Span::styled(
         format!(
-            " {} {}  |  {} {}  |  {} {}m ",
+            " {} {}  |  {} {}m/{}m ({}%)  |  {} {}  |  {} {} ",
             symbols.timer,
             data.today_stats.total_sessions,
+            symbols.stats,
+            today_focus_minutes,
+            target_minutes,
+            progress_percent,
             symbols.tasks,
             data.today_stats.completed_tasks,
             symbols.stats,
-            data.today_stats.total_minutes,
+            data.weekly_stats.total_sessions,
         ),
         Style::default().fg(palette.subtle_text),
     )])
@@ -1391,65 +1396,451 @@ fn markdown_inline_tokens(input: &str) -> Vec<MarkdownInlineToken> {
 
 fn render_statistics_panel(
     frame: &mut Frame<'_>,
-    data: &ScreenData,
+    app: &App,
     area: Rect,
     symbols: Symbols,
     focused_panel: PanelFocus,
     palette: ThemePalette,
 ) {
-    let completed_width = 24usize;
-    let total_minutes = data.today_stats.total_minutes;
-    let goal_minutes = 150u32;
-    let filled = ((total_minutes.min(goal_minutes) as f32 / goal_minutes as f32)
-        * completed_width as f32)
-        .round() as usize;
-    let graph = format!(
-        "[{}{}]",
-        symbols.bar_full.repeat(filled),
-        symbols
-            .bar_empty
-            .repeat(completed_width.saturating_sub(filled))
-    );
-
-    let lines = vec![
-        Line::from(vec![Span::styled(
-            format!("{} Pomodoro Statistics", symbols.stats),
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(""),
-        Line::from(format!(
-            "Sessions today: {}",
-            data.today_stats.total_sessions
-        )),
-        Line::from(format!("Focused minutes: {}", total_minutes)),
-        Line::from(format!(
-            "Completed tasks: {}",
-            data.today_stats.completed_tasks
-        )),
-        Line::from(""),
-        Line::from(format!("Daily goal      {}", graph)),
-        Line::from(format!("{total_minutes} / {goal_minutes} minutes")),
-        Line::from(""),
-        Line::from("This tab is reserved for charts, streaks,"),
-        Line::from("distributions, and longer-term summaries."),
-    ];
+    let data = app.screen_data();
+    let today_focus_minutes = today_completed_focus_minutes(data);
+    let daily_target_minutes = app.daily_focus_target_minutes().max(1);
+    let progress_percent = ((today_focus_minutes as f64 / daily_target_minutes as f64) * 100.0)
+        .round()
+        .clamp(0.0, 999.0) as u32;
+    let remaining_minutes = daily_target_minutes.saturating_sub(today_focus_minutes);
+    let focus_30 = completed_focus_minutes_last_30_days(data);
+    let (current_streak_days, best_streak_days) = goal_streak_days(&focus_30, daily_target_minutes);
+    let weekly_total_minutes = focus_30.iter().rev().take(7).map(|(_, minutes)| *minutes).sum::<u32>();
+    let weekly_average_minutes = (weekly_total_minutes as f64 / 7.0).round() as u32;
 
     let is_focused = focused_panel == PanelFocus::RightPane;
-    let stats = Paragraph::new(lines)
-        .block(
-            panel_block(
-                right_panel_title(RightPanelTab::Statistics, symbols, palette),
-                is_focused,
-                palette,
-            )
-            .title_bottom(statistics_footer_indicator(data, symbols, palette))
-            .title_bottom(statistics_footer_hints(symbols, is_focused, palette)),
-        )
-        .wrap(Wrap { trim: true });
+    let block = panel_block(
+        right_panel_title(RightPanelTab::Statistics, symbols, palette),
+        is_focused,
+        palette,
+    )
+    .title_bottom(statistics_footer_indicator(
+        data,
+        symbols,
+        palette,
+        today_focus_minutes,
+        daily_target_minutes,
+        progress_percent,
+    ))
+    .title_bottom(statistics_footer_hints(symbols, is_focused, palette));
 
-    frame.render_widget(stats, area);
+    let inner = block.inner(area);
+    let content = inner.inner(Margin {
+        vertical: 0,
+        horizontal: 1,
+    });
+    frame.render_widget(block, area);
+
+    if content.height < 8 || content.width < 48 {
+        let compact = vec![
+            Line::from(format!(
+                "Today {} / {} ({progress_percent}%)",
+                format_minutes_hm(today_focus_minutes),
+                format_minutes_hm(daily_target_minutes)
+            )),
+            Line::from(format!(
+                "Remaining {}  |  Streak {}d (best {}d)",
+                format_minutes_hm(remaining_minutes),
+                current_streak_days,
+                best_streak_days
+            )),
+            Line::from(format!("7d average {}", format_minutes_hm(weekly_average_minutes))),
+        ];
+        frame.render_widget(Paragraph::new(compact).wrap(Wrap { trim: true }), content);
+        return;
+    }
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(content);
+
+    let kpis = vec![
+        Line::from(vec![
+            Span::styled("Today ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                format!(
+                    "{} / {} ({progress_percent}%)",
+                    format_minutes_hm(today_focus_minutes),
+                    format_minutes_hm(daily_target_minutes),
+                ),
+                Style::default().fg(palette.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  Remaining {}", format_minutes_hm(remaining_minutes)),
+                Style::default().fg(palette.text),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!("Streak {}d", current_streak_days),
+                Style::default().fg(palette.success),
+            ),
+            Span::styled("  |  ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                format!("Best {}d", best_streak_days),
+                Style::default().fg(palette.success),
+            ),
+            Span::styled("  |  ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                format!("7d avg {}", format_minutes_hm(weekly_average_minutes)),
+                Style::default().fg(palette.text),
+            ),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(kpis).wrap(Wrap { trim: true }), sections[0]);
+
+    let chart_sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .split(sections[1]);
+
+    render_focus_trend_chart(
+        frame,
+        chart_sections[0],
+        focus_30.as_slice(),
+        daily_target_minutes,
+        palette,
+    );
+
+    render_statistics_bars(
+        frame,
+        chart_sections[1],
+        focus_30.as_slice(),
+        data,
+        palette,
+    );
+}
+
+fn today_completed_focus_minutes(data: &ScreenData) -> u32 {
+    let seconds = data
+        .history_entries
+        .iter()
+        .filter(|entry| {
+            matches!(entry.kind, SessionKind::Focus) && entry.outcome == SessionOutcome::Completed
+        })
+        .map(|entry| entry.duration_seconds)
+        .sum::<u32>();
+    seconds.div_ceil(60)
+}
+
+fn completed_focus_minutes_last_30_days(data: &ScreenData) -> Vec<(NaiveDate, u32)> {
+    let today = Local::now().date_naive();
+    let start = today - chrono::Days::new(29);
+    let by_day = data
+        .completed_focus_days_30
+        .iter()
+        .map(|summary| (summary.day, summary.focus_seconds.div_ceil(60)))
+        .collect::<HashMap<_, _>>();
+
+    (0..30)
+        .map(|offset| {
+            let day = start + chrono::Days::new(offset);
+            (day, by_day.get(&day).copied().unwrap_or(0))
+        })
+        .collect()
+}
+
+fn goal_streak_days(days: &[(NaiveDate, u32)], target_minutes: u32) -> (u32, u32) {
+    let mut best = 0_u32;
+    let mut current_run = 0_u32;
+    for (_, minutes) in days {
+        if *minutes >= target_minutes {
+            current_run += 1;
+            best = best.max(current_run);
+        } else {
+            current_run = 0;
+        }
+    }
+
+    let mut trailing = 0_u32;
+    for (_, minutes) in days.iter().rev() {
+        if *minutes >= target_minutes {
+            trailing += 1;
+        } else {
+            break;
+        }
+    }
+    (trailing, best)
+}
+
+fn format_minutes_hm(minutes: u32) -> String {
+    let hours = minutes / 60;
+    let rem_minutes = minutes % 60;
+    if hours == 0 {
+        format!("{rem_minutes}m")
+    } else if rem_minutes == 0 {
+        format!("{hours}h")
+    } else {
+        format!("{hours}h {rem_minutes}m")
+    }
+}
+
+fn render_focus_trend_chart(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focus_30: &[(NaiveDate, u32)],
+    target_minutes: u32,
+    palette: ThemePalette,
+) {
+    if area.height < 5 || area.width < 20 {
+        return;
+    }
+
+    let points = focus_30
+        .iter()
+        .enumerate()
+        .map(|(index, (_, minutes))| (index as f64, *minutes as f64))
+        .collect::<Vec<_>>();
+    let target_points = vec![(0.0, target_minutes as f64), (29.0, target_minutes as f64)];
+    let max_minutes = focus_30
+        .iter()
+        .map(|(_, minutes)| *minutes)
+        .max()
+        .unwrap_or(0)
+        .max(target_minutes)
+        .max(1);
+    let y_upper = ((max_minutes as f64) * 1.1).ceil().max(1.0);
+    let y_mid = (y_upper / 2.0).round();
+
+    let start_label = focus_30
+        .first()
+        .map(|(day, _)| day.format("%b %d").to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let mid_label = focus_30
+        .get(15)
+        .map(|(day, _)| day.format("%b %d").to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let end_label = focus_30
+        .last()
+        .map(|(day, _)| day.format("%b %d").to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    let datasets = vec![
+        Dataset::default()
+            .name("Focus")
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(palette.accent))
+            .data(&points),
+        Dataset::default()
+            .name("Target")
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(palette.success))
+            .data(&target_points),
+    ];
+
+    let chart = Chart::new(datasets)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.border))
+                .title("30d Focus Trend"),
+        )
+        .x_axis(
+            Axis::default()
+                .style(Style::default().fg(palette.subtle_text))
+                .bounds([0.0, 29.0])
+                .labels::<Vec<Line<'_>>>(vec![
+                    Line::from(start_label),
+                    Line::from(mid_label),
+                    Line::from(end_label),
+                ]),
+        )
+        .y_axis(
+            Axis::default()
+                .style(Style::default().fg(palette.subtle_text))
+                .bounds([0.0, y_upper])
+                .labels::<Vec<Line<'_>>>(vec![
+                    Line::from("0m"),
+                    Line::from(format!("{}m", y_mid as u32)),
+                    Line::from(format!("{}m", y_upper as u32)),
+                ]),
+        );
+    frame.render_widget(chart, area);
+}
+
+fn render_statistics_bars(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focus_30: &[(NaiveDate, u32)],
+    data: &ScreenData,
+    palette: ThemePalette,
+) {
+    if area.height < 5 || area.width < 20 {
+        return;
+    }
+
+    let sections = if area.width >= 96 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+                Constraint::Percentage(33),
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+                Constraint::Percentage(33),
+            ])
+            .split(area)
+    };
+
+    render_last_7_days_bars(frame, sections[0], focus_30, palette);
+    render_weekday_average_bars(frame, sections[1], focus_30, palette);
+    render_hourly_bars(frame, sections[2], data, palette);
+}
+
+fn render_last_7_days_bars(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focus_30: &[(NaiveDate, u32)],
+    palette: ThemePalette,
+) {
+    let bars = focus_30
+        .iter()
+        .rev()
+        .take(7)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|(day, minutes)| {
+            Bar::default()
+                .value(u64::from(*minutes))
+                .label(day.format("%a").to_string().into())
+                .value_style(Style::default().fg(palette.text))
+                .style(Style::default().fg(palette.accent))
+        })
+        .collect::<Vec<_>>();
+    let max = focus_30
+        .iter()
+        .rev()
+        .take(7)
+        .map(|(_, minutes)| u64::from(*minutes))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let chart = BarChart::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.border))
+                .title("Last 7 Days"),
+        )
+        .data(BarGroup::default().bars(&bars))
+        .bar_width(3)
+        .bar_gap(1)
+        .max(max);
+    frame.render_widget(chart, area);
+}
+
+fn render_weekday_average_bars(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focus_30: &[(NaiveDate, u32)],
+    palette: ThemePalette,
+) {
+    let mut sums = [0_u32; 7];
+    let mut counts = [0_u32; 7];
+    for (day, minutes) in focus_30 {
+        let index = day.weekday().num_days_from_monday() as usize;
+        sums[index] += *minutes;
+        counts[index] += 1;
+    }
+    let labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let bars = labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let avg = if counts[index] == 0 {
+                0
+            } else {
+                (sums[index] as f64 / counts[index] as f64).round() as u32
+            };
+            Bar::default()
+                .value(u64::from(avg))
+                .label((*label).into())
+                .value_style(Style::default().fg(palette.text))
+                .style(Style::default().fg(palette.success))
+        })
+        .collect::<Vec<_>>();
+    let max = labels
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            if counts[index] == 0 {
+                0
+            } else {
+                (sums[index] as f64 / counts[index] as f64).round() as u64
+            }
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let chart = BarChart::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.border))
+                .title("Weekday Avg (30d)"),
+        )
+        .data(BarGroup::default().bars(&bars))
+        .bar_width(3)
+        .bar_gap(1)
+        .max(max);
+    frame.render_widget(chart, area);
+}
+
+fn render_hourly_bars(frame: &mut Frame<'_>, area: Rect, data: &ScreenData, palette: ThemePalette) {
+    let mut totals = [0_u32; 24];
+    for bucket in &data.completed_focus_hours_30 {
+        let index = usize::from(bucket.hour.min(23));
+        totals[index] = bucket.focus_seconds.div_ceil(60);
+    }
+
+    let bars = (0..24)
+        .map(|hour| {
+            let label = if hour % 3 == 0 {
+                format!("{hour:02}")
+            } else {
+                String::new()
+            };
+            Bar::default()
+                .value(u64::from(totals[hour]))
+                .label(label.into())
+                .value_style(Style::default().fg(palette.text))
+                .style(Style::default().fg(palette.timer_work))
+        })
+        .collect::<Vec<_>>();
+    let max = totals
+        .iter()
+        .copied()
+        .map(u64::from)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let chart = BarChart::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.border))
+                .title("Hour Distribution"),
+        )
+        .data(BarGroup::default().bars(&bars))
+        .bar_width(1)
+        .bar_gap(0)
+        .max(max);
+    frame.render_widget(chart, area);
 }
 
 fn render_status_bar(

@@ -142,7 +142,7 @@ This is useful for local development and for keeping test data isolated from you
 ## Configuration
 
 Triginta uses a single application configuration file with sectioned settings
-such as `ui` and `timer`.
+such as `ui`, `timer`, and `stats`.
 
 Supported formats:
 
