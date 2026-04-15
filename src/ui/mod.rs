@@ -132,7 +132,7 @@ fn render_tasks_workspace(
     let sections = task_workspace_sections(area);
 
     render_task_list_panel(frame, app, sections[0], symbols, focused_panel, palette);
-    render_task_details_panel(frame, app, sections[1], symbols, palette);
+    render_task_details_panel(frame, app, sections[1], symbols, focused_panel, palette);
 }
 
 fn render_timer_panel(
@@ -143,11 +143,13 @@ fn render_timer_panel(
     palette: ThemePalette,
 ) {
     let timer = app.timer_view();
+    let is_focused = app.focused_panel() == PanelFocus::Timer;
     let block = panel_block(
         Line::from(format!("[1] {} Pomodoro", symbols.timer)),
-        app.focused_panel() == PanelFocus::Timer,
+        is_focused,
         palette,
-    );
+    )
+    .title_bottom(timer_footer_hints(symbols, is_focused, palette));
     let inner = block.inner(area);
     let content = inner.inner(Margin {
         vertical: 0,
@@ -204,6 +206,7 @@ fn render_history_panel(
 ) {
     let data = app.screen_data();
     let today_selected = app.history_scroll();
+    let is_focused = app.focused_panel() == PanelFocus::History;
     let (summary, lines, right_indicator): (
         Line<'static>,
         Vec<Line<'static>>,
@@ -222,12 +225,11 @@ fn render_history_panel(
                 format_duration_seconds(data.today_stats.total_break_seconds),
                 symbols.stats,
                 data.today_stats.total_sessions,
-            ))
-            .right_aligned();
+            ));
             let lines = if rows.is_empty() {
                 vec![Line::from("No pomodoros recorded today.")]
             } else {
-                let show_selection = app.focused_panel() == PanelFocus::History;
+                let show_selection = is_focused;
                 let end = (start + visible_height).min(rows.len());
                 rows[start..end]
                     .iter()
@@ -259,8 +261,7 @@ fn render_history_panel(
                 format_duration_seconds(data.weekly_stats.total_break_seconds),
                 symbols.stats,
                 data.weekly_stats.total_sessions,
-            ))
-            .right_aligned(),
+            )),
             render_weekly_history_lines(
                 data.weekly_summaries.as_slice(),
                 symbols,
@@ -272,10 +273,11 @@ fn render_history_panel(
     };
     let block = panel_block(
         history_title(app.active_history_panel_tab(), symbols, palette),
-        app.focused_panel() == PanelFocus::History,
+        is_focused,
         palette,
     )
-    .title_bottom(summary);
+    .title_bottom(summary)
+    .title_bottom(history_footer_hints(symbols, is_focused, palette));
     let inner = block.inner(area);
     let content = inner.inner(Margin {
         vertical: 0,
@@ -687,14 +689,16 @@ fn render_task_details_panel(
     app: &App,
     area: Rect,
     symbols: Symbols,
+    focused_panel: PanelFocus,
     palette: ThemePalette,
 ) {
+    let is_focused = focused_panel == PanelFocus::RightPane;
     let block = Block::default()
         .title(Span::styled(
             format!("{} Task Details", symbols.details),
             Style::default().fg(palette.accent),
         ))
-        .title_bottom(task_details_footer_hints(palette))
+        .title_bottom(task_details_footer_hints(is_focused, palette))
         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
         .border_style(Style::default().fg(palette.border));
     let inner = block.inner(area);
@@ -816,11 +820,118 @@ fn render_task_details_panel(
     }
 }
 
-fn task_details_footer_hints(palette: ThemePalette) -> Line<'static> {
+fn timer_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> Line<'static> {
+    if !focused {
+        return Line::from("").right_aligned();
+    }
+
+    Line::from(vec![
+        Span::styled("s/p/x", Style::default().fg(palette.accent)),
+        Span::styled(
+            format!(
+                " {}  ",
+                if symbols.is_ascii() {
+                    "run"
+                } else {
+                    symbols.timer
+                }
+            ),
+            Style::default().fg(palette.subtle_text),
+        ),
+        Span::styled("a/u", Style::default().fg(palette.accent)),
+        Span::styled(
+            format!(
+                " {}  ",
+                if symbols.is_ascii() {
+                    "task"
+                } else {
+                    symbols.assign
+                }
+            ),
+            Style::default().fg(palette.subtle_text),
+        ),
+        Span::styled("n/v/N", Style::default().fg(palette.accent)),
+        Span::styled(
+            format!(
+                " {}",
+                if symbols.is_ascii() {
+                    "note"
+                } else {
+                    symbols.details
+                }
+            ),
+            Style::default().fg(palette.subtle_text),
+        ),
+    ])
+    .right_aligned()
+}
+
+fn history_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> Line<'static> {
+    if !focused {
+        return Line::from("").right_aligned();
+    }
+
+    let move_label = if symbols.is_ascii() {
+        "j/k"
+    } else {
+        symbols.move_hint
+    };
+    Line::from(vec![
+        Span::styled("h/l", Style::default().fg(palette.accent)),
+        Span::styled(" range  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(move_label, Style::default().fg(palette.accent)),
+        Span::styled(" move  ", Style::default().fg(palette.subtle_text)),
+        Span::styled("a/u", Style::default().fg(palette.accent)),
+        Span::styled(" task", Style::default().fg(palette.subtle_text)),
+    ])
+    .right_aligned()
+}
+
+fn task_details_footer_hints(focused: bool, palette: ThemePalette) -> Line<'static> {
+    if !focused {
+        return Line::from("").right_aligned();
+    }
+
     Line::from(vec![Span::styled(
         "PgUp/PgDn scroll",
         Style::default().fg(palette.subtle_text),
     )])
+    .right_aligned()
+}
+
+fn statistics_footer_indicator(
+    data: &ScreenData,
+    symbols: Symbols,
+    palette: ThemePalette,
+) -> Line<'static> {
+    Line::from(vec![Span::styled(
+        format!(
+            " {} {}  |  {} {}  |  {} {}m ",
+            symbols.timer,
+            data.today_stats.total_sessions,
+            symbols.tasks,
+            data.today_stats.completed_tasks,
+            symbols.stats,
+            data.today_stats.total_minutes,
+        ),
+        Style::default().fg(palette.subtle_text),
+    )])
+}
+
+fn statistics_footer_hints(
+    symbols: Symbols,
+    focused: bool,
+    palette: ThemePalette,
+) -> Line<'static> {
+    if !focused {
+        return Line::from("").right_aligned();
+    }
+
+    let tab_keys = if symbols.is_ascii() { "h/l" } else { "←/→" };
+    Line::from(vec![
+        Span::styled(tab_keys, Style::default().fg(palette.accent)),
+        Span::styled(" tab", Style::default().fg(palette.subtle_text)),
+    ])
     .right_aligned()
 }
 
@@ -1305,12 +1416,17 @@ fn render_statistics_panel(
         Line::from("distributions, and longer-term summaries."),
     ];
 
+    let is_focused = focused_panel == PanelFocus::RightPane;
     let stats = Paragraph::new(lines)
-        .block(panel_block(
-            right_panel_title(RightPanelTab::Statistics, symbols, palette),
-            focused_panel == PanelFocus::RightPane,
-            palette,
-        ))
+        .block(
+            panel_block(
+                right_panel_title(RightPanelTab::Statistics, symbols, palette),
+                is_focused,
+                palette,
+            )
+            .title_bottom(statistics_footer_indicator(data, symbols, palette))
+            .title_bottom(statistics_footer_hints(symbols, is_focused, palette)),
+        )
         .wrap(Wrap { trim: true });
 
     frame.render_widget(stats, area);
@@ -5260,8 +5376,9 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 mod tests {
     use super::{
         FormPreviewPanelView, PreviewLineView, TaskTagRowSegment, format_task_tags_for_row,
-        input_window_view, markdown_first_plain_line, markdown_inline_spans,
+        history_footer_hints, input_window_view, markdown_first_plain_line, markdown_inline_spans,
         markdown_inline_tokens, preview_panel_lines, preview_panel_required_height,
+        statistics_footer_hints, task_details_footer_hints, timer_footer_hints,
     };
     use crate::config::GlyphMode;
     use crate::domain::TagColor;
@@ -5495,6 +5612,34 @@ mod tests {
         let line = markdown_first_plain_line("# Title line\n- item", test_palette())
             .expect("plain preview line should exist");
         assert_eq!(line, "Title line");
+    }
+
+    #[test]
+    fn footer_hints_hide_when_surface_is_not_focused() {
+        let palette = test_palette();
+        let symbols = Symbols::new(GlyphMode::Ascii);
+
+        assert_eq!(timer_footer_hints(symbols, false, palette).to_string(), "");
+        assert_eq!(
+            history_footer_hints(symbols, false, palette).to_string(),
+            ""
+        );
+        assert_eq!(
+            statistics_footer_hints(symbols, false, palette).to_string(),
+            ""
+        );
+        assert_eq!(task_details_footer_hints(false, palette).to_string(), "");
+    }
+
+    #[test]
+    fn timer_footer_hints_remain_glyph_aware() {
+        let palette = test_palette();
+        let ascii = timer_footer_hints(Symbols::new(GlyphMode::Ascii), true, palette).to_string();
+        let nerd =
+            timer_footer_hints(Symbols::new(GlyphMode::NerdFonts), true, palette).to_string();
+
+        assert!(ascii.contains("run"));
+        assert!(!nerd.contains("run"));
     }
 }
 
