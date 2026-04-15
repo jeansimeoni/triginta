@@ -336,21 +336,22 @@ fn iso_date_candidates(input: &str) -> Vec<((usize, usize), TaskDue)> {
     let mut index = 0;
 
     while index + 10 <= input.len() {
-        let candidate = &input[index..index + 10];
-        if looks_like_iso_date(candidate) && is_phrase_boundary(input, index, index + 10) {
-            if let Ok(date) = NaiveDate::parse_from_str(candidate, "%Y-%m-%d") {
-                matches.push(with_time_suffix(
-                    input,
-                    index,
-                    index + 10,
-                    TaskDue {
-                        date,
-                        datetime: None,
-                        timezone: None,
-                        string: candidate.to_string(),
-                        is_recurring: false,
-                    },
-                ));
+        if let Some(candidate) = input.get(index..index + 10) {
+            if looks_like_iso_date(candidate) && is_phrase_boundary(input, index, index + 10) {
+                if let Ok(date) = NaiveDate::parse_from_str(candidate, "%Y-%m-%d") {
+                    matches.push(with_time_suffix(
+                        input,
+                        index,
+                        index + 10,
+                        TaskDue {
+                            date,
+                            datetime: None,
+                            timezone: None,
+                            string: candidate.to_string(),
+                            is_recurring: false,
+                        },
+                    ));
+                }
             }
         }
         index += 1;
@@ -1135,6 +1136,18 @@ mod tests {
             parsed.due.expect("due should parse").date,
             NaiveDate::from_ymd_opt(2026, 4, 13).expect("valid date")
         );
+    }
+
+    #[test]
+    fn parse_task_input_supports_accented_project_tokens_without_panicking() {
+        let input = "Adjust data model #Itens de Ação";
+        let parsed = parse_task_input(
+            input,
+            NaiveDate::from_ymd_opt(2026, 4, 9).expect("valid date"),
+        );
+
+        assert_eq!(parsed.cleaned_title, input);
+        assert!(parsed.due.is_none());
     }
 
     #[test]
