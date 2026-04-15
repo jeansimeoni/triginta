@@ -17,9 +17,10 @@ use crate::{
         FavoriteListRowView, FilterDeleteConfirmationView, FilterEditorView, FilterListRowView,
         FilterSortPopupView, FormPreviewPanelView, HistoryPanelTab, PanelFocus, PreviewLineView,
         ProjectDeleteConfirmationView, ProjectEditorView, ProjectSortPopupView, ProjectTreeRowView,
-        RightPanelTab, ScreenData, ShortcutSection, ShortcutTip, SidebarTab,
-        TagDeleteConfirmationView, TagEditorView, TagListRowView, TagSortPopupView, TaskEditorView,
-        TaskInputView, TaskSearchView, TaskSortPopupView, TaskView, TimerPhase,
+        RightPanelTab, ScreenData, SessionNoteEditorView, SessionNoteViewerView, ShortcutSection,
+        ShortcutTip, SidebarTab, TagDeleteConfirmationView, TagEditorView, TagListRowView,
+        TagSortPopupView, TaskEditorView, TaskInputView, TaskSearchView, TaskSortPopupView,
+        TaskView, TimerPhase,
     },
     config::GlyphMode,
     domain::{
@@ -178,14 +179,16 @@ fn render_timer_panel(
 
     let progress_meta = Paragraph::new(progress_meta_line(&timer, content.width, palette));
     let assigned_task = Paragraph::new(assigned_task_line(app, symbols, palette, content.width));
+    let note_preview = Paragraph::new(assigned_note_line(app, palette, content.width));
     let cycle = Paragraph::new(cycle_line(timer.cycle_entries.as_slice(), symbols, palette));
 
     frame.render_widget(headline, sections[0]);
     frame.render_widget(progress, sections[1]);
     frame.render_widget(progress_meta, sections[2]);
+    frame.render_widget(Paragraph::new(""), sections[3]);
     frame.render_widget(cycle, sections[4]);
-    frame.render_widget(Paragraph::new(""), sections[5]);
-    frame.render_widget(assigned_task, sections[6]);
+    frame.render_widget(assigned_task, sections[5]);
+    frame.render_widget(note_preview, sections[6]);
 }
 
 fn render_history_panel(
@@ -2105,6 +2108,16 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
         return;
     }
 
+    if let Some(viewer) = app.session_note_viewer_view() {
+        render_session_note_viewer_popup(frame, &viewer, palette);
+        return;
+    }
+
+    if let Some(editor) = app.session_note_editor_view() {
+        render_session_note_editor_popup(frame, &editor, symbols, palette);
+        return;
+    }
+
     if let Some(editor) = app.task_editor_view() {
         render_task_editor_popup(frame, &editor, symbols, palette);
         return;
@@ -2248,6 +2261,115 @@ fn render_help_dialog(frame: &mut Frame<'_>, app: &App, palette: ThemePalette) {
         let mut scrollbar_state = ScrollbarState::default()
             .content_length(lines.len())
             .viewport_content_length(visible_height)
+            .position(position);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("▐")
+            .thumb_style(Style::default().fg(palette.subtle_text));
+        frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+    }
+}
+
+fn render_session_note_editor_popup(
+    frame: &mut Frame<'_>,
+    editor: &SessionNoteEditorView,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let area = centered_rect(frame.area(), 84, 8);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(Span::styled(
+            editor.title,
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(
+            Line::from(vec![Span::styled(
+                "F12 save  Esc cancel  Ctrl+E ext editor  F10 clear  Enter newline",
+                Style::default().fg(palette.subtle_text),
+            )])
+            .right_aligned(),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent));
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+    render_editor_multiline_field(
+        frame,
+        inner,
+        "Notes (Markdown)",
+        &editor.value,
+        editor.cursor,
+        editor.scroll,
+        true,
+        Some("Add optional notes for focus sessions"),
+        palette,
+    );
+    let _ = symbols;
+}
+
+fn render_session_note_viewer_popup(
+    frame: &mut Frame<'_>,
+    viewer: &SessionNoteViewerView,
+    palette: ThemePalette,
+) {
+    let area = centered_rect(
+        frame.area(),
+        90,
+        frame.area().height.saturating_sub(4).max(8),
+    );
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(Span::styled(
+            viewer.title,
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(
+            Line::from(vec![Span::styled(
+                "j/k or PgUp/PgDn scroll  Home top  Esc or v closes",
+                Style::default().fg(palette.subtle_text),
+            )])
+            .right_aligned(),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let markdown_lines = if viewer.value.trim().is_empty() {
+        vec![MarkdownRenderedLine::plain(Line::from(Span::styled(
+            "No notes",
+            Style::default()
+                .fg(palette.subtle_text)
+                .add_modifier(Modifier::DIM),
+        )))]
+    } else {
+        markdown_to_lines(viewer.value.as_str(), palette)
+    };
+    let paragraph_lines = markdown_lines
+        .iter()
+        .map(|markdown_line| markdown_line.line.clone())
+        .collect::<Vec<_>>();
+    let scroll = viewer.scroll;
+    frame.render_widget(
+        Paragraph::new(paragraph_lines)
+            .scroll((scroll as u16, 0))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+    render_markdown_hyperlinks(frame, inner, scroll, markdown_lines.as_slice());
+    let viewport = inner.height as usize;
+    if markdown_lines.len() > viewport && viewport > 0 {
+        let position = scrollbar_position_from_offset(scroll, markdown_lines.len(), viewport);
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(markdown_lines.len())
+            .viewport_content_length(viewport)
             .position(position);
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
@@ -4863,6 +4985,27 @@ fn assigned_task_line(
         ]),
         None => Line::from(vec![Span::styled(
             "Task: none",
+            Style::default().fg(palette.subtle_text),
+        )]),
+    }
+}
+
+fn assigned_note_line(app: &App, palette: ThemePalette, width: u16) -> Line<'static> {
+    let note = app.pending_focus_note();
+    let first_line = note
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim);
+    match first_line {
+        Some(line) => Line::from(vec![
+            Span::styled("Notes: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                ellipsize_end(line, width.saturating_sub(7) as usize),
+                Style::default().fg(palette.text),
+            ),
+        ]),
+        None => Line::from(vec![Span::styled(
+            "Notes: none",
             Style::default().fg(palette.subtle_text),
         )]),
     }

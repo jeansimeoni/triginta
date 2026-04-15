@@ -638,6 +638,7 @@ impl SessionOutcome {
 pub struct SessionEntry {
     pub id: i64,
     pub task_id: Option<TaskId>,
+    pub notes: String,
     pub kind: SessionKind,
     pub outcome: SessionOutcome,
     pub next_break_kind: Option<SessionKind>,

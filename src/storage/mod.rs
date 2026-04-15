@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS pomodoros (
 CREATE TABLE IF NOT EXISTS session_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER,
+    notes TEXT NOT NULL DEFAULT '',
     kind TEXT NOT NULL,
     outcome TEXT NOT NULL,
     next_break_kind TEXT,
@@ -197,6 +198,7 @@ pub trait PomodoroRepository {
     fn create(
         &self,
         task_id: Option<TaskId>,
+        notes: &str,
         next_break_kind: Option<SessionKind>,
         started_at: DateTime<Local>,
         ended_at: DateTime<Local>,
@@ -205,6 +207,7 @@ pub trait PomodoroRepository {
     fn record_session_entry(
         &self,
         task_id: Option<TaskId>,
+        notes: &str,
         kind: SessionKind,
         outcome: SessionOutcome,
         next_break_kind: Option<SessionKind>,
@@ -213,6 +216,7 @@ pub trait PomodoroRepository {
         duration_seconds: u32,
     ) -> Result<SessionEntry>;
     fn update_session_task(&self, session_id: i64, task_id: Option<TaskId>) -> Result<()>;
+    fn update_session_notes(&self, session_id: i64, notes: &str) -> Result<()>;
 }
 
 #[derive(Debug)]
@@ -273,6 +277,10 @@ impl Database {
             "description",
             "ALTER TABLE tasks ADD COLUMN description TEXT NOT NULL DEFAULT ''",
         )?;
+        self.ensure_session_history_column(
+            "notes",
+            "ALTER TABLE session_history ADD COLUMN notes TEXT NOT NULL DEFAULT ''",
+        )?;
         self.connection
             .execute(
                 "INSERT OR IGNORE INTO app_metadata(key, value) VALUES (?1, ?2)",
@@ -301,6 +309,26 @@ impl Database {
         self.connection
             .execute(alter_sql, [])
             .with_context(|| format!("failed to add {} column to tasks", column_name))?;
+        Ok(())
+    }
+
+    fn ensure_session_history_column(&self, column_name: &str, alter_sql: &str) -> Result<()> {
+        let mut statement = self
+            .connection
+            .prepare("PRAGMA table_info(session_history)")
+            .context("failed to inspect session history schema")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read session history schema")?;
+
+        if columns.iter().any(|column| column == column_name) {
+            return Ok(());
+        }
+
+        self.connection
+            .execute(alter_sql, [])
+            .with_context(|| format!("failed to add {column_name} column to session_history"))?;
         Ok(())
     }
 
@@ -1258,7 +1286,7 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
         ended_at: DateTime<Local>,
     ) -> Result<Vec<SessionEntry>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, task_id, kind, outcome, next_break_kind, started_at, ended_at, duration_seconds
+            "SELECT id, task_id, notes, kind, outcome, next_break_kind, started_at, ended_at, duration_seconds
              FROM session_history
              WHERE started_at >= ?1 AND started_at < ?2
              ORDER BY started_at DESC, id DESC
@@ -1269,14 +1297,15 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
             Ok(SessionEntry {
                 id: row.get(0)?,
                 task_id: row.get::<_, Option<i64>>(1)?.map(TaskId),
-                kind: SessionKind::from_db(row.get::<_, String>(2)?.as_str()),
-                outcome: SessionOutcome::from_db(row.get::<_, String>(3)?.as_str()),
+                notes: row.get(2)?,
+                kind: SessionKind::from_db(row.get::<_, String>(3)?.as_str()),
+                outcome: SessionOutcome::from_db(row.get::<_, String>(4)?.as_str()),
                 next_break_kind: row
-                    .get::<_, Option<String>>(4)?
+                    .get::<_, Option<String>>(5)?
                     .map(|value| SessionKind::from_db(value.as_str())),
-                started_at: row.get(5)?,
-                ended_at: row.get(6)?,
-                duration_seconds: row.get::<_, i64>(7)? as u32,
+                started_at: row.get(6)?,
+                ended_at: row.get(7)?,
+                duration_seconds: row.get::<_, i64>(8)? as u32,
             })
         })?;
 
@@ -1370,6 +1399,7 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
     fn create(
         &self,
         task_id: Option<TaskId>,
+        notes: &str,
         next_break_kind: Option<SessionKind>,
         started_at: DateTime<Local>,
         ended_at: DateTime<Local>,
@@ -1390,6 +1420,7 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
 
         self.record_session_entry(
             task_id,
+            notes,
             SessionKind::Focus,
             SessionOutcome::Completed,
             next_break_kind,
@@ -1402,6 +1433,7 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
     fn record_session_entry(
         &self,
         task_id: Option<TaskId>,
+        notes: &str,
         kind: SessionKind,
         outcome: SessionOutcome,
         next_break_kind: Option<SessionKind>,
@@ -1411,10 +1443,11 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
     ) -> Result<SessionEntry> {
         self.connection
             .execute(
-                "INSERT INTO session_history(task_id, kind, outcome, next_break_kind, started_at, ended_at, duration_seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO session_history(task_id, notes, kind, outcome, next_break_kind, started_at, ended_at, duration_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     task_id.map(|task_id| task_id.0),
+                    notes,
                     kind.as_str(),
                     outcome.as_str(),
                     next_break_kind.as_ref().map(SessionKind::as_str),
@@ -1428,6 +1461,7 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
         Ok(SessionEntry {
             id: self.connection.last_insert_rowid(),
             task_id,
+            notes: notes.to_string(),
             kind,
             outcome,
             next_break_kind,
@@ -1444,6 +1478,16 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
                 params![task_id.map(|task_id| task_id.0), session_id],
             )
             .with_context(|| format!("failed to update task for session {}", session_id))?;
+        Ok(())
+    }
+
+    fn update_session_notes(&self, session_id: i64, notes: &str) -> Result<()> {
+        self.connection
+            .execute(
+                "UPDATE session_history SET notes = ?1 WHERE id = ?2",
+                params![notes, session_id],
+            )
+            .with_context(|| format!("failed to update notes for session {}", session_id))?;
         Ok(())
     }
 }
@@ -1618,6 +1662,41 @@ mod tests {
             })
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn pomodoro_repository_persists_and_updates_session_notes() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let now = Local::now();
+        let started_at = now - chrono::Duration::minutes(25);
+        let ended_at = now;
+        let created = database.pomodoro_repository().record_session_entry(
+            None,
+            "Line 1\nLine 2",
+            crate::domain::SessionKind::Focus,
+            crate::domain::SessionOutcome::Completed,
+            None,
+            started_at,
+            ended_at,
+            1500,
+        )?;
+
+        let listed = database.pomodoro_repository().list_day(
+            now - chrono::Duration::hours(1),
+            now + chrono::Duration::hours(1),
+        )?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].notes, "Line 1\nLine 2");
+
+        database
+            .pomodoro_repository()
+            .update_session_notes(created.id, "Updated note")?;
+        let updated = database.pomodoro_repository().list_day(
+            now - chrono::Duration::hours(1),
+            now + chrono::Duration::hours(1),
+        )?;
+        assert_eq!(updated[0].notes, "Updated note");
         Ok(())
     }
 

@@ -616,6 +616,27 @@ enum TaskSearchMode {
     HistoryAssignment(i64),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionNoteTarget {
+    PendingFocus,
+    HistoryEntry(i64),
+}
+
+#[derive(Debug, Clone)]
+struct SessionNoteEditorState {
+    target: SessionNoteTarget,
+    value: String,
+    cursor: usize,
+    scroll: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SessionNoteViewerState {
+    title: &'static str,
+    value: String,
+    scroll: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskInputView {
     pub title: &'static str,
@@ -778,6 +799,21 @@ pub struct TaskSearchView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionNoteEditorView {
+    pub title: &'static str,
+    pub value: String,
+    pub cursor: usize,
+    pub scroll: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionNoteViewerView {
+    pub title: &'static str,
+    pub value: String,
+    pub scroll: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelSearchStatusView {
     pub query: String,
     pub cursor: usize,
@@ -842,6 +878,7 @@ pub struct TaskSortPopupView {
 }
 
 const DESCRIPTION_VIEWPORT_LINES: usize = 3;
+const SESSION_NOTE_VIEWPORT_LINES: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSortOptionView {
@@ -1119,6 +1156,10 @@ const TIMER_SHORTCUTS: &[ShortcutTip] = &[
         keys: "u",
         description: "clear task",
     },
+    ShortcutTip {
+        keys: "n/v/N",
+        description: "note edit/view/clear",
+    },
 ];
 
 const HISTORY_SHORTCUTS: &[ShortcutTip] = &[
@@ -1141,6 +1182,10 @@ const HISTORY_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "u",
         description: "clear task",
+    },
+    ShortcutTip {
+        keys: "n/v/N",
+        description: "note edit/view/clear",
     },
 ];
 
@@ -1512,6 +1557,44 @@ const SEARCH_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     },
 ];
 
+const SESSION_NOTE_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "F12",
+        description: "save",
+    },
+    ShortcutTip {
+        keys: "Esc",
+        description: "cancel",
+    },
+    ShortcutTip {
+        keys: "Ctrl+e",
+        description: "external editor",
+    },
+    ShortcutTip {
+        keys: "F10",
+        description: "clear",
+    },
+    ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "move line",
+    },
+];
+
+const SESSION_NOTE_VIEWER_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "j/k or PgUp/PgDn",
+        description: "scroll",
+    },
+    ShortcutTip {
+        keys: "Home/End",
+        description: "jump",
+    },
+    ShortcutTip {
+        keys: "Esc or v",
+        description: "close",
+    },
+];
+
 const PANEL_SEARCH_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "Enter",
@@ -1617,8 +1700,11 @@ pub struct App {
     selected_favorite_item: Option<FavoriteItemKind>,
     assigned_task_id: Option<TaskId>,
     active_focus_task_id: Option<TaskId>,
+    pending_focus_note: String,
     task_input: Option<TaskInputState>,
     task_editor: Option<TaskEditorState>,
+    session_note_editor: Option<SessionNoteEditorState>,
+    session_note_viewer: Option<SessionNoteViewerState>,
     project_editor: Option<ProjectEditorState>,
     tag_editor: Option<TagEditorState>,
     filter_editor: Option<FilterEditorState>,
@@ -1698,8 +1784,11 @@ impl App {
             selected_favorite_item: None,
             assigned_task_id: None,
             active_focus_task_id: None,
+            pending_focus_note: String::new(),
             task_input: None,
             task_editor: None,
+            session_note_editor: None,
+            session_note_viewer: None,
             project_editor: None,
             tag_editor: None,
             filter_editor: None,
@@ -2497,6 +2586,28 @@ impl App {
         })
     }
 
+    pub fn session_note_editor_view(&self) -> Option<SessionNoteEditorView> {
+        let editor = self.session_note_editor.as_ref()?;
+        Some(SessionNoteEditorView {
+            title: match editor.target {
+                SessionNoteTarget::PendingFocus => "Edit Focus Note",
+                SessionNoteTarget::HistoryEntry(_) => "Edit Session Note",
+            },
+            value: editor.value.clone(),
+            cursor: editor.cursor,
+            scroll: editor.scroll,
+        })
+    }
+
+    pub fn session_note_viewer_view(&self) -> Option<SessionNoteViewerView> {
+        let viewer = self.session_note_viewer.as_ref()?;
+        Some(SessionNoteViewerView {
+            title: viewer.title,
+            value: viewer.value.clone(),
+            scroll: viewer.scroll,
+        })
+    }
+
     pub fn task_sort_popup_view(&self) -> Option<TaskSortPopupView> {
         let popup = self.task_sort_popup?;
         Some(TaskSortPopupView {
@@ -2798,6 +2909,12 @@ impl App {
         if self.task_editor.is_some() {
             return EDITOR_POPUP_SHORTCUTS;
         }
+        if self.session_note_editor.is_some() {
+            return SESSION_NOTE_EDITOR_SHORTCUTS;
+        }
+        if self.session_note_viewer.is_some() {
+            return SESSION_NOTE_VIEWER_SHORTCUTS;
+        }
         if self.project_editor.is_some() {
             return PROJECT_EDITOR_SHORTCUTS;
         }
@@ -2897,6 +3014,18 @@ impl App {
             sections.push(ShortcutSection {
                 title: "Task Editor",
                 tips: EDITOR_POPUP_SHORTCUTS,
+            });
+        }
+        if self.session_note_editor.is_some() {
+            sections.push(ShortcutSection {
+                title: "Session Note Editor",
+                tips: SESSION_NOTE_EDITOR_SHORTCUTS,
+            });
+        }
+        if self.session_note_viewer.is_some() {
+            sections.push(ShortcutSection {
+                title: "Session Note Viewer",
+                tips: SESSION_NOTE_VIEWER_SHORTCUTS,
             });
         }
         if self.project_editor.is_some() {
@@ -5338,6 +5467,122 @@ impl App {
         }
     }
 
+    fn sync_session_note_scroll(editor: &mut SessionNoteEditorState) {
+        let line = Self::description_cursor_line(editor.value.as_str(), editor.cursor);
+        if line < editor.scroll {
+            editor.scroll = line;
+            return;
+        }
+        let bottom = editor
+            .scroll
+            .saturating_add(SESSION_NOTE_VIEWPORT_LINES.saturating_sub(1));
+        if line > bottom {
+            editor.scroll = line.saturating_sub(SESSION_NOTE_VIEWPORT_LINES - 1);
+        }
+    }
+
+    fn move_session_note_cursor_home(editor: &mut SessionNoteEditorState) {
+        let current = editor.cursor.min(editor.value.len());
+        editor.cursor = Self::description_line_start(editor.value.as_str(), current);
+        Self::sync_session_note_scroll(editor);
+    }
+
+    fn move_session_note_cursor_end(editor: &mut SessionNoteEditorState) {
+        let current = editor.cursor.min(editor.value.len());
+        editor.cursor = Self::description_line_end(editor.value.as_str(), current);
+        Self::sync_session_note_scroll(editor);
+    }
+
+    fn move_session_note_cursor_left(editor: &mut SessionNoteEditorState) {
+        if editor.cursor == 0 {
+            return;
+        }
+        editor.cursor = editor.value[..editor.cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        Self::sync_session_note_scroll(editor);
+    }
+
+    fn move_session_note_cursor_right(editor: &mut SessionNoteEditorState) {
+        if editor.cursor >= editor.value.len() {
+            return;
+        }
+        editor.cursor = editor.value[editor.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(offset, _)| editor.cursor + offset)
+            .unwrap_or(editor.value.len());
+        Self::sync_session_note_scroll(editor);
+    }
+
+    fn move_session_note_cursor_vertical(editor: &mut SessionNoteEditorState, direction: isize) {
+        let value = editor.value.as_str();
+        let cursor = editor.cursor.min(value.len());
+        let current_start = Self::description_line_start(value, cursor);
+        let current_col = Self::description_column(value, cursor);
+        let target_start = if direction < 0 {
+            if current_start == 0 {
+                0
+            } else {
+                Self::description_line_start(value, current_start.saturating_sub(1))
+            }
+        } else {
+            let current_end = Self::description_line_end(value, cursor);
+            if current_end >= value.len() {
+                current_start
+            } else {
+                current_end + 1
+            }
+        };
+        let target_end = value[target_start..]
+            .find('\n')
+            .map(|index| target_start + index)
+            .unwrap_or(value.len());
+        editor.cursor = (target_start + current_col).min(target_end);
+        Self::sync_session_note_scroll(editor);
+    }
+
+    fn insert_session_note_char(editor: &mut SessionNoteEditorState, character: char) {
+        editor.value.insert(editor.cursor, character);
+        editor.cursor += character.len_utf8();
+        Self::sync_session_note_scroll(editor);
+    }
+
+    fn insert_session_note_newline(editor: &mut SessionNoteEditorState) {
+        editor.value.insert(editor.cursor, '\n');
+        editor.cursor += 1;
+        Self::sync_session_note_scroll(editor);
+    }
+
+    fn delete_session_note_char_before_cursor(editor: &mut SessionNoteEditorState) {
+        if editor.cursor == 0 {
+            return;
+        }
+        let previous_index = editor.value[..editor.cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        editor.value.drain(previous_index..editor.cursor);
+        editor.cursor = previous_index;
+        Self::sync_session_note_scroll(editor);
+    }
+
+    fn delete_session_note_char_at_cursor(editor: &mut SessionNoteEditorState) {
+        if editor.cursor >= editor.value.len() {
+            return;
+        }
+        let next_index = editor.value[editor.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(offset, _)| editor.cursor + offset)
+            .unwrap_or(editor.value.len());
+        editor.value.drain(editor.cursor..next_index);
+        Self::sync_session_note_scroll(editor);
+    }
+
     fn sync_editor_due_from_title(editor: &mut TaskEditorState, reference_date: NaiveDate) {
         let parsed = parse_task_input(editor.title_input.as_str(), reference_date);
         if let Some(due) = parsed.due {
@@ -5591,18 +5836,25 @@ impl App {
         format!("'{}'", input.replace('\'', "'\"'\"'"))
     }
 
-    fn edit_description_in_external_editor(&mut self, editor: &mut TaskEditorState) -> Result<()> {
+    fn edit_markdown_in_external_editor(
+        &mut self,
+        value: &mut String,
+        cursor: &mut usize,
+        scroll: &mut usize,
+        temp_prefix: &str,
+    ) -> Result<()> {
         let Some(command) = Self::external_editor_command() else {
             anyhow::bail!("no external editor found in VISUAL/EDITOR or nvim/vim/vi");
         };
 
         let temp_path = env::temp_dir().join(format!(
-            "triginta-description-{}-{}.md",
+            "triginta-{}-{}-{}.md",
+            temp_prefix,
             std::process::id(),
             Local::now().timestamp_millis()
         ));
-        fs::write(&temp_path, editor.description_input.as_bytes())
-            .context("failed to write temporary description file")?;
+        fs::write(&temp_path, value.as_bytes())
+            .with_context(|| format!("failed to write temporary {temp_prefix} file"))?;
 
         let mut stdout = std::io::stdout();
         disable_raw_mode().context("failed to disable raw mode before external editor")?;
@@ -5628,13 +5880,37 @@ impl App {
             anyhow::bail!("external editor exited with status {status}");
         }
 
-        editor.description_input = fs::read_to_string(&temp_path)
-            .context("failed to read edited description from temporary file")?;
-        editor.description_cursor = editor.description_input.len();
-        editor.description_scroll = 0;
-        Self::sync_editor_description_scroll(editor);
+        *value = fs::read_to_string(&temp_path)
+            .with_context(|| format!("failed to read edited {temp_prefix} from temporary file"))?;
+        *cursor = value.len();
+        *scroll = 0;
         self.needs_full_redraw = true;
         let _ = fs::remove_file(&temp_path);
+        Ok(())
+    }
+
+    fn edit_description_in_external_editor(&mut self, editor: &mut TaskEditorState) -> Result<()> {
+        self.edit_markdown_in_external_editor(
+            &mut editor.description_input,
+            &mut editor.description_cursor,
+            &mut editor.description_scroll,
+            "description",
+        )?;
+        Self::sync_editor_description_scroll(editor);
+        Ok(())
+    }
+
+    fn edit_session_note_in_external_editor(
+        &mut self,
+        editor: &mut SessionNoteEditorState,
+    ) -> Result<()> {
+        self.edit_markdown_in_external_editor(
+            &mut editor.value,
+            &mut editor.cursor,
+            &mut editor.scroll,
+            "session-note",
+        )?;
+        Self::sync_session_note_scroll(editor);
         Ok(())
     }
 
@@ -6402,6 +6678,92 @@ impl App {
         self.assigned_task_id = None;
     }
 
+    pub fn pending_focus_note(&self) -> &str {
+        self.pending_focus_note.as_str()
+    }
+
+    fn open_note_editor_for_focused_panel(&mut self) {
+        match self.focused_panel {
+            PanelFocus::Timer => {
+                let value = self.pending_focus_note.clone();
+                self.session_note_editor = Some(SessionNoteEditorState {
+                    target: SessionNoteTarget::PendingFocus,
+                    cursor: value.len(),
+                    value,
+                    scroll: 0,
+                });
+            }
+            PanelFocus::History => {
+                if let Some(entry) = self.selected_history_focus_entry() {
+                    let value = entry.notes.clone();
+                    self.session_note_editor = Some(SessionNoteEditorState {
+                        target: SessionNoteTarget::HistoryEntry(entry.id),
+                        cursor: value.len(),
+                        value,
+                        scroll: 0,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn open_note_viewer_for_focused_panel(&mut self) {
+        match self.focused_panel {
+            PanelFocus::Timer => {
+                self.session_note_viewer = Some(SessionNoteViewerState {
+                    title: "Focus Note",
+                    value: self.pending_focus_note.clone(),
+                    scroll: 0,
+                });
+            }
+            PanelFocus::History => {
+                if let Some(entry) = self.selected_history_focus_entry() {
+                    self.session_note_viewer = Some(SessionNoteViewerState {
+                        title: "Session Note",
+                        value: entry.notes.clone(),
+                        scroll: 0,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn clear_note_for_focused_panel(&mut self) -> Result<()> {
+        match self.focused_panel {
+            PanelFocus::Timer => {
+                self.pending_focus_note.clear();
+            }
+            PanelFocus::History => {
+                if let Some(entry) = self.selected_history_focus_entry().cloned() {
+                    self.database
+                        .pomodoro_repository()
+                        .update_session_notes(entry.id, "")?;
+                    self.refresh_history()?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn submit_session_note_editor(&mut self, editor: SessionNoteEditorState) -> Result<()> {
+        let value = editor.value.trim_end_matches('\n').to_string();
+        match editor.target {
+            SessionNoteTarget::PendingFocus => {
+                self.pending_focus_note = value;
+            }
+            SessionNoteTarget::HistoryEntry(session_id) => {
+                self.database
+                    .pomodoro_repository()
+                    .update_session_notes(session_id, value.as_str())?;
+                self.refresh_history()?;
+            }
+        }
+        Ok(())
+    }
+
     fn clear_selected_history_task(&mut self) -> Result<()> {
         let Some(entry) = self.selected_history_focus_entry().cloned() else {
             return Ok(());
@@ -6446,6 +6808,99 @@ impl App {
         modifiers: KeyModifiers,
         now: DateTime<Local>,
     ) -> Result<bool> {
+        if let Some(mut viewer) = self.session_note_viewer.take() {
+            match code {
+                KeyCode::Esc | KeyCode::Char('v') => {}
+                KeyCode::Char('j') | KeyCode::Down => {
+                    viewer.scroll = viewer.scroll.saturating_add(1);
+                    self.session_note_viewer = Some(viewer);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    viewer.scroll = viewer.scroll.saturating_sub(1);
+                    self.session_note_viewer = Some(viewer);
+                }
+                KeyCode::PageDown => {
+                    viewer.scroll = viewer.scroll.saturating_add(8);
+                    self.session_note_viewer = Some(viewer);
+                }
+                KeyCode::PageUp => {
+                    viewer.scroll = viewer.scroll.saturating_sub(8);
+                    self.session_note_viewer = Some(viewer);
+                }
+                KeyCode::Home => {
+                    viewer.scroll = 0;
+                    self.session_note_viewer = Some(viewer);
+                }
+                _ => {
+                    self.session_note_viewer = Some(viewer);
+                }
+            }
+            return Ok(true);
+        }
+
+        if let Some(mut editor) = self.session_note_editor.take() {
+            match code {
+                KeyCode::Esc => {}
+                KeyCode::F(12) => {
+                    self.submit_session_note_editor(editor)?;
+                }
+                KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    let _ = self.edit_session_note_in_external_editor(&mut editor);
+                    self.session_note_editor = Some(editor);
+                }
+                KeyCode::F(10) => {
+                    editor.value.clear();
+                    editor.cursor = 0;
+                    editor.scroll = 0;
+                    self.session_note_editor = Some(editor);
+                }
+                KeyCode::Enter => {
+                    Self::insert_session_note_newline(&mut editor);
+                    self.session_note_editor = Some(editor);
+                }
+                KeyCode::Home => {
+                    Self::move_session_note_cursor_home(&mut editor);
+                    self.session_note_editor = Some(editor);
+                }
+                KeyCode::End => {
+                    Self::move_session_note_cursor_end(&mut editor);
+                    self.session_note_editor = Some(editor);
+                }
+                KeyCode::Left => {
+                    Self::move_session_note_cursor_left(&mut editor);
+                    self.session_note_editor = Some(editor);
+                }
+                KeyCode::Right => {
+                    Self::move_session_note_cursor_right(&mut editor);
+                    self.session_note_editor = Some(editor);
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    Self::move_session_note_cursor_vertical(&mut editor, 1);
+                    self.session_note_editor = Some(editor);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    Self::move_session_note_cursor_vertical(&mut editor, -1);
+                    self.session_note_editor = Some(editor);
+                }
+                KeyCode::Backspace => {
+                    Self::delete_session_note_char_before_cursor(&mut editor);
+                    self.session_note_editor = Some(editor);
+                }
+                KeyCode::Delete => {
+                    Self::delete_session_note_char_at_cursor(&mut editor);
+                    self.session_note_editor = Some(editor);
+                }
+                KeyCode::Char(character) => {
+                    Self::insert_session_note_char(&mut editor, character);
+                    self.session_note_editor = Some(editor);
+                }
+                _ => {
+                    self.session_note_editor = Some(editor);
+                }
+            }
+            return Ok(true);
+        }
+
         if let Some(mut popup) = self.task_sort_popup.take() {
             match code {
                 KeyCode::Esc | KeyCode::Char('o') => {}
@@ -8446,6 +8901,21 @@ impl App {
             KeyCode::Char('u') if self.focused_panel == PanelFocus::Timer => {
                 self.clear_assigned_task();
             }
+            KeyCode::Char('n')
+                if matches!(self.focused_panel, PanelFocus::Timer | PanelFocus::History) =>
+            {
+                self.open_note_editor_for_focused_panel();
+            }
+            KeyCode::Char('v')
+                if matches!(self.focused_panel, PanelFocus::Timer | PanelFocus::History) =>
+            {
+                self.open_note_viewer_for_focused_panel();
+            }
+            KeyCode::Char('N')
+                if matches!(self.focused_panel, PanelFocus::Timer | PanelFocus::History) =>
+            {
+                self.clear_note_for_focused_panel()?;
+            }
             KeyCode::Char('a') if self.focused_panel == PanelFocus::History => {
                 self.open_history_task_search();
             }
@@ -8525,6 +8995,7 @@ impl App {
 
                 self.database.pomodoro_repository().create(
                     self.active_focus_task_id,
+                    self.pending_focus_note.as_str(),
                     Some(session_kind_for_phase(next_phase)),
                     started_at,
                     now,
@@ -8544,6 +9015,7 @@ impl App {
                     .unwrap_or(now - break_phase.duration(&self.timer_settings));
                 self.database.pomodoro_repository().record_session_entry(
                     None,
+                    "",
                     session_kind_for_phase(break_phase),
                     SessionOutcome::Completed,
                     None,
@@ -8597,6 +9069,7 @@ impl App {
         let started_at = self.timer.current_phase_started_at.unwrap_or(now);
         self.database.pomodoro_repository().record_session_entry(
             None,
+            "",
             session_kind_for_phase(break_phase),
             SessionOutcome::Completed,
             None,
@@ -8623,6 +9096,7 @@ impl App {
         let started_at = self.timer.current_phase_started_at.unwrap_or(now);
         self.database.pomodoro_repository().record_session_entry(
             self.active_focus_task_id,
+            self.pending_focus_note.as_str(),
             session_kind_for_phase(self.timer.phase),
             SessionOutcome::Voided,
             None,
@@ -12589,6 +13063,89 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Enter)
             .expect("reassignment should succeed");
         assert_eq!(app.screen_data.history_entries[0].task_id, Some(task_id));
+    }
+
+    #[test]
+    fn timer_pending_note_persists_across_sessions_until_cleared() {
+        let mut app = test_app();
+        let now = Local::now();
+        app.handle_key(crossterm::event::KeyCode::Char('n'))
+            .expect("note editor should open");
+        for character in "Carry forward".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should work");
+        }
+        app.handle_key(crossterm::event::KeyCode::F(12))
+            .expect("note should save");
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('x'),
+            now + ChronoDuration::seconds(5),
+        )
+        .expect("first focus should void");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('s'),
+            now + ChronoDuration::seconds(8),
+        )
+        .expect("timer should start again");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('x'),
+            now + ChronoDuration::seconds(12),
+        )
+        .expect("second focus should void");
+
+        assert_eq!(app.screen_data.history_entries.len(), 2);
+        assert_eq!(app.screen_data.history_entries[0].notes, "Carry forward");
+        assert_eq!(app.screen_data.history_entries[1].notes, "Carry forward");
+
+        app.handle_key(crossterm::event::KeyCode::Char('N'))
+            .expect("note should clear");
+        assert_eq!(app.pending_focus_note(), "");
+
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('s'),
+            now + ChronoDuration::seconds(16),
+        )
+        .expect("timer should start a third time");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('x'),
+            now + ChronoDuration::seconds(20),
+        )
+        .expect("third focus should void");
+
+        assert_eq!(app.screen_data.history_entries[0].notes, "");
+        assert_eq!(app.screen_data.history_entries[1].notes, "Carry forward");
+    }
+
+    #[test]
+    fn history_panel_can_edit_and_clear_selected_session_note() {
+        let mut app = test_app();
+        let now = Local::now();
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('x'),
+            now + ChronoDuration::seconds(5),
+        )
+        .expect("focus should void");
+
+        app.handle_key(crossterm::event::KeyCode::Char('2'))
+            .expect("history should focus");
+        app.handle_key(crossterm::event::KeyCode::Char('n'))
+            .expect("note editor should open");
+        for character in "Session note".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should work");
+        }
+        app.handle_key(crossterm::event::KeyCode::F(12))
+            .expect("note should save");
+        assert_eq!(app.screen_data.history_entries[0].notes, "Session note");
+
+        app.handle_key(crossterm::event::KeyCode::Char('N'))
+            .expect("note should clear");
+        assert_eq!(app.screen_data.history_entries[0].notes, "");
     }
 
     #[test]
