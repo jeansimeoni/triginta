@@ -550,6 +550,7 @@ enum PanelSearchTarget {
     Projects,
     Tags,
     Filters,
+    Favorites,
     TaskList,
 }
 
@@ -572,6 +573,7 @@ struct PanelSearchStates {
     projects: Option<PanelSearchState>,
     tags: Option<PanelSearchState>,
     filters: Option<PanelSearchState>,
+    favorites: Option<PanelSearchState>,
     task_list: Option<PanelSearchState>,
 }
 
@@ -1376,6 +1378,10 @@ const FAVORITES_SHORTCUTS: &[ShortcutTip] = &[
         description: "remove favorite",
     },
     ShortcutTip {
+        keys: "/",
+        description: "search",
+    },
+    ShortcutTip {
         keys: "1-8 / Tab",
         description: "change focus",
     },
@@ -1920,6 +1926,9 @@ impl App {
     }
 
     pub fn favorite_rows(&self) -> Vec<FavoriteListRowView> {
+        let query = self
+            .panel_search_query(PanelSearchTarget::Favorites)
+            .unwrap_or("");
         let mut rows = Vec::new();
 
         let mut projects = self
@@ -1968,6 +1977,10 @@ impl App {
             task_count: self.tasks_for_filter(Some(filter.id)),
             is_selected: self.selected_favorite_item == Some(FavoriteItemKind::Filter(filter.id)),
         }));
+
+        if !query.is_empty() {
+            rows.retain(|row| fuzzy_matches(query, row.name.as_str()));
+        }
 
         rows
     }
@@ -2770,6 +2783,10 @@ impl App {
         self.panel_search_query(PanelSearchTarget::TaskList)
     }
 
+    pub fn favorites_search_query(&self) -> Option<&str> {
+        self.panel_search_query(PanelSearchTarget::Favorites)
+    }
+
     pub fn focused_panel_shortcuts(&self) -> &'static [ShortcutTip] {
         if self.task_sort_popup.is_some()
             || self.project_sort_popup.is_some()
@@ -3139,6 +3156,7 @@ impl App {
                 SidebarTab::Tags => Some(PanelSearchTarget::Tags),
                 SidebarTab::Filters => Some(PanelSearchTarget::Filters),
             },
+            PanelFocus::Favorites => Some(PanelSearchTarget::Favorites),
             PanelFocus::RightPane if self.active_right_panel_tab == RightPanelTab::Tasks => {
                 Some(PanelSearchTarget::TaskList)
             }
@@ -3154,6 +3172,7 @@ impl App {
             PanelSearchTarget::Projects => self.panel_search_states.projects.as_ref(),
             PanelSearchTarget::Tags => self.panel_search_states.tags.as_ref(),
             PanelSearchTarget::Filters => self.panel_search_states.filters.as_ref(),
+            PanelSearchTarget::Favorites => self.panel_search_states.favorites.as_ref(),
             PanelSearchTarget::TaskList => self.panel_search_states.task_list.as_ref(),
         }
     }
@@ -3169,6 +3188,7 @@ impl App {
             PanelSearchTarget::Projects => self.panel_search_states.projects.as_mut(),
             PanelSearchTarget::Tags => self.panel_search_states.tags.as_mut(),
             PanelSearchTarget::Filters => self.panel_search_states.filters.as_mut(),
+            PanelSearchTarget::Favorites => self.panel_search_states.favorites.as_mut(),
             PanelSearchTarget::TaskList => self.panel_search_states.task_list.as_mut(),
         }
     }
@@ -3183,6 +3203,7 @@ impl App {
             PanelSearchTarget::Projects => self.panel_search_states.projects = state,
             PanelSearchTarget::Tags => self.panel_search_states.tags = state,
             PanelSearchTarget::Filters => self.panel_search_states.filters = state,
+            PanelSearchTarget::Favorites => self.panel_search_states.favorites = state,
             PanelSearchTarget::TaskList => self.panel_search_states.task_list = state,
         }
     }
@@ -3198,6 +3219,7 @@ impl App {
             PanelSearchTarget::Projects,
             PanelSearchTarget::Tags,
             PanelSearchTarget::Filters,
+            PanelSearchTarget::Favorites,
             PanelSearchTarget::TaskList,
         ]
         .into_iter()
@@ -3287,6 +3309,24 @@ impl App {
                     }
                 }
                 self.sync_task_selection();
+            }
+            PanelSearchTarget::Favorites => {
+                let filtered_items = self
+                    .favorite_rows()
+                    .into_iter()
+                    .map(|row| row.item)
+                    .collect::<Vec<_>>();
+                if let Some(first) = filtered_items.first().copied() {
+                    if let Some(selected) = self.selected_favorite_item {
+                        if !filtered_items.contains(&selected) {
+                            self.selected_favorite_item = Some(first);
+                        }
+                    } else {
+                        self.selected_favorite_item = Some(first);
+                    };
+                } else {
+                    self.selected_favorite_item = None;
+                }
             }
         }
     }
@@ -11762,6 +11802,45 @@ mod tests {
                 .expect("search indicator should remain")
                 .is_editing
         );
+    }
+
+    #[test]
+    fn favorites_search_filters_rows_and_esc_restores_list() {
+        let mut app = test_app();
+        let now = Local::now();
+        app.database
+            .project_repository()
+            .create("Alpha", None, ProjectColor::Blue, true, now)
+            .expect("project should create");
+        app.database
+            .tag_repository()
+            .create("BravoTag", TagColor::Teal, true, now)
+            .expect("tag should create");
+        app.database
+            .filter_repository()
+            .create("Today Filter", "today", FilterColor::Orange, true, now)
+            .expect("filter should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('/'))
+            .expect("search should open");
+        app.handle_key(crossterm::event::KeyCode::Char('b'))
+            .expect("typing should filter");
+        app.handle_key(crossterm::event::KeyCode::Char('r'))
+            .expect("typing should filter");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should lock");
+
+        let filtered = app.favorite_rows();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "BravoTag");
+
+        app.handle_key(crossterm::event::KeyCode::Esc)
+            .expect("esc should clear");
+        let restored = app.favorite_rows();
+        assert_eq!(restored.len(), 3);
     }
 
     #[test]

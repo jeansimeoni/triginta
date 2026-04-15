@@ -39,7 +39,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .split(frame.area());
 
     render_body(frame, app, layout[0], symbols, palette);
-    render_status_bar(frame, app, layout[1], palette);
+    render_status_bar(frame, app, layout[1], symbols, palette);
     render_task_overlay(frame, app, symbols, palette);
 }
 
@@ -501,9 +501,14 @@ fn render_favorites_panel(
     let rows = app.favorite_rows();
     let selected_index = rows.iter().position(|row| row.is_selected);
     let show_selection = focused_panel == PanelFocus::Favorites;
+    let search_query = app.favorites_search_query().unwrap_or("");
     let mut lines = if rows.is_empty() {
         let mut empty = Vec::new();
-        empty.push(Line::from("No favorites yet."));
+        if search_query.is_empty() {
+            empty.push(Line::from("No favorites yet."));
+        } else {
+            empty.push(Line::from("No matching favorites."));
+        }
         empty
     } else {
         rows.into_iter()
@@ -517,7 +522,7 @@ fn render_favorites_panel(
     };
 
     if lines.is_empty() {
-        lines.push(Line::from("No favorites yet."));
+        lines.push(Line::from("No matching favorites."));
     }
 
     let block = panel_block(
@@ -1279,7 +1284,13 @@ fn render_statistics_panel(
     frame.render_widget(stats, area);
 }
 
-fn render_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect, palette: ThemePalette) {
+fn render_status_bar(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(Style::default().fg(palette.border));
@@ -1338,22 +1349,27 @@ fn render_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect, palette: Them
     let center_area = Rect::new(center_x, inner.y, center_width, 1);
     if let Some(search) = app.focused_panel_search_status() {
         if search.is_editing {
-            let query_width = center_width.saturating_sub(1) as usize;
+            let prefix_width = symbols.search.width().saturating_add(1);
+            let query_width = center_width.saturating_sub(prefix_width as u16) as usize;
             let query_window = input_window_view(&search.query, search.cursor, query_width.max(1));
-            let text = format!("/{}", query_window.text);
+            let text = format!("{} {}", symbols.search, query_window.text);
             frame.render_widget(
                 Paragraph::new(Line::from(ellipsize_end(&text, center_width as usize)))
                     .style(Style::default().fg(palette.subtle_text)),
                 center_area,
             );
-            let cursor_col = 1usize.saturating_add(query_window.cursor_col);
+            let cursor_col = symbols
+                .search
+                .width()
+                .saturating_add(1)
+                .saturating_add(query_window.cursor_col);
             let x = center_area
                 .x
                 .saturating_add((cursor_col as u16).min(center_area.width.saturating_sub(1)));
             frame.set_cursor_position((x, center_area.y));
             return;
         }
-        let locked_text = format!("SEARCH /{}  Esc clear", search.query);
+        let locked_text = format!("SEARCH {} {}  Esc clear", symbols.search, search.query);
         frame.render_widget(
             Paragraph::new(
                 Line::from(ellipsize_end(&locked_text, center_width as usize)).centered(),
@@ -1364,7 +1380,7 @@ fn render_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect, palette: Them
         return;
     }
 
-    let center_text = footer_shortcuts_line(app, center_width as usize);
+    let center_text = footer_shortcuts_line(app, symbols, center_width as usize);
     if !center_text.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(center_text).centered())
@@ -2278,7 +2294,7 @@ fn help_lines(
     lines
 }
 
-fn footer_shortcuts_line(app: &App, width: usize) -> String {
+fn footer_shortcuts_line(app: &App, symbols: Symbols, width: usize) -> String {
     let mut tips = Vec::new();
     tips.extend_from_slice(&[
         ShortcutTip {
@@ -2302,10 +2318,22 @@ fn footer_shortcuts_line(app: &App, width: usize) -> String {
 
     let mut parts = Vec::new();
     for tip in tips {
-        parts.push(format!("{} {}", tip.keys, tip.description));
+        parts.push(format!(
+            "{} {}",
+            status_bar_keys_label(tip.keys, symbols),
+            tip.description
+        ));
     }
 
     fit_footer_parts(parts.as_slice(), width)
+}
+
+fn status_bar_keys_label(keys: &str, symbols: Symbols) -> String {
+    if !symbols.ascii_mode && keys == "/" {
+        symbols.search.to_string()
+    } else {
+        keys.to_string()
+    }
 }
 
 fn fit_footer_parts(parts: &[String], width: usize) -> String {
@@ -5282,6 +5310,7 @@ struct Symbols {
     details: &'static str,
     stats: &'static str,
     sort: &'static str,
+    search: &'static str,
     hidden: &'static str,
     visible: &'static str,
     recurring: &'static str,
@@ -5314,6 +5343,7 @@ impl Symbols {
                 details: ">",
                 stats: "%",
                 sort: "~",
+                search: "/",
                 hidden: "x",
                 visible: "o",
                 recurring: "~",
@@ -5342,6 +5372,7 @@ impl Symbols {
                 details: "󰋼",
                 stats: "󰕾",
                 sort: "󰒺",
+                search: "󰍉",
                 hidden: "󰈉",
                 visible: "󰈈",
                 recurring: "󰑖",
