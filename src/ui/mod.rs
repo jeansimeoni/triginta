@@ -11,6 +11,8 @@ use ratatui::{
 use time::{Date as TimeDate, Month as TimeMonth};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+mod symbols;
+
 use crate::{
     app::{
         App, CalendarPickerView, CycleEntryState, DeleteConfirmationView, FavoriteItemColor,
@@ -22,7 +24,6 @@ use crate::{
         TagSortPopupView, TaskEditorView, TaskInputView, TaskSearchView, TaskSortPopupView,
         TaskView, TimerPhase,
     },
-    config::GlyphMode,
     domain::{
         DayHistorySummary, FilterColor, SessionEntry, SessionKind, SessionOutcome, TagColor, Task,
         TaskPriority, TaskStatus,
@@ -30,6 +31,7 @@ use crate::{
     theme::ThemePalette,
 };
 use chrono::{Datelike, Local, NaiveDate};
+use symbols::Symbols;
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let symbols = Symbols::new(app.glyph_mode());
@@ -259,6 +261,7 @@ fn render_history_panel(
             .right_aligned(),
             render_weekly_history_lines(
                 data.weekly_summaries.as_slice(),
+                symbols,
                 area.width.saturating_sub(4),
                 palette,
             ),
@@ -777,7 +780,7 @@ fn render_task_details_panel(
                 .add_modifier(Modifier::DIM),
         )))]
     } else {
-        markdown_to_lines(task.description.as_str(), palette)
+        markdown_to_lines(task.description.as_str(), symbols, palette)
     };
     let paragraph_lines = markdown_lines
         .iter()
@@ -826,7 +829,11 @@ fn task_status_symbol(status: TaskStatus, symbols: Symbols) -> &'static str {
     }
 }
 
-fn markdown_to_lines(markdown: &str, palette: ThemePalette) -> Vec<MarkdownRenderedLine> {
+fn markdown_to_lines(
+    markdown: &str,
+    symbols: Symbols,
+    palette: ThemePalette,
+) -> Vec<MarkdownRenderedLine> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
 
@@ -853,7 +860,10 @@ fn markdown_to_lines(markdown: &str, palette: ThemePalette) -> Vec<MarkdownRende
         let start_trimmed = trimmed.trim_start();
         if start_trimmed.starts_with('>') {
             let content = start_trimmed.trim_start_matches('>').trim_start();
-            let prefix = Span::styled("▏ ", Style::default().fg(palette.subtle_text));
+            let prefix = Span::styled(
+                format!("{} ", symbols.markdown_quote_prefix),
+                Style::default().fg(palette.subtle_text),
+            );
             lines.push(markdown_line_with_prefix(prefix, content, palette));
             continue;
         }
@@ -866,7 +876,10 @@ fn markdown_to_lines(markdown: &str, palette: ThemePalette) -> Vec<MarkdownRende
             let content = start_trimmed[heading_level + 1..].trim_start();
             let heading_color = markdown_heading_color(heading_level, palette);
             let heading_prefix = Span::styled(
-                format!("{} ", "▌".repeat(heading_level.min(3))),
+                format!(
+                    "{} ",
+                    symbols.markdown_heading_bar.repeat(heading_level.min(3))
+                ),
                 Style::default().fg(heading_color),
             );
             let mut line = markdown_line_with_prefix(heading_prefix, content, palette);
@@ -880,17 +893,26 @@ fn markdown_to_lines(markdown: &str, palette: ThemePalette) -> Vec<MarkdownRende
         }
 
         if let Some(content) = checkbox_content(start_trimmed) {
-            let prefix = Span::styled("☐ ", Style::default().fg(palette.subtle_text));
+            let prefix = Span::styled(
+                format!("{} ", symbols.markdown_checkbox_empty),
+                Style::default().fg(palette.subtle_text),
+            );
             lines.push(markdown_line_with_prefix(prefix, content, palette));
             continue;
         }
         if let Some(content) = checkbox_done_content(start_trimmed) {
-            let prefix = Span::styled("☑ ", Style::default().fg(palette.success));
+            let prefix = Span::styled(
+                format!("{} ", symbols.markdown_checkbox_done),
+                Style::default().fg(palette.success),
+            );
             lines.push(markdown_line_with_prefix(prefix, content, palette));
             continue;
         }
         if let Some(content) = bullet_content(start_trimmed) {
-            let prefix = Span::styled("• ", Style::default().fg(palette.accent));
+            let prefix = Span::styled(
+                format!("{} ", symbols.markdown_bullet),
+                Style::default().fg(palette.accent),
+            );
             lines.push(markdown_line_with_prefix(prefix, content, palette));
             continue;
         }
@@ -1414,7 +1436,7 @@ fn favorite_item_line(
             palette.project_color(project_color_for_tag(color)),
         ),
         FavoriteItemColor::Filter(color) => (
-            "ƒ ".to_string(),
+            format!("{} ", symbols.filter),
             palette.project_color(project_color_for_filter(color)),
         ),
     };
@@ -2024,7 +2046,7 @@ fn filter_list_line(
         Style::default()
     };
     let count_text = format!(" {}", row.task_count);
-    let marker = "ƒ ";
+    let marker = format!("{} ", symbols.filter);
     let name_width = (width as usize)
         .saturating_sub(label.width())
         .saturating_sub(marker.width())
@@ -2041,7 +2063,7 @@ fn filter_list_line(
             },
         ),
         Span::styled(
-            marker.to_string(),
+            marker,
             if row.is_selected {
                 selection_style
             } else {
@@ -2109,7 +2131,7 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
     }
 
     if let Some(viewer) = app.session_note_viewer_view() {
-        render_session_note_viewer_popup(frame, &viewer, palette);
+        render_session_note_viewer_popup(frame, &viewer, symbols, palette);
         return;
     }
 
@@ -2316,6 +2338,7 @@ fn render_session_note_editor_popup(
 fn render_session_note_viewer_popup(
     frame: &mut Frame<'_>,
     viewer: &SessionNoteViewerView,
+    symbols: Symbols,
     palette: ThemePalette,
 ) {
     let area = centered_rect(
@@ -2350,7 +2373,7 @@ fn render_session_note_viewer_popup(
                 .add_modifier(Modifier::DIM),
         )))]
     } else {
-        markdown_to_lines(viewer.value.as_str(), palette)
+        markdown_to_lines(viewer.value.as_str(), symbols, palette)
     };
     let paragraph_lines = markdown_lines
         .iter()
@@ -2456,7 +2479,7 @@ fn footer_shortcuts_line(app: &App, symbols: Symbols, width: usize) -> String {
 }
 
 fn status_bar_keys_label(keys: &str, symbols: Symbols) -> String {
-    if !symbols.ascii_mode && keys == "/" {
+    if !symbols.is_ascii() && keys == "/" {
         symbols.search.to_string()
     } else {
         keys.to_string()
@@ -2575,18 +2598,8 @@ fn render_task_input_box(
 }
 
 fn task_list_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
-    let sort_prefix = if symbols.tasks == "#" {
-        "sort"
-    } else {
-        symbols.sort
-    };
-    let filter_prefix = if symbols.tasks == "#" {
-        "done"
-    } else if app.hides_completed_tasks() {
-        symbols.hidden
-    } else {
-        symbols.visible
-    };
+    let sort_prefix = symbols.sort_footer_prefix();
+    let filter_prefix = symbols.done_filter_prefix(app.hides_completed_tasks());
     let filter_label = if app.hides_completed_tasks() {
         "hidden"
     } else {
@@ -3200,7 +3213,7 @@ fn render_editor_calendar(
 }
 
 fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
-    if symbols.tasks == "#" {
+    if symbols.is_ascii() {
         return Line::from(vec![Span::styled(
             "F1-F8 fields  F12 save  Ctrl+E ext editor  F8 recurrence  F9 cal  F10 clear",
             Style::default().fg(palette.subtle_text),
@@ -3221,7 +3234,7 @@ fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'stati
         Span::raw(" cal  "),
         Span::styled("F10", Style::default().fg(palette.subtle_text)),
         Span::raw(" clear  "),
-        Span::styled("󰄬", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.save, Style::default().fg(palette.subtle_text)),
         Span::raw(" ↵  "),
         Span::styled(
             symbols.voided.to_string(),
@@ -3285,7 +3298,7 @@ fn render_delete_confirmation(
     let popup = Paragraph::new(lines).block(
         Block::default()
             .title(Span::styled(
-                "Remove Task",
+                format!("{} Remove Task", symbols.delete),
                 Style::default()
                     .fg(palette.error)
                     .add_modifier(Modifier::BOLD),
@@ -3321,7 +3334,7 @@ fn render_project_delete_confirmation(
     let popup = Paragraph::new(lines).block(
         Block::default()
             .title(Span::styled(
-                "Remove Project",
+                format!("{} Remove Project", symbols.delete),
                 Style::default()
                     .fg(palette.error)
                     .add_modifier(Modifier::BOLD),
@@ -3547,7 +3560,7 @@ fn render_tag_delete_confirmation(
     let popup = Paragraph::new(lines).block(
         Block::default()
             .title(Span::styled(
-                "Remove Tag",
+                format!("{} Remove Tag", symbols.delete),
                 Style::default()
                     .fg(palette.error)
                     .add_modifier(Modifier::BOLD),
@@ -3677,7 +3690,7 @@ fn render_filter_delete_confirmation(
     let popup = Paragraph::new(lines).block(
         Block::default()
             .title(Span::styled(
-                "Remove Filter",
+                format!("{} Remove Filter", symbols.delete),
                 Style::default()
                     .fg(palette.error)
                     .add_modifier(Modifier::BOLD),
@@ -4133,9 +4146,9 @@ fn render_task_sort_popup(
         .map(|(index, option)| {
             let selected = popup.selected_index == index;
             let marker = if option.is_active {
-                if symbols.tasks == "#" { "* " } else { "󰄵 " }
+                symbols.active_option_prefix()
             } else {
-                "  "
+                "  ".to_string()
             };
             selectable_line(
                 &format!("{marker}{}", option.label),
@@ -4180,9 +4193,9 @@ fn render_project_sort_popup(
         .map(|(index, option)| {
             let selected = popup.selected_index == index;
             let marker = if option.is_active {
-                if symbols.tasks == "#" { "* " } else { "󰄵 " }
+                symbols.active_option_prefix()
             } else {
-                "  "
+                "  ".to_string()
             };
             selectable_line(
                 &format!("{marker}{}", option.label),
@@ -4227,9 +4240,9 @@ fn render_tag_sort_popup(
         .map(|(index, option)| {
             let selected = popup.selected_index == index;
             let marker = if option.is_active {
-                if symbols.tasks == "#" { "* " } else { "󰄵 " }
+                symbols.active_option_prefix()
             } else {
-                "  "
+                "  ".to_string()
             };
             selectable_line(
                 &format!("{marker}{}", option.label),
@@ -4274,9 +4287,9 @@ fn render_filter_sort_popup(
         .map(|(index, option)| {
             let selected = popup.selected_index == index;
             let marker = if option.is_active {
-                if symbols.tasks == "#" { "* " } else { "󰄵 " }
+                symbols.active_option_prefix()
             } else {
-                "  "
+                "  ".to_string()
             };
             selectable_line(
                 &format!("{marker}{}", option.label),
@@ -4303,7 +4316,7 @@ fn render_filter_sort_popup(
 }
 
 fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
-    if symbols.tasks == "#" {
+    if symbols.is_ascii() {
         return Line::from(vec![Span::styled(
             "↑/↓ move  Tab accept #/@  Enter save  Ctrl+e full editor  Esc cancel",
             Style::default().fg(palette.subtle_text),
@@ -4316,7 +4329,7 @@ fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'s
         Span::raw(" move  "),
         Span::styled("⇥", Style::default().fg(palette.subtle_text)),
         Span::raw(" #/@  "),
-        Span::styled("󰌑", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.save, Style::default().fg(palette.subtle_text)),
         Span::raw(" save  "),
         Span::styled("Ctrl+e", Style::default().fg(palette.subtle_text)),
         Span::raw(" full  "),
@@ -4327,7 +4340,7 @@ fn task_input_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'s
 }
 
 fn project_editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
-    if symbols.tasks == "#" {
+    if symbols.is_ascii() {
         return Line::from(vec![Span::styled(
             "Tab accept parent/next  F1-F4 field  h/l change  Enter save",
             Style::default().fg(palette.subtle_text),
@@ -4342,7 +4355,7 @@ fn project_editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Lin
         Span::raw(" field  "),
         Span::styled("←/→", Style::default().fg(palette.subtle_text)),
         Span::raw(" h/l  "),
-        Span::styled("󰌑", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.save, Style::default().fg(palette.subtle_text)),
         Span::raw(" save"),
     ])
     .right_aligned()
@@ -4396,7 +4409,7 @@ fn editor_cursor_display_column(value: &str, cursor: usize, max_width: usize) ->
 }
 
 fn search_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
-    if symbols.tasks == "#" {
+    if symbols.is_ascii() {
         return Line::from(vec![Span::styled(
             "j/k move  Enter assign  Esc cancel",
             Style::default().fg(palette.subtle_text),
@@ -4405,18 +4418,18 @@ fn search_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'stati
     }
 
     Line::from(vec![
-        Span::styled("󰌑", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.assign, Style::default().fg(palette.subtle_text)),
         Span::raw(" assign  "),
         Span::styled(symbols.voided, Style::default().fg(palette.subtle_text)),
         Span::raw(" esc  "),
-        Span::styled("󰄾", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.move_hint, Style::default().fg(palette.subtle_text)),
         Span::raw(" j/k"),
     ])
     .right_aligned()
 }
 
 fn confirm_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
-    if symbols.tasks == "#" {
+    if symbols.is_ascii() {
         return Line::from(vec![Span::styled(
             "Enter/y confirm  Esc/n cancel",
             Style::default().fg(palette.subtle_text),
@@ -4425,7 +4438,7 @@ fn confirm_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'stat
     }
 
     Line::from(vec![
-        Span::styled("󰄵", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.confirm, Style::default().fg(palette.subtle_text)),
         Span::raw(" enter/y  "),
         Span::styled(symbols.voided, Style::default().fg(palette.subtle_text)),
         Span::raw(" esc/n"),
@@ -4544,6 +4557,7 @@ fn format_history_row(
 
 fn render_weekly_history_lines(
     summaries: &[DayHistorySummary],
+    symbols: Symbols,
     width: u16,
     palette: ThemePalette,
 ) -> Vec<Line<'static>> {
@@ -4566,8 +4580,8 @@ fn render_weekly_history_lines(
             let voided_width = (summary.voided_sessions * 10).div_ceil(max_total);
             let bar = format!(
                 "{}{}",
-                "█".repeat(completed_width),
-                "░".repeat(voided_width)
+                symbols.bar_full.repeat(completed_width),
+                symbols.bar_empty.repeat(voided_width)
             );
             let left_text = format!(
                 "{}  C{:>2} V{:>2}  {}",
@@ -4725,7 +4739,7 @@ fn selectable_count_line(
 }
 
 fn navigation_footer_hint(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
-    let jump_label = if symbols.tasks == "#" {
+    let jump_label = if symbols.is_ascii() {
         "Home/End"
     } else {
         "↤/↦"
@@ -4740,11 +4754,7 @@ fn navigation_footer_hint(symbols: Symbols, palette: ThemePalette) -> Line<'stat
 }
 
 fn projects_sort_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
-    let sort_prefix = if symbols.tasks == "#" {
-        "sort"
-    } else {
-        symbols.sort
-    };
+    let sort_prefix = symbols.sort_footer_prefix();
     Line::from(vec![Span::styled(
         format!(
             " {} {} ",
@@ -4756,11 +4766,7 @@ fn projects_sort_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> L
 }
 
 fn tags_sort_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
-    let sort_prefix = if symbols.tasks == "#" {
-        "sort"
-    } else {
-        symbols.sort
-    };
+    let sort_prefix = symbols.sort_footer_prefix();
     Line::from(vec![Span::styled(
         format!(" {} {} ", sort_prefix, app.tag_sort_order().short_label()),
         Style::default().fg(palette.subtle_text),
@@ -4768,11 +4774,7 @@ fn tags_sort_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<
 }
 
 fn filters_sort_footer(app: &App, symbols: Symbols, palette: ThemePalette) -> Line<'static> {
-    let sort_prefix = if symbols.tasks == "#" {
-        "sort"
-    } else {
-        symbols.sort
-    };
+    let sort_prefix = symbols.sort_footer_prefix();
     Line::from(vec![Span::styled(
         format!(
             " {} {} ",
@@ -4788,7 +4790,7 @@ fn projects_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette)
         return Line::from("").right_aligned();
     }
 
-    let project_new_icon = if symbols.tasks == "#" { "+" } else { "✚" };
+    let project_new_icon = symbols.new_item;
 
     Line::from(vec![
         Span::styled(symbols.sort, Style::default().fg(palette.accent)),
@@ -4805,7 +4807,7 @@ fn tags_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) -> 
     if !focused {
         return Line::from("").right_aligned();
     }
-    let tag_new_icon = if symbols.tasks == "#" { "+" } else { "✚" };
+    let tag_new_icon = symbols.new_item;
     Line::from(vec![
         Span::styled(symbols.sort, Style::default().fg(palette.accent)),
         Span::styled(" o sort  ", Style::default().fg(palette.subtle_text)),
@@ -4821,7 +4823,7 @@ fn filters_footer_hints(symbols: Symbols, focused: bool, palette: ThemePalette) 
     if !focused {
         return Line::from("").right_aligned();
     }
-    let filter_new_icon = if symbols.tasks == "#" { "+" } else { "✚" };
+    let filter_new_icon = symbols.new_item;
     Line::from(vec![
         Span::styled(symbols.sort, Style::default().fg(palette.accent)),
         Span::styled(" o sort  ", Style::default().fg(palette.subtle_text)),
@@ -5007,18 +5009,61 @@ fn assigned_note_line(app: &App, palette: ThemePalette, width: u16) -> Line<'sta
 }
 
 fn markdown_first_plain_line(markdown: &str, palette: ThemePalette) -> Option<String> {
-    markdown_to_lines(markdown, palette)
-        .into_iter()
-        .map(|rendered| {
-            rendered
-                .line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .map(|line| line.trim().to_string())
-        .find(|line| !line.is_empty())
+    let mut in_code_block = false;
+    for raw_line in markdown.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let content = if in_code_block {
+            trimmed
+        } else {
+            markdown_plain_block_content(trimmed)
+        };
+        let inline = markdown_inline_spans(content, palette);
+        let line = inline
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if !line.is_empty() {
+            return Some(line);
+        }
+    }
+    None
+}
+
+fn markdown_plain_block_content(line: &str) -> &str {
+    if let Some(content) = line.strip_prefix('>') {
+        return content.trim_start();
+    }
+    let heading_level = line
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
+    if heading_level > 0 && line.chars().nth(heading_level) == Some(' ') {
+        return line[heading_level + 1..].trim_start();
+    }
+    if let Some(content) = checkbox_content(line) {
+        return content.trim_start();
+    }
+    if let Some(content) = checkbox_done_content(line) {
+        return content.trim_start();
+    }
+    if let Some(content) = bullet_content(line) {
+        return content.trim_start();
+    }
+    if let Some((_, content)) = ordered_list_content(line) {
+        return content.trim_start();
+    }
+    line
 }
 
 fn timer_color(phase: TimerPhase, palette: ThemePalette) -> Color {
@@ -5212,14 +5257,14 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 #[cfg(test)]
 mod tests {
     use super::{
-        FormPreviewPanelView, PreviewLineView, Symbols, TaskTagRowSegment,
-        format_task_tags_for_row, input_window_view, markdown_first_plain_line,
-        markdown_inline_spans, markdown_inline_tokens, preview_panel_lines,
-        preview_panel_required_height,
+        FormPreviewPanelView, PreviewLineView, TaskTagRowSegment, format_task_tags_for_row,
+        input_window_view, markdown_first_plain_line, markdown_inline_spans,
+        markdown_inline_tokens, preview_panel_lines, preview_panel_required_height,
     };
     use crate::config::GlyphMode;
     use crate::domain::TagColor;
     use crate::theme::{ProjectColorPalette, ThemePalette};
+    use crate::ui::symbols::Symbols;
     use ratatui::style::Color;
 
     fn test_palette() -> ThemePalette {
@@ -5442,6 +5487,13 @@ mod tests {
             .expect("plain preview line should exist");
         assert_eq!(line, "Bold and code text");
     }
+
+    #[test]
+    fn markdown_first_plain_line_strips_block_markdown_prefixes() {
+        let line = markdown_first_plain_line("# Title line\n- item", test_palette())
+            .expect("plain preview line should exist");
+        assert_eq!(line, "Title line");
+    }
 }
 
 fn progress_meta_line(
@@ -5461,102 +5513,6 @@ fn progress_meta_line(
         Span::raw(" ".repeat(spaces)),
         Span::styled(remaining, Style::default().fg(palette.text)),
     ])
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Symbols {
-    timer: &'static str,
-    favorite: &'static str,
-    project: &'static str,
-    tag: &'static str,
-    tasks: &'static str,
-    inbox: &'static str,
-    today: &'static str,
-    soon: &'static str,
-    details: &'static str,
-    stats: &'static str,
-    sort: &'static str,
-    search: &'static str,
-    hidden: &'static str,
-    visible: &'static str,
-    recurring: &'static str,
-    priority: &'static str,
-    todo: &'static str,
-    in_progress: &'static str,
-    breaking: &'static str,
-    done: &'static str,
-    voided: &'static str,
-    bar_full: &'static str,
-    bar_empty: &'static str,
-    tag_chip_left: &'static str,
-    tag_chip_right: &'static str,
-    tag_chip_uses_background: bool,
-    ascii_mode: bool,
-}
-
-impl Symbols {
-    fn new(mode: GlyphMode) -> Self {
-        match mode {
-            GlyphMode::Ascii => Self {
-                timer: "*",
-                favorite: "*",
-                project: "P",
-                tag: "@",
-                tasks: "#",
-                inbox: "I",
-                today: "T",
-                soon: "S",
-                details: ">",
-                stats: "%",
-                sort: "~",
-                search: "/",
-                hidden: "x",
-                visible: "o",
-                recurring: "~",
-                priority: "!",
-                todo: ".",
-                in_progress: ">",
-                breaking: "~",
-                done: "x",
-                voided: "!",
-                bar_full: "=",
-                bar_empty: "-",
-                tag_chip_left: "[",
-                tag_chip_right: "]",
-                tag_chip_uses_background: false,
-                ascii_mode: true,
-            },
-            GlyphMode::NerdFonts => Self {
-                timer: "󰔛",
-                favorite: "󰓎",
-                project: "󰉋",
-                tag: "󰓹",
-                tasks: "󰄱",
-                inbox: "󰏆",
-                today: "󰃰",
-                soon: "󰸘",
-                details: "󰋼",
-                stats: "󰕾",
-                sort: "󰒺",
-                search: "󰍉",
-                hidden: "󰈉",
-                visible: "󰈈",
-                recurring: "󰑖",
-                priority: "⚑",
-                todo: "󰄱",
-                in_progress: "󰧞",
-                breaking: "󰒲",
-                done: "󰄵",
-                voided: "󰅖",
-                bar_full: "█",
-                bar_empty: "░",
-                tag_chip_left: "",
-                tag_chip_right: "",
-                tag_chip_uses_background: true,
-                ascii_mode: false,
-            },
-        }
-    }
 }
 
 fn project_color_for_tag(color: TagColor) -> crate::domain::ProjectColor {
@@ -5679,7 +5635,7 @@ fn task_recurring_style(
 fn task_priority_indicator(priority: TaskPriority, symbols: Symbols) -> Option<String> {
     match priority {
         TaskPriority::P1 | TaskPriority::P2 | TaskPriority::P3 => {
-            if symbols.ascii_mode {
+            if symbols.is_ascii() {
                 Some(priority.label().to_string())
             } else {
                 Some(format!("{}{}", symbols.priority, priority.level()))
