@@ -1,5 +1,6 @@
 use chrono::{
-    DateTime, Datelike, Days, Local, Months, NaiveDate, NaiveDateTime, NaiveTime, Weekday,
+    DateTime, Datelike, Days, Local, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
+    Weekday,
 };
 
 use crate::domain::TaskDue;
@@ -40,12 +41,14 @@ pub fn next_recurring_due(current_due: &TaskDue, completed_at: DateTime<Local>) 
     }
 
     let current_instant = current_due.datetime.unwrap_or_else(|| {
-        current_due
-            .date
-            .and_hms_opt(0, 0, 0)
-            .expect("midnight is valid")
+        local_naive_to_utc(
+            current_due
+                .date
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is valid"),
+        )
     });
-    let floor = current_instant.max(completed_at.naive_local());
+    let floor = current_instant.max(completed_at.with_timezone(&Utc));
     let mut reference_date = current_due.date.checked_add_days(Days::new(1))?;
 
     for _ in 0..366 {
@@ -55,10 +58,12 @@ pub fn next_recurring_due(current_due: &TaskDue, completed_at: DateTime<Local>) 
         }
 
         let next_instant = next_due.datetime.unwrap_or_else(|| {
-            next_due
-                .date
-                .and_hms_opt(0, 0, 0)
-                .expect("midnight is valid")
+            local_naive_to_utc(
+                next_due
+                    .date
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight is valid"),
+            )
         });
         if next_instant > floor {
             return Some(next_due);
@@ -144,6 +149,7 @@ fn update_best_match(
             TaskDue {
                 date: candidate.1.date,
                 datetime: None,
+                timezone: None,
                 string: input[start..end].trim().to_string(),
                 is_recurring: candidate.1.is_recurring,
             },
@@ -267,6 +273,7 @@ fn relative_candidates(
                 TaskDue {
                     date,
                     datetime: None,
+                    timezone: None,
                     string: input[words[index].1..words[index + 2].2].trim().to_string(),
                     is_recurring: false,
                 },
@@ -288,6 +295,7 @@ fn relative_candidates(
                 TaskDue {
                     date,
                     datetime: None,
+                    timezone: None,
                     string: input[words[index].1..words[index + 2].2].trim().to_string(),
                     is_recurring: true,
                 },
@@ -308,6 +316,7 @@ fn relative_candidates(
                 TaskDue {
                     date,
                     datetime: None,
+                    timezone: None,
                     string: input[words[index].1..words[index + 2].2].trim().to_string(),
                     is_recurring: true,
                 },
@@ -337,6 +346,7 @@ fn iso_date_candidates(input: &str) -> Vec<((usize, usize), TaskDue)> {
                     TaskDue {
                         date,
                         datetime: None,
+                        timezone: None,
                         string: candidate.to_string(),
                         is_recurring: false,
                     },
@@ -379,6 +389,7 @@ fn month_day_candidates(input: &str, reference_date: NaiveDate) -> Vec<((usize, 
             TaskDue {
                 date,
                 datetime: None,
+                timezone: None,
                 string: input[start..end].trim().to_string(),
                 is_recurring: false,
             },
@@ -395,6 +406,7 @@ fn simple_due(phrase: impl Into<String>, date: NaiveDate, is_recurring: bool) ->
         TaskDue {
             date,
             datetime: None,
+            timezone: None,
             string,
             is_recurring,
         },
@@ -408,12 +420,28 @@ fn with_time_suffix(
     mut due: TaskDue,
 ) -> ((usize, usize), TaskDue) {
     if let Some((time_end, time)) = parse_time_suffix(input, end) {
-        due.datetime = Some(NaiveDateTime::new(due.date, time));
+        due.datetime = Some(local_naive_to_utc(NaiveDateTime::new(due.date, time)));
+        due.timezone = local_timezone_name();
         due.string = input[start..time_end].trim().to_string();
         (extend_removable_span(input, start, time_end), due)
     } else {
         (extend_removable_span(input, start, end), due)
     }
+}
+
+fn local_naive_to_utc(naive: NaiveDateTime) -> DateTime<Utc> {
+    Local
+        .from_local_datetime(&naive)
+        .single()
+        .or_else(|| Local.from_local_datetime(&naive).earliest())
+        .map(|datetime| datetime.with_timezone(&Utc))
+        .unwrap_or_else(|| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+}
+
+fn local_timezone_name() -> Option<String> {
+    std::env::var("TZ")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn parse_time_suffix(input: &str, start: usize) -> Option<(usize, NaiveTime)> {
@@ -531,6 +559,7 @@ fn weekday_range_candidates(
             TaskDue {
                 date: due_date,
                 datetime: None,
+                timezone: None,
                 string: input[start..end].trim().to_string(),
                 is_recurring: true,
             },
@@ -587,6 +616,7 @@ fn weekday_list_candidates(
             TaskDue {
                 date: next_matching_weekday(reference_date, weekdays.as_slice(), true),
                 datetime: None,
+                timezone: None,
                 string: input[words[index].1..end].trim().to_string(),
                 is_recurring: true,
             },
@@ -643,6 +673,7 @@ fn monthly_ordinal_weekday_candidates(
             TaskDue {
                 date: due_date,
                 datetime: None,
+                timezone: None,
                 string: input[start..end].trim().to_string(),
                 is_recurring: true,
             },
@@ -990,7 +1021,7 @@ mod tests {
 
     use crate::domain::TaskDue;
 
-    use super::{next_recurring_due, parse_task_input};
+    use super::{local_naive_to_utc, next_recurring_due, parse_task_input};
 
     #[test]
     fn parses_tomorrow_due_phrase_and_cleans_title() {
@@ -1019,6 +1050,7 @@ mod tests {
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 12).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "in 3 days".to_string(),
                 is_recurring: false,
             })
@@ -1036,6 +1068,7 @@ mod tests {
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 13).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "every monday".to_string(),
                 is_recurring: true,
             })
@@ -1052,6 +1085,7 @@ mod tests {
             Some(TaskDue {
                 date: reference_date,
                 datetime: None,
+                timezone: None,
                 string: "every monday".to_string(),
                 is_recurring: true,
             })
@@ -1071,6 +1105,7 @@ mod tests {
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "apr 10".to_string(),
                 is_recurring: false,
             })
@@ -1112,6 +1147,7 @@ mod tests {
             Some(TaskDue {
                 date: reference_date,
                 datetime: None,
+                timezone: None,
                 string: "every day".to_string(),
                 is_recurring: true,
             })
@@ -1129,6 +1165,7 @@ mod tests {
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 11).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "every other day".to_string(),
                 is_recurring: true,
             })
@@ -1146,6 +1183,7 @@ mod tests {
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 13).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "monday through thursday".to_string(),
                 is_recurring: true,
             })
@@ -1166,6 +1204,7 @@ mod tests {
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "every monday, tuesday and friday".to_string(),
                 is_recurring: true,
             })
@@ -1183,6 +1222,7 @@ mod tests {
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 13).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "every week day".to_string(),
                 is_recurring: true,
             })
@@ -1203,6 +1243,7 @@ mod tests {
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "the third friday of the month".to_string(),
                 is_recurring: true,
             })
@@ -1231,6 +1272,7 @@ mod tests {
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "tomorrow".to_string(),
                 is_recurring: false,
             })
@@ -1260,6 +1302,7 @@ mod tests {
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 16).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "next week".to_string(),
                 is_recurring: false,
             })
@@ -1276,12 +1319,13 @@ mod tests {
             parsed.due,
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
-                datetime: Some(
+                datetime: Some(local_naive_to_utc(
                     NaiveDate::from_ymd_opt(2026, 4, 10)
                         .expect("valid date")
                         .and_hms_opt(15, 0, 0)
                         .expect("valid time"),
-                ),
+                )),
+                timezone: None,
                 string: "tomorrow at 3pm".to_string(),
                 is_recurring: false,
             })
@@ -1298,12 +1342,13 @@ mod tests {
             parsed.due,
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
-                datetime: Some(
+                datetime: Some(local_naive_to_utc(
                     NaiveDate::from_ymd_opt(2026, 4, 10)
                         .expect("valid date")
                         .and_hms_opt(14, 0, 0)
                         .expect("valid time"),
-                ),
+                )),
+                timezone: None,
                 string: "fri 14:00".to_string(),
                 is_recurring: false,
             })
@@ -1320,7 +1365,10 @@ mod tests {
             parsed.due,
             Some(TaskDue {
                 date: reference_date,
-                datetime: Some(reference_date.and_hms_opt(9, 0, 0).expect("valid time"),),
+                datetime: Some(local_naive_to_utc(
+                    reference_date.and_hms_opt(9, 0, 0).expect("valid time"),
+                )),
+                timezone: None,
                 string: "every day at 9am".to_string(),
                 is_recurring: true,
             })
@@ -1337,12 +1385,13 @@ mod tests {
             parsed.due,
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
-                datetime: Some(
+                datetime: Some(local_naive_to_utc(
                     NaiveDate::from_ymd_opt(2026, 4, 10)
                         .expect("valid date")
                         .and_hms_opt(12, 0, 0)
                         .expect("valid time"),
-                ),
+                )),
+                timezone: None,
                 string: "tomorrow at noon".to_string(),
                 is_recurring: false,
             })
@@ -1359,12 +1408,13 @@ mod tests {
             parsed.due,
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
-                datetime: Some(
+                datetime: Some(local_naive_to_utc(
                     NaiveDate::from_ymd_opt(2026, 4, 10)
                         .expect("valid date")
                         .and_hms_opt(0, 0, 0)
                         .expect("valid time"),
-                ),
+                )),
+                timezone: None,
                 string: "tomorrow at midnight".to_string(),
                 is_recurring: false,
             })
@@ -1387,6 +1437,7 @@ mod tests {
         let current_due = TaskDue {
             date: NaiveDate::from_ymd_opt(2026, 4, 1).expect("valid date"),
             datetime: None,
+            timezone: None,
             string: "every day".to_string(),
             is_recurring: true,
         };
@@ -1405,6 +1456,7 @@ mod tests {
             TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 11).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "every day".to_string(),
                 is_recurring: true,
             }
@@ -1415,12 +1467,13 @@ mod tests {
     fn next_recurring_due_advances_past_current_instance_when_completed_early() {
         let current_due = TaskDue {
             date: NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date"),
-            datetime: Some(
+            datetime: Some(local_naive_to_utc(
                 NaiveDate::from_ymd_opt(2026, 4, 17)
                     .expect("valid date")
                     .and_hms_opt(9, 0, 0)
                     .expect("valid time"),
-            ),
+            )),
+            timezone: None,
             string: "every friday at 9am".to_string(),
             is_recurring: true,
         };
@@ -1438,12 +1491,13 @@ mod tests {
             next_due,
             TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 24).expect("valid date"),
-                datetime: Some(
+                datetime: Some(local_naive_to_utc(
                     NaiveDate::from_ymd_opt(2026, 4, 24)
                         .expect("valid date")
                         .and_hms_opt(9, 0, 0)
                         .expect("valid time"),
-                ),
+                )),
+                timezone: None,
                 string: "every friday at 9am".to_string(),
                 is_recurring: true,
             }

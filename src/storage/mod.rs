@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at TEXT,
     deleted_at TEXT,
     due_date TEXT,
-    due_datetime TEXT,
+    due_datetime_utc TEXT,
+    due_timezone TEXT,
     due_string TEXT,
     due_is_recurring INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY(project_id) REFERENCES projects(id)
@@ -252,8 +253,12 @@ impl Database {
         )?;
         self.ensure_tasks_column("due_date", "ALTER TABLE tasks ADD COLUMN due_date TEXT")?;
         self.ensure_tasks_column(
-            "due_datetime",
-            "ALTER TABLE tasks ADD COLUMN due_datetime TEXT",
+            "due_datetime_utc",
+            "ALTER TABLE tasks ADD COLUMN due_datetime_utc TEXT",
+        )?;
+        self.ensure_tasks_column(
+            "due_timezone",
+            "ALTER TABLE tasks ADD COLUMN due_timezone TEXT",
         )?;
         self.ensure_tasks_column("due_string", "ALTER TABLE tasks ADD COLUMN due_string TEXT")?;
         self.ensure_tasks_column(
@@ -377,7 +382,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         // closure. The closure is conceptually similar to a row-to-struct
         // callback in C, but its return type is checked by the compiler.
         let mut statement = self.connection.prepare(
-            "SELECT id, project_id, title, description, status, priority, created_at, completed_at, deleted_at, due_date, due_datetime, due_string, due_is_recurring
+            "SELECT id, project_id, title, description, status, priority, created_at, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring
              FROM tasks
              ORDER BY created_at DESC, id DESC",
         )?;
@@ -393,20 +398,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
                 created_at: row.get(6)?,
                 completed_at: row.get(7)?,
                 deleted_at: row.get(8)?,
-                due: match (
-                    row.get::<_, Option<chrono::NaiveDate>>(9)?,
-                    row.get::<_, Option<chrono::NaiveDateTime>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                    row.get::<_, i64>(12)?,
-                ) {
-                    (Some(date), datetime, Some(string), is_recurring) => Some(TaskDue {
-                        date,
-                        datetime,
-                        string,
-                        is_recurring: is_recurring != 0,
-                    }),
-                    _ => None,
-                },
+                due: Self::row_due(row, 9, 10, 11, 12, 13)?,
             })
         })?;
 
@@ -425,8 +417,8 @@ impl TaskRepository for SqliteTaskRepository<'_> {
     ) -> Result<Task> {
         self.connection
             .execute(
-                "INSERT INTO tasks(project_id, title, status, priority, created_at, completed_at, due_date, due_datetime, due_string, due_is_recurring)
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9)",
+                "INSERT INTO tasks(project_id, title, status, priority, created_at, completed_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     project_id.0,
                     title,
@@ -434,7 +426,8 @@ impl TaskRepository for SqliteTaskRepository<'_> {
                     TaskPriority::P4.to_db(),
                     now,
                     due.map(|due| due.date),
-                    due.and_then(|due| due.datetime),
+                    due.and_then(|due| due.datetime).map(|dt| dt.to_rfc3339()),
+                    due.and_then(|due| due.timezone.clone()),
                     due.map(|due| due.string.clone()),
                     due.map(|due| if due.is_recurring { 1_i64 } else { 0_i64 })
                         .unwrap_or(0_i64),
@@ -451,15 +444,20 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         self.connection
             .execute(
                 "UPDATE tasks
-                 SET title = ?1, description = ?2, project_id = ?3, priority = ?4, due_date = ?5, due_datetime = ?6, due_string = ?7, due_is_recurring = ?8
-                 WHERE id = ?9",
+                 SET title = ?1, description = ?2, project_id = ?3, priority = ?4, due_date = ?5, due_datetime_utc = ?6, due_timezone = ?7, due_string = ?8, due_is_recurring = ?9
+                 WHERE id = ?10",
                 params![
                     update.title,
                     update.description,
                     update.project_id.0,
                     update.priority.to_db(),
                     update.due.as_ref().map(|due| due.date),
-                    update.due.as_ref().and_then(|due| due.datetime),
+                    update
+                        .due
+                        .as_ref()
+                        .and_then(|due| due.datetime)
+                        .map(|dt| dt.to_rfc3339()),
+                    update.due.as_ref().and_then(|due| due.timezone.clone()),
                     update.due.as_ref().map(|due| due.string.clone()),
                     update
                         .due
@@ -510,7 +508,7 @@ impl SqliteTaskRepository<'_> {
         self.connection
             .query_row(
                 "SELECT id, project_id, title, description, status, created_at, completed_at
-                 , priority, deleted_at, due_date, due_datetime, due_string, due_is_recurring
+                 , priority, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring
                  FROM tasks
                  WHERE id = ?1",
                 params![task_id.0],
@@ -525,25 +523,44 @@ impl SqliteTaskRepository<'_> {
                         completed_at: row.get(6)?,
                         priority: TaskPriority::from_db(row.get::<_, i64>(7)?),
                         deleted_at: row.get(8)?,
-                        due: match (
-                            row.get::<_, Option<chrono::NaiveDate>>(9)?,
-                            row.get::<_, Option<chrono::NaiveDateTime>>(10)?,
-                            row.get::<_, Option<String>>(11)?,
-                            row.get::<_, i64>(12)?,
-                        ) {
-                            (Some(date), datetime, Some(string), is_recurring) => Some(TaskDue {
-                                date,
-                                datetime,
-                                string,
-                                is_recurring: is_recurring != 0,
-                            }),
-                            _ => None,
-                        },
+                        due: Self::row_due(row, 9, 10, 11, 12, 13)?,
                     })
                 },
             )
             .optional()
             .context("failed to load task")
+    }
+
+    fn row_due(
+        row: &rusqlite::Row<'_>,
+        date_col: usize,
+        datetime_col: usize,
+        timezone_col: usize,
+        string_col: usize,
+        recurring_col: usize,
+    ) -> rusqlite::Result<Option<TaskDue>> {
+        let date = row.get::<_, Option<chrono::NaiveDate>>(date_col)?;
+        let datetime_utc = row.get::<_, Option<String>>(datetime_col)?;
+        let timezone = row.get::<_, Option<String>>(timezone_col)?;
+        let string = row.get::<_, Option<String>>(string_col)?;
+        let is_recurring = row.get::<_, i64>(recurring_col)?;
+
+        match (date, string) {
+            (Some(date), Some(string)) => {
+                let datetime = datetime_utc
+                    .as_deref()
+                    .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+                Ok(Some(TaskDue {
+                    date,
+                    datetime,
+                    timezone,
+                    string,
+                    is_recurring: is_recurring != 0,
+                }))
+            }
+            _ => Ok(None),
+        }
     }
 }
 
@@ -1434,7 +1451,7 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use chrono::{Local, NaiveDate};
+    use chrono::{Local, NaiveDate, Utc};
 
     use crate::domain::{
         FilterColor, FilterUpdate, ProjectColor, ProjectUpdate, TagColor, TagUpdate, TaskDue,
@@ -1445,6 +1462,10 @@ mod tests {
         Database, FilterRepository, PomodoroRepository, ProjectRepository, TagRepository,
         TaskRepository,
     };
+
+    fn naive_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<Utc> {
+        chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)
+    }
 
     #[test]
     fn in_memory_database_bootstraps_empty_state() -> Result<()> {
@@ -1541,6 +1562,7 @@ mod tests {
             Some(&TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "tomorrow".to_string(),
                 is_recurring: false,
             }),
@@ -1552,6 +1574,7 @@ mod tests {
             Some(TaskDue {
                 date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
                 datetime: None,
+                timezone: None,
                 string: "tomorrow".to_string(),
                 is_recurring: false,
             })
@@ -1576,7 +1599,8 @@ mod tests {
             inbox_project_id,
             Some(&TaskDue {
                 date: due_date,
-                datetime: Some(due_datetime),
+                datetime: Some(naive_to_utc(due_datetime)),
+                timezone: None,
                 string: "tomorrow at 3pm".to_string(),
                 is_recurring: false,
             }),
@@ -1587,7 +1611,8 @@ mod tests {
             created.due,
             Some(TaskDue {
                 date: due_date,
-                datetime: Some(due_datetime),
+                datetime: Some(naive_to_utc(due_datetime)),
+                timezone: None,
                 string: "tomorrow at 3pm".to_string(),
                 is_recurring: false,
             })
@@ -1614,7 +1639,8 @@ mod tests {
                 priority: TaskPriority::P2,
                 due: Some(TaskDue {
                     date: due_date,
-                    datetime: Some(due_datetime),
+                    datetime: Some(naive_to_utc(due_datetime)),
+                    timezone: None,
                     string: "every week at 9:30am".to_string(),
                     is_recurring: true,
                 }),
@@ -1628,7 +1654,8 @@ mod tests {
             updated.due,
             Some(TaskDue {
                 date: due_date,
-                datetime: Some(due_datetime),
+                datetime: Some(naive_to_utc(due_datetime)),
+                timezone: None,
                 string: "every week at 9:30am".to_string(),
                 is_recurring: true,
             })

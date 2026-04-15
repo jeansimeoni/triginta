@@ -739,7 +739,12 @@ fn render_task_details_panel(
     if let Some(due) = &task.due {
         let due_text = due
             .datetime
-            .map(|datetime| datetime.format("%Y-%m-%d %H:%M").to_string())
+            .map(|datetime| {
+                datetime
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
             .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
         meta_lines.push(Line::from(format!("Due: {due_text}")));
     }
@@ -5541,7 +5546,7 @@ fn task_is_overdue(task: &Task, now: chrono::DateTime<Local>) -> bool {
     }
 
     if let Some(datetime) = due.datetime {
-        datetime < now.naive_local()
+        datetime < now.with_timezone(&chrono::Utc)
     } else {
         due.date < now.date_naive()
     }
@@ -5560,7 +5565,10 @@ fn format_due_label(due: &crate::domain::TaskDue, today: NaiveDate) -> String {
     };
 
     if let Some(datetime) = due.datetime {
-        format!("{day_label} {}", datetime.format("%H:%M"))
+        format!(
+            "{day_label} {}",
+            datetime.with_timezone(&chrono::Local).format("%H:%M")
+        )
     } else {
         day_label
     }

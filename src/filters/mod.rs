@@ -349,6 +349,7 @@ mod tests {
             Some(TaskDue {
                 date: today,
                 datetime: None,
+                timezone: None,
                 string: "today".to_string(),
                 is_recurring: false,
             }),

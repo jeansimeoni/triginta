@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::{env, fs, process::Command, time::Duration};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -686,7 +686,7 @@ pub struct TaskEditorView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDuePreviewView {
     pub date: NaiveDate,
-    pub datetime: Option<NaiveDateTime>,
+    pub datetime: Option<DateTime<Utc>>,
     pub string: String,
     pub is_recurring: bool,
 }
@@ -2326,7 +2326,7 @@ impl App {
             if let Some(datetime) = due.datetime {
                 preview_lines.push(PreviewLineView::key_value(
                     "Due Time",
-                    datetime.format("%H:%M").to_string(),
+                    datetime.with_timezone(&Local).format("%H:%M").to_string(),
                 ));
             }
             preview_lines.push(PreviewLineView::key_value(
@@ -2339,7 +2339,7 @@ impl App {
                     format!(
                         "{} {}",
                         due.date.format("%Y-%m-%d"),
-                        datetime.format("%H:%M")
+                        datetime.with_timezone(&Local).format("%H:%M")
                     )
                 })
                 .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
@@ -2385,7 +2385,7 @@ impl App {
             ));
             let time_value = due
                 .datetime
-                .map(|datetime| datetime.format("%H:%M").to_string())
+                .map(|datetime| datetime.with_timezone(&Local).format("%H:%M").to_string())
                 .unwrap_or_else(|| "-".to_string());
             preview_lines.push(PreviewLineView::key_value("Time", time_value));
             preview_lines.push(PreviewLineView::key_value(
@@ -3081,7 +3081,13 @@ impl App {
                 .ok()
                 .or_else(|| parse_due_time_input(time_text))
                 .with_context(|| format!("invalid due time: {time_text}"))?;
-            Some(NaiveDateTime::new(date, time))
+            Some(Self::local_naive_to_utc(date.and_time(time)))
+        };
+
+        let timezone = if time_text.is_empty() {
+            recurring_due.as_ref().and_then(|due| due.timezone.clone())
+        } else {
+            Self::local_timezone_name()
         };
 
         let string = if !editor.due_natural.trim().is_empty() {
@@ -3092,7 +3098,7 @@ impl App {
             format!(
                 "{} at {}",
                 date.format("%Y-%m-%d"),
-                datetime.format("%H:%M")
+                datetime.with_timezone(&Local).format("%H:%M")
             )
         } else {
             date.format("%Y-%m-%d").to_string()
@@ -3101,9 +3107,25 @@ impl App {
         Ok(Some(crate::domain::TaskDue {
             date,
             datetime,
+            timezone,
             string,
             is_recurring: recurring_due.is_some(),
         }))
+    }
+
+    fn local_naive_to_utc(naive: chrono::NaiveDateTime) -> DateTime<Utc> {
+        Local
+            .from_local_datetime(&naive)
+            .single()
+            .or_else(|| Local.from_local_datetime(&naive).earliest())
+            .map(|datetime| datetime.with_timezone(&Utc))
+            .unwrap_or_else(|| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+    }
+
+    fn local_timezone_name() -> Option<String> {
+        std::env::var("TZ")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
     }
 
     fn focus_editor_field(editor: &mut TaskEditorState, field: TaskEditorField) {
@@ -4897,7 +4919,7 @@ impl App {
                 (
                     due.date.format("%Y-%m-%d").to_string(),
                     due.datetime
-                        .map(|datetime| datetime.format("%H:%M").to_string())
+                        .map(|datetime| datetime.with_timezone(&Local).format("%H:%M").to_string())
                         .unwrap_or_default(),
                     if due.is_recurring {
                         due.string.clone()
@@ -4961,7 +4983,7 @@ impl App {
                 (
                     due.date.format("%Y-%m-%d").to_string(),
                     due.datetime
-                        .map(|datetime| datetime.format("%H:%M").to_string())
+                        .map(|datetime| datetime.with_timezone(&Local).format("%H:%M").to_string())
                         .unwrap_or_default(),
                     if due.is_recurring {
                         due.string.clone()
@@ -5322,7 +5344,7 @@ impl App {
             editor.due_date_input = due.date.format("%Y-%m-%d").to_string();
             editor.due_time_input = due
                 .datetime
-                .map(|datetime| datetime.format("%H:%M").to_string())
+                .map(|datetime| datetime.with_timezone(&Local).format("%H:%M").to_string())
                 .unwrap_or_default();
             editor.recurrence_input = if due.is_recurring {
                 due.string.clone()
@@ -5408,7 +5430,7 @@ impl App {
         editor.due_date_input = due.date.format("%Y-%m-%d").to_string();
         editor.due_natural = recurrence.to_string();
         if let Some(datetime) = due.datetime {
-            editor.due_time_input = datetime.format("%H:%M").to_string();
+            editor.due_time_input = datetime.with_timezone(&Local).format("%H:%M").to_string();
         } else if editor.due_time_input.trim().is_empty() {
             editor.due_time_input.clear();
         }
@@ -8854,7 +8876,7 @@ fn fuzzy_matches(query: &str, candidate: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration as ChronoDuration, Local, NaiveDate};
+    use chrono::{Duration as ChronoDuration, Local, NaiveDate, Utc};
 
     use crate::config::{AppConfig, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings};
     use crate::domain::{
@@ -8886,6 +8908,10 @@ mod tests {
             }
             _ => panic!("expected key/value preview line"),
         }
+    }
+
+    fn naive_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<Utc> {
+        super::App::local_naive_to_utc(naive)
     }
 
     fn preview_value_for_label<'a>(lines: &'a [PreviewLineView], label: &str) -> Option<&'a str> {
@@ -9378,7 +9404,9 @@ mod tests {
         assert_eq!(due_preview.date, tomorrow);
         assert_eq!(
             due_preview.datetime,
-            Some(tomorrow.and_hms_opt(15, 0, 0).expect("valid time"))
+            Some(naive_to_utc(
+                tomorrow.and_hms_opt(15, 0, 0).expect("valid time"),
+            ))
         );
 
         app.handle_key(crossterm::event::KeyCode::Enter)
@@ -9390,7 +9418,10 @@ mod tests {
             task.due,
             Some(TaskDue {
                 date: tomorrow,
-                datetime: Some(tomorrow.and_hms_opt(15, 0, 0).expect("valid time")),
+                datetime: Some(naive_to_utc(
+                    tomorrow.and_hms_opt(15, 0, 0).expect("valid time"),
+                )),
+                timezone: None,
                 string: "tomorrow at 3pm".to_string(),
                 is_recurring: false,
             })
@@ -9469,6 +9500,7 @@ mod tests {
             Some(TaskDue {
                 date: today + chrono::Days::new(1),
                 datetime: None,
+                timezone: None,
                 string: (today + chrono::Days::new(1))
                     .format("%Y-%m-%d")
                     .to_string(),
@@ -9591,7 +9623,10 @@ mod tests {
             app.selected_task().expect("task should exist").due,
             Some(TaskDue {
                 date: expected_date,
-                datetime: Some(expected_date.and_hms_opt(15, 0, 0).expect("valid time")),
+                datetime: Some(naive_to_utc(
+                    expected_date.and_hms_opt(15, 0, 0).expect("valid time"),
+                )),
+                timezone: None,
                 string: format!("{} at 15:00", expected_date.format("%Y-%m-%d")),
                 is_recurring: false,
             })
@@ -9702,6 +9737,7 @@ mod tests {
             Some(TaskDue {
                 date: today + chrono::Days::new(1),
                 datetime: None,
+                timezone: None,
                 string: "tomorrow".to_string(),
                 is_recurring: false,
             })
@@ -9726,7 +9762,9 @@ mod tests {
         assert_eq!(due_preview.date, tomorrow);
         assert_eq!(
             due_preview.datetime,
-            Some(tomorrow.and_hms_opt(15, 0, 0).expect("valid time"))
+            Some(naive_to_utc(
+                tomorrow.and_hms_opt(15, 0, 0).expect("valid time"),
+            ))
         );
 
         app.handle_key(crossterm::event::KeyCode::Enter)
@@ -9738,7 +9776,10 @@ mod tests {
             task.due,
             Some(TaskDue {
                 date: tomorrow,
-                datetime: Some(tomorrow.and_hms_opt(15, 0, 0).expect("valid time")),
+                datetime: Some(naive_to_utc(
+                    tomorrow.and_hms_opt(15, 0, 0).expect("valid time"),
+                )),
+                timezone: None,
                 string: "tomorrow at 3pm".to_string(),
                 is_recurring: false,
             })
@@ -10697,6 +10738,7 @@ mod tests {
                 Some(&TaskDue {
                     date: today,
                     datetime: None,
+                    timezone: None,
                     string: "today".to_string(),
                     is_recurring: false,
                 }),
@@ -10710,6 +10752,7 @@ mod tests {
                 Some(&TaskDue {
                     date: today + chrono::Days::new(2),
                     datetime: None,
+                    timezone: None,
                     string: "next week".to_string(),
                     is_recurring: false,
                 }),
@@ -11933,6 +11976,7 @@ mod tests {
                 Some(&TaskDue {
                     date: today,
                     datetime: None,
+                    timezone: None,
                     string: "today".to_string(),
                     is_recurring: false,
                 }),
@@ -11946,6 +11990,7 @@ mod tests {
                 Some(&TaskDue {
                     date: today,
                     datetime: None,
+                    timezone: None,
                     string: "today".to_string(),
                     is_recurring: false,
                 }),

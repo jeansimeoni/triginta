@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 
 // Tuple structs are lightweight "newtypes": this is roughly like wrapping an
 // `int64_t` in a dedicated typedef, except Rust keeps it type-safe so a
@@ -498,7 +498,8 @@ impl Default for TaskPriority {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDue {
     pub date: NaiveDate,
-    pub datetime: Option<NaiveDateTime>,
+    pub datetime: Option<DateTime<Utc>>,
+    pub timezone: Option<String>,
     pub string: String,
     pub is_recurring: bool,
 }
