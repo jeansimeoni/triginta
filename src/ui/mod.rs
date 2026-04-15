@@ -161,7 +161,8 @@ fn render_timer_panel(
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -189,8 +190,9 @@ fn render_timer_panel(
     frame.render_widget(progress_meta, sections[2]);
     frame.render_widget(Paragraph::new(""), sections[3]);
     frame.render_widget(cycle, sections[4]);
-    frame.render_widget(assigned_task, sections[5]);
-    frame.render_widget(note_preview, sections[6]);
+    frame.render_widget(Paragraph::new(""), sections[5]);
+    frame.render_widget(assigned_task, sections[6]);
+    frame.render_widget(note_preview, sections[7]);
 }
 
 fn render_history_panel(
