@@ -5107,13 +5107,17 @@ fn navigation_title(
         Span::styled(format!("{} ", symbols.tasks), nav_style),
         Span::styled("Navigation", nav_style),
         Span::raw(" - "),
+        Span::raw("[4] "),
         Span::styled(format!("{} ", symbols.project), projects_style),
-        Span::styled("[4] Projects", projects_style),
+        Span::styled("Projects", projects_style),
         Span::raw(" - "),
+        Span::raw("[5] "),
         Span::styled(format!("{} ", symbols.tag), tags_style),
-        Span::styled("[5] Tags", tags_style),
+        Span::styled("Tags", tags_style),
         Span::raw(" - "),
-        Span::styled("[6] Filters", filters_style),
+        Span::raw("[6] "),
+        Span::styled(format!("{} ", symbols.filter), filters_style),
+        Span::styled("Filters", filters_style),
     ])
 }
 
