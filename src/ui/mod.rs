@@ -414,6 +414,15 @@ fn render_navigation_panel(
         SidebarTab::Tags => tags_sort_footer(app, symbols, palette),
         SidebarTab::Filters => filters_sort_footer(app, symbols, palette),
     };
+    let footer = footer_with_filter_indicator(
+        footer,
+        !app.active_sidebar_search_query()
+            .unwrap_or("")
+            .trim()
+            .is_empty(),
+        symbols,
+        palette,
+    );
     let footer_hints = match app.active_sidebar_tab() {
         SidebarTab::Navigation => navigation_footer_hint(symbols, palette),
         SidebarTab::Projects => {
@@ -540,6 +549,12 @@ fn render_favorites_panel(
         focused_panel == PanelFocus::Favorites,
         palette,
     )
+    .title_bottom(footer_with_filter_indicator(
+        Line::from(""),
+        !search_query.trim().is_empty(),
+        symbols,
+        palette,
+    ))
     .title_bottom(favorites_footer_hints(
         symbols,
         focused_panel == PanelFocus::Favorites,
@@ -588,7 +603,12 @@ fn render_task_list_panel(
 ) {
     let visible_tasks = app.visible_tasks();
     let search_query = app.task_list_search_query().unwrap_or("");
-    let footer = task_list_footer(app, symbols, palette);
+    let footer = footer_with_filter_indicator(
+        task_list_footer(app, symbols, palette),
+        !search_query.trim().is_empty(),
+        symbols,
+        palette,
+    );
     let footer_hints = task_list_footer_hints(
         app,
         symbols,
@@ -2640,6 +2660,24 @@ const STATUS_BAR_GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
 fn is_status_bar_global_focus_tip(tip: &ShortcutTip) -> bool {
     let compact = tip.keys.replace(' ', "").to_ascii_lowercase();
     compact.contains("1-8") && compact.contains("tab")
+}
+
+fn footer_with_filter_indicator(
+    footer: Line<'static>,
+    filtered: bool,
+    symbols: Symbols,
+    palette: ThemePalette,
+) -> Line<'static> {
+    if !filtered {
+        return footer;
+    }
+
+    let mut spans = vec![Span::styled(
+        format!(" {} ", symbols.filter),
+        Style::default().fg(palette.accent),
+    )];
+    spans.extend(footer.spans);
+    Line::from(spans)
 }
 
 fn navigation_group_status_bar_tips(active_tab: SidebarTab) -> Vec<ShortcutTip> {
@@ -5479,11 +5517,11 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 mod tests {
     use super::{
         FormPreviewPanelView, PreviewLineView, STATUS_BAR_GLOBAL_SHORTCUTS, TaskTagRowSegment,
-        format_task_tags_for_row, history_footer_hints, input_window_view,
-        is_status_bar_global_focus_tip, markdown_first_plain_line, markdown_inline_spans,
-        markdown_inline_tokens, navigation_group_status_bar_tips, preview_panel_lines,
-        preview_panel_required_height, statistics_footer_hints, status_bar_keys_label,
-        task_details_footer_hints, timer_footer_hints,
+        footer_with_filter_indicator, format_task_tags_for_row, history_footer_hints,
+        input_window_view, is_status_bar_global_focus_tip, markdown_first_plain_line,
+        markdown_inline_spans, markdown_inline_tokens, navigation_group_status_bar_tips,
+        preview_panel_lines, preview_panel_required_height, statistics_footer_hints,
+        status_bar_keys_label, task_details_footer_hints, timer_footer_hints,
     };
     use crate::app::{ShortcutTip, SidebarTab};
     use crate::config::GlyphMode;
@@ -5491,6 +5529,7 @@ mod tests {
     use crate::theme::{ProjectColorPalette, ThemePalette};
     use crate::ui::symbols::Symbols;
     use ratatui::style::Color;
+    use ratatui::text::Line;
 
     fn test_palette() -> ThemePalette {
         ThemePalette {
@@ -5781,6 +5820,15 @@ mod tests {
         assert!(rendered.contains("↵"));
         assert!(rendered.contains("⎋"));
         assert!(rendered.contains("␠"));
+    }
+
+    #[test]
+    fn footer_with_filter_indicator_prefixes_filter_icon_when_active() {
+        let palette = test_palette();
+        let symbols = Symbols::new(GlyphMode::Ascii);
+        let line =
+            footer_with_filter_indicator(Line::from(" sort manual "), true, symbols, palette);
+        assert!(line.to_string().contains("f"));
     }
 
     #[test]
