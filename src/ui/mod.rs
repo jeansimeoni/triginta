@@ -2051,7 +2051,7 @@ fn task_summary_line(
         .as_ref()
         .filter(|due| due.is_recurring)
         .map(|_| symbols.recurring);
-    let leading_padding = 2usize.saturating_add(row.depth.saturating_mul(2));
+    let leading_padding = 1usize.saturating_add(row.depth.saturating_mul(2));
     let due_gap = if due_text.is_some() { 2usize } else { 0usize };
 
     let due_meta_width = due_text
@@ -2132,7 +2132,7 @@ fn task_project_line(
         format_task_tags_for_row(task_tags_for_task(data, task.id).as_slice(), width, symbols);
     let tags_width = task_tag_segments_width(tags.as_slice(), symbols);
     let status_marker = task_status_symbol(task.status, symbols);
-    let leading_padding = 2usize
+    let leading_padding = 1usize
         .saturating_add(row.depth.saturating_mul(2))
         .saturating_add(status_marker.width())
         .saturating_add(1);
