@@ -23,7 +23,7 @@ use crate::{
     },
 };
 
-const TODOIST_REST_BASE: &str = "https://api.todoist.com/rest/v2";
+const TODOIST_API_BASE: &str = "https://api.todoist.com/api/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncTrigger {
@@ -523,16 +523,13 @@ impl TodoistSyncProvider {
         sync_repository: &dyn SyncRepository,
         client: &TodoistRestClient,
         synced_at_utc: &str,
+        sync_token: &str,
     ) -> Result<DownstreamApplyStats> {
-        let projects = client.get_json::<Vec<TodoistProject>>("/projects")?;
-        let sections = client.get_json::<Vec<TodoistSection>>("/sections")?;
-        let labels = client.get_json::<Vec<TodoistLabel>>("/labels")?;
-        let filters = client.get_json::<Vec<TodoistFilter>>("/filters")?;
-        let tasks = client.get_json::<Vec<TodoistTask>>("/tasks")?;
+        let sync_response = client.sync_resources(sync_token)?;
 
         let mut stats = DownstreamApplyStats::default();
 
-        for project in projects {
+        for project in sync_response.projects {
             let remote = RemoteProjectRecord {
                 todoist_id: project.id,
                 parent_todoist_id: project.parent_id,
@@ -546,7 +543,7 @@ impl TodoistSyncProvider {
             stats.record("project", remote.todoist_id.as_str(), outcome, self.dry_run);
         }
 
-        for section in sections {
+        for section in sync_response.sections {
             let Some(project_todoist_id) = section.project_id else {
                 continue;
             };
@@ -560,7 +557,7 @@ impl TodoistSyncProvider {
             stats.record("section", remote.todoist_id.as_str(), outcome, self.dry_run);
         }
 
-        for label in labels {
+        for label in sync_response.labels {
             let remote = RemoteTagRecord {
                 todoist_id: label.id,
                 name: label.name,
@@ -571,7 +568,7 @@ impl TodoistSyncProvider {
             stats.record("tag", remote.todoist_id.as_str(), outcome, self.dry_run);
         }
 
-        for filter in filters {
+        for filter in sync_response.filters {
             let remote = RemoteFilterRecord {
                 todoist_id: filter.id,
                 name: filter.name,
@@ -584,7 +581,7 @@ impl TodoistSyncProvider {
             stats.record("filter", remote.todoist_id.as_str(), outcome, self.dry_run);
         }
 
-        for task in tasks {
+        for task in sync_response.items {
             let remote = RemoteTaskRecord {
                 todoist_id: task.id,
                 project_todoist_id: task.project_id,
@@ -610,13 +607,20 @@ impl TodoistSyncProvider {
                     .as_ref()
                     .and_then(|due| due.is_recurring)
                     .unwrap_or(false),
-                completed_at: task.completed_at,
+                completed_at: task.completed_at.or_else(|| {
+                    if task.checked.unwrap_or(false) {
+                        Some(synced_at_utc.to_string())
+                    } else {
+                        None
+                    }
+                }),
             };
             let outcome =
                 sync_repository.apply_remote_task(&remote, synced_at_utc, self.dry_run)?;
             stats.record("task", remote.todoist_id.as_str(), outcome, self.dry_run);
         }
 
+        stats.next_sync_token = Some(sync_response.sync_token);
         Ok(stats)
     }
 }
@@ -626,6 +630,7 @@ struct DownstreamApplyStats {
     created: usize,
     updated: usize,
     skipped: usize,
+    next_sync_token: Option<String>,
 }
 
 impl DownstreamApplyStats {
@@ -699,6 +704,7 @@ struct TodoistTask {
     labels: Option<Vec<String>>,
     due: Option<TodoistDue>,
     completed_at: Option<String>,
+    checked: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -747,9 +753,20 @@ impl TaskSyncProvider for TodoistSyncProvider {
         let client = TodoistRestClient::new(token);
         let (delivered, failed, cycle_error) =
             self.process_ready_outbox(sync_repository, now, &client)?;
+        let previous = sync_repository.get_state(self.provider_name())?;
+        let next_sync_token_seed = previous
+            .as_ref()
+            .and_then(|state| state.sync_token.as_deref())
+            .unwrap_or("*")
+            .to_string();
         let mut downstream_error = None;
         let downstream_stats = if matches!(trigger, SyncTrigger::Startup | SyncTrigger::Poll) {
-            match self.pull_remote_downstream(sync_repository, &client, now_rfc3339.as_str()) {
+            match self.pull_remote_downstream(
+                sync_repository,
+                &client,
+                now_rfc3339.as_str(),
+                next_sync_token_seed.as_str(),
+            ) {
                 Ok(stats) => Some(stats),
                 Err(error) => {
                     downstream_error = Some(error.to_string());
@@ -762,11 +779,13 @@ impl TaskSyncProvider for TodoistSyncProvider {
 
         let pending = sync_repository.list_outbox(self.provider_name(), i64::MAX)?;
         let combined_error = cycle_error.clone().or(downstream_error.clone());
-
-        let previous = sync_repository.get_state(self.provider_name())?;
+        let next_sync_token = downstream_stats
+            .as_ref()
+            .and_then(|stats| stats.next_sync_token.clone())
+            .or_else(|| previous.and_then(|state| state.sync_token));
         sync_repository.upsert_state(&SyncStateRecord {
             provider: self.provider_name().to_string(),
-            sync_token: previous.and_then(|state| state.sync_token),
+            sync_token: next_sync_token,
             last_synced_at: Some(now_rfc3339.clone()),
             last_status: Some(if combined_error.is_some() {
                 "degraded".to_string()
@@ -823,14 +842,6 @@ impl TodoistRestClient {
         }
     }
 
-    fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let response = self
-            .request_builder("GET", path)
-            .call()
-            .map_err(map_ureq_error)?;
-        response.into_json::<T>().map_err(|error| anyhow!(error))
-    }
-
     fn post_json<T: DeserializeOwned>(&self, path: &str, body: &Value) -> Result<T> {
         let response = self
             .request_builder("POST", path)
@@ -854,11 +865,42 @@ impl TodoistRestClient {
     }
 
     fn request_builder(&self, method: &str, path: &str) -> ureq::Request {
-        let url = format!("{TODOIST_REST_BASE}{path}");
+        let url = format!("{TODOIST_API_BASE}{path}");
         ureq::request(method, url.as_str())
             .set("Authorization", format!("Bearer {}", self.token).as_str())
             .set("X-Request-Id", self.correlation_id.as_str())
     }
+
+    fn sync_resources(&self, sync_token: &str) -> Result<TodoistSyncResponse> {
+        let response = self
+            .request_builder("POST", "/sync")
+            .send_form(&[
+                ("sync_token", sync_token),
+                (
+                    "resource_types",
+                    r#"["projects","sections","labels","filters","items"]"#,
+                ),
+            ])
+            .map_err(map_ureq_error)?;
+        response
+            .into_json::<TodoistSyncResponse>()
+            .map_err(|error| anyhow!(error))
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TodoistSyncResponse {
+    sync_token: String,
+    #[serde(default)]
+    projects: Vec<TodoistProject>,
+    #[serde(default)]
+    sections: Vec<TodoistSection>,
+    #[serde(default)]
+    labels: Vec<TodoistLabel>,
+    #[serde(default)]
+    filters: Vec<TodoistFilter>,
+    #[serde(default)]
+    items: Vec<TodoistTask>,
 }
 
 fn value_id_as_string(value: &Value) -> Option<String> {
