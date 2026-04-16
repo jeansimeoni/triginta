@@ -1669,10 +1669,12 @@ fn render_focus_trend_chart(
     let chart = Chart::new(datasets)
         .block(
             Block::default()
+                .style(Style::default().bg(palette.background))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(palette.border))
                 .title("30d Focus Trend"),
         )
+        .style(Style::default().bg(palette.background))
         .x_axis(
             Axis::default()
                 .style(Style::default().fg(palette.subtle_text))
