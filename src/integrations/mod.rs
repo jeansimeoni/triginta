@@ -16,8 +16,10 @@ use uuid::Uuid;
 use crate::{
     config::{TodoistIntegrationConfig, TodoistTokenSource},
     storage::{
-        SyncEntitySnapshot, SyncFilterSnapshot, SyncOutboxEntry, SyncProjectSnapshot,
-        SyncRepository, SyncSectionSnapshot, SyncStateRecord, SyncTagSnapshot, SyncTaskSnapshot,
+        RemoteFilterRecord, RemoteProjectRecord, RemoteSectionRecord, RemoteTagRecord,
+        RemoteTaskRecord, SyncApplyOutcome, SyncEntitySnapshot, SyncFilterSnapshot,
+        SyncOutboxEntry, SyncProjectSnapshot, SyncRepository, SyncSectionSnapshot, SyncStateRecord,
+        SyncTagSnapshot, SyncTaskSnapshot,
     },
 };
 
@@ -515,6 +517,197 @@ impl TodoistSyncProvider {
             ))
         }
     }
+
+    fn pull_remote_downstream(
+        &self,
+        sync_repository: &dyn SyncRepository,
+        client: &TodoistRestClient,
+        synced_at_utc: &str,
+    ) -> Result<DownstreamApplyStats> {
+        let projects = client.get_json::<Vec<TodoistProject>>("/projects")?;
+        let sections = client.get_json::<Vec<TodoistSection>>("/sections")?;
+        let labels = client.get_json::<Vec<TodoistLabel>>("/labels")?;
+        let filters = client.get_json::<Vec<TodoistFilter>>("/filters")?;
+        let tasks = client.get_json::<Vec<TodoistTask>>("/tasks")?;
+
+        let mut stats = DownstreamApplyStats::default();
+
+        for project in projects {
+            let remote = RemoteProjectRecord {
+                todoist_id: project.id,
+                parent_todoist_id: project.parent_id,
+                name: project.name,
+                color: project.color.unwrap_or_else(|| "charcoal".to_string()),
+                is_favorite: project.is_favorite.unwrap_or(false),
+                is_inbox: project.is_inbox_project.unwrap_or(false),
+            };
+            let outcome =
+                sync_repository.apply_remote_project(&remote, synced_at_utc, self.dry_run)?;
+            stats.record("project", remote.todoist_id.as_str(), outcome, self.dry_run);
+        }
+
+        for section in sections {
+            let Some(project_todoist_id) = section.project_id else {
+                continue;
+            };
+            let remote = RemoteSectionRecord {
+                todoist_id: section.id,
+                project_todoist_id,
+                name: section.name,
+            };
+            let outcome =
+                sync_repository.apply_remote_section(&remote, synced_at_utc, self.dry_run)?;
+            stats.record("section", remote.todoist_id.as_str(), outcome, self.dry_run);
+        }
+
+        for label in labels {
+            let remote = RemoteTagRecord {
+                todoist_id: label.id,
+                name: label.name,
+                color: label.color.unwrap_or_else(|| "charcoal".to_string()),
+                is_favorite: label.is_favorite.unwrap_or(false),
+            };
+            let outcome = sync_repository.apply_remote_tag(&remote, synced_at_utc, self.dry_run)?;
+            stats.record("tag", remote.todoist_id.as_str(), outcome, self.dry_run);
+        }
+
+        for filter in filters {
+            let remote = RemoteFilterRecord {
+                todoist_id: filter.id,
+                name: filter.name,
+                query: filter.query,
+                color: filter.color.unwrap_or_else(|| "charcoal".to_string()),
+                is_favorite: filter.is_favorite.unwrap_or(false),
+            };
+            let outcome =
+                sync_repository.apply_remote_filter(&remote, synced_at_utc, self.dry_run)?;
+            stats.record("filter", remote.todoist_id.as_str(), outcome, self.dry_run);
+        }
+
+        for task in tasks {
+            let remote = RemoteTaskRecord {
+                todoist_id: task.id,
+                project_todoist_id: task.project_id,
+                section_todoist_id: task.section_id,
+                parent_todoist_id: task.parent_id,
+                content: task.content,
+                description: task.description.unwrap_or_default(),
+                priority: i64::from(task.priority.unwrap_or(4)),
+                labels: task.labels.unwrap_or_default(),
+                due_date: task
+                    .due
+                    .as_ref()
+                    .and_then(|due| due.date.as_deref())
+                    .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()),
+                due_datetime_utc: task
+                    .due
+                    .as_ref()
+                    .and_then(|due| due.datetime.as_ref().cloned()),
+                due_timezone: task.due.as_ref().and_then(|due| due.timezone.clone()),
+                due_string: task.due.as_ref().and_then(|due| due.string.clone()),
+                due_is_recurring: task
+                    .due
+                    .as_ref()
+                    .and_then(|due| due.is_recurring)
+                    .unwrap_or(false),
+                completed_at: task.completed_at,
+            };
+            let outcome =
+                sync_repository.apply_remote_task(&remote, synced_at_utc, self.dry_run)?;
+            stats.record("task", remote.todoist_id.as_str(), outcome, self.dry_run);
+        }
+
+        Ok(stats)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct DownstreamApplyStats {
+    created: usize,
+    updated: usize,
+    skipped: usize,
+}
+
+impl DownstreamApplyStats {
+    fn record(
+        &mut self,
+        entity_type: &str,
+        remote_id: &str,
+        outcome: SyncApplyOutcome,
+        dry_run: bool,
+    ) {
+        match outcome {
+            SyncApplyOutcome::Created => self.created += 1,
+            SyncApplyOutcome::Updated => self.updated += 1,
+            SyncApplyOutcome::Skipped => self.skipped += 1,
+        }
+        if dry_run {
+            info!(
+                target: "integrations.todoist",
+                entity_type,
+                remote_id,
+                outcome = ?outcome,
+                "dry-run pull action"
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TodoistProject {
+    id: String,
+    name: String,
+    parent_id: Option<String>,
+    color: Option<String>,
+    is_favorite: Option<bool>,
+    is_inbox_project: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TodoistSection {
+    id: String,
+    project_id: Option<String>,
+    name: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TodoistLabel {
+    id: String,
+    name: String,
+    color: Option<String>,
+    is_favorite: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TodoistFilter {
+    id: String,
+    name: String,
+    query: String,
+    color: Option<String>,
+    is_favorite: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TodoistTask {
+    id: String,
+    project_id: Option<String>,
+    section_id: Option<String>,
+    parent_id: Option<String>,
+    content: String,
+    description: Option<String>,
+    priority: Option<u8>,
+    labels: Option<Vec<String>>,
+    due: Option<TodoistDue>,
+    completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TodoistDue {
+    date: Option<String>,
+    datetime: Option<String>,
+    timezone: Option<String>,
+    string: Option<String>,
+    is_recurring: Option<bool>,
 }
 
 impl TaskSyncProvider for TodoistSyncProvider {
@@ -554,34 +747,54 @@ impl TaskSyncProvider for TodoistSyncProvider {
         let client = TodoistRestClient::new(token);
         let (delivered, failed, cycle_error) =
             self.process_ready_outbox(sync_repository, now, &client)?;
-
-        if !self.dry_run && trigger == SyncTrigger::Poll {
-            let _ = client.get_json::<Value>("/projects");
-        }
+        let mut downstream_error = None;
+        let downstream_stats = if matches!(trigger, SyncTrigger::Startup | SyncTrigger::Poll) {
+            match self.pull_remote_downstream(sync_repository, &client, now_rfc3339.as_str()) {
+                Ok(stats) => Some(stats),
+                Err(error) => {
+                    downstream_error = Some(error.to_string());
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let pending = sync_repository.list_outbox(self.provider_name(), i64::MAX)?;
+        let combined_error = cycle_error.clone().or(downstream_error.clone());
 
         let previous = sync_repository.get_state(self.provider_name())?;
         sync_repository.upsert_state(&SyncStateRecord {
             provider: self.provider_name().to_string(),
             sync_token: previous.and_then(|state| state.sync_token),
             last_synced_at: Some(now_rfc3339.clone()),
-            last_status: Some(if cycle_error.is_some() {
+            last_status: Some(if combined_error.is_some() {
                 "degraded".to_string()
             } else if self.dry_run {
                 "dry_run".to_string()
             } else {
                 "ok".to_string()
             }),
-            last_error: cycle_error.clone(),
+            last_error: combined_error.clone(),
             updated_at: now_rfc3339,
         })?;
+
+        if let Some(stats) = downstream_stats {
+            info!(
+                target: "integrations.todoist",
+                created = stats.created,
+                updated = stats.updated,
+                skipped = stats.skipped,
+                dry_run = self.dry_run,
+                "downstream pull merge summary"
+            );
+        }
 
         Ok(SyncReport {
             provider: self.provider_name(),
             configured: true,
             trigger,
-            status: if cycle_error.is_some() {
+            status: if combined_error.is_some() {
                 "degraded".to_string()
             } else if self.dry_run {
                 "dry_run".to_string()
@@ -591,7 +804,7 @@ impl TaskSyncProvider for TodoistSyncProvider {
             pending_outbox: pending.len(),
             delivered_outbox: delivered,
             failed_outbox: failed,
-            last_error: cycle_error,
+            last_error: combined_error,
         })
     }
 }
@@ -741,7 +954,7 @@ mod tests {
             Utc::now().to_rfc3339().as_str(),
         )?;
 
-        let report = provider.sync(&sync, SyncTrigger::Poll)?;
+        let report = provider.sync(&sync, SyncTrigger::MutationDebounced)?;
         assert_eq!(report.status, "dry_run");
         assert_eq!(report.failed_outbox, 0);
         assert_eq!(report.pending_outbox, 1);

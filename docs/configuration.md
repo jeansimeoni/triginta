@@ -280,9 +280,10 @@ Current behavior note:
   metadata, and status reporting.
 - Outbound Todoist transport is wired through REST v2 for create/update/delete
   operations on projects, sections, tasks, tags (labels), and filters.
-- Downstream remote-to-local apply/merge is still under implementation; polling
-  currently performs transport-level remote checks but does not apply remote
-  entity changes into local SQLite yet.
+- Downstream remote-to-local pull/merge is wired for projects, sections, tasks,
+  tags (labels), and filters.
+- In `--dry-run-sync` mode (debug builds), Triginta logs both outbound actions
+  and downstream pull merge decisions without mutating Todoist or local data.
 
 TOML command example (for SOPS-style workflows):
 

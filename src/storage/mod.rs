@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
@@ -258,6 +258,65 @@ pub enum SyncEntitySnapshot {
     Filter(SyncFilterSnapshot),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncApplyOutcome {
+    Created,
+    Updated,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteProjectRecord {
+    pub todoist_id: String,
+    pub parent_todoist_id: Option<String>,
+    pub name: String,
+    pub color: String,
+    pub is_favorite: bool,
+    pub is_inbox: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSectionRecord {
+    pub todoist_id: String,
+    pub project_todoist_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTagRecord {
+    pub todoist_id: String,
+    pub name: String,
+    pub color: String,
+    pub is_favorite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFilterRecord {
+    pub todoist_id: String,
+    pub name: String,
+    pub query: String,
+    pub color: String,
+    pub is_favorite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTaskRecord {
+    pub todoist_id: String,
+    pub project_todoist_id: Option<String>,
+    pub section_todoist_id: Option<String>,
+    pub parent_todoist_id: Option<String>,
+    pub content: String,
+    pub description: String,
+    pub priority: i64,
+    pub labels: Vec<String>,
+    pub due_date: Option<NaiveDate>,
+    pub due_datetime_utc: Option<String>,
+    pub due_timezone: Option<String>,
+    pub due_string: Option<String>,
+    pub due_is_recurring: bool,
+    pub completed_at: Option<String>,
+}
+
 // These traits define the storage-facing API the rest of the app relies on.
 // This separation matters because it keeps the higher layers talking in domain
 // terms (`Task`, `PomodoroSession`) instead of raw SQL concepts.
@@ -432,6 +491,36 @@ pub trait SyncRepository {
         entity_local_id: i64,
         synced_at_utc: &str,
     ) -> Result<()>;
+    fn apply_remote_project(
+        &self,
+        remote: &RemoteProjectRecord,
+        synced_at_utc: &str,
+        dry_run: bool,
+    ) -> Result<SyncApplyOutcome>;
+    fn apply_remote_section(
+        &self,
+        remote: &RemoteSectionRecord,
+        synced_at_utc: &str,
+        dry_run: bool,
+    ) -> Result<SyncApplyOutcome>;
+    fn apply_remote_tag(
+        &self,
+        remote: &RemoteTagRecord,
+        synced_at_utc: &str,
+        dry_run: bool,
+    ) -> Result<SyncApplyOutcome>;
+    fn apply_remote_filter(
+        &self,
+        remote: &RemoteFilterRecord,
+        synced_at_utc: &str,
+        dry_run: bool,
+    ) -> Result<SyncApplyOutcome>;
+    fn apply_remote_task(
+        &self,
+        remote: &RemoteTaskRecord,
+        synced_at_utc: &str,
+        dry_run: bool,
+    ) -> Result<SyncApplyOutcome>;
 }
 
 #[derive(Debug)]
@@ -1331,6 +1420,620 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         };
         Ok(())
     }
+
+    fn apply_remote_project(
+        &self,
+        remote: &RemoteProjectRecord,
+        synced_at_utc: &str,
+        dry_run: bool,
+    ) -> Result<SyncApplyOutcome> {
+        let now_local = Local::now();
+        let parent_local_id = match remote.parent_todoist_id.as_deref() {
+            Some(todoist_id) => self.lookup_local_id_by_todoist("projects", todoist_id)?,
+            None => None,
+        };
+        let mapped = self
+            .connection
+            .query_row(
+                "SELECT id, updated_at, synced_at
+                 FROM projects
+                 WHERE todoist_id = ?1
+                 LIMIT 1",
+                params![remote.todoist_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, DateTime<Local>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        if let Some((local_id, updated_at, local_synced_at)) = mapped {
+            if local_changed_since_sync(updated_at, local_synced_at.as_deref()) {
+                return Ok(SyncApplyOutcome::Skipped);
+            }
+            if dry_run {
+                return Ok(SyncApplyOutcome::Updated);
+            }
+            self.connection.execute(
+                "UPDATE projects
+                 SET name = ?1, parent_project_id = ?2, color = ?3, is_favorite = ?4,
+                     is_inbox = ?5, updated_at = ?6, synced_at = ?7, deleted_at = NULL
+                 WHERE id = ?8",
+                params![
+                    remote.name,
+                    parent_local_id,
+                    remote.color,
+                    if remote.is_favorite { 1_i64 } else { 0_i64 },
+                    if remote.is_inbox { 1_i64 } else { 0_i64 },
+                    now_local,
+                    synced_at_utc,
+                    local_id
+                ],
+            )?;
+            return Ok(SyncApplyOutcome::Updated);
+        }
+
+        if let Some(existing_local_id) =
+            self.match_unmapped_project_by_name_and_parent(remote.name.as_str(), parent_local_id)?
+        {
+            if dry_run {
+                return Ok(SyncApplyOutcome::Updated);
+            }
+            self.connection.execute(
+                "UPDATE projects
+                 SET todoist_id = ?1, name = ?2, parent_project_id = ?3, color = ?4, is_favorite = ?5,
+                     is_inbox = ?6, updated_at = ?7, synced_at = ?8, deleted_at = NULL
+                 WHERE id = ?9",
+                params![
+                    remote.todoist_id,
+                    remote.name,
+                    parent_local_id,
+                    remote.color,
+                    if remote.is_favorite { 1_i64 } else { 0_i64 },
+                    if remote.is_inbox { 1_i64 } else { 0_i64 },
+                    now_local,
+                    synced_at_utc,
+                    existing_local_id
+                ],
+            )?;
+            return Ok(SyncApplyOutcome::Updated);
+        }
+
+        if dry_run {
+            return Ok(SyncApplyOutcome::Created);
+        }
+        let child_order = self.next_project_child_order(parent_local_id)?;
+        self.connection.execute(
+            "INSERT INTO projects(name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+            params![
+                remote.name,
+                parent_local_id,
+                remote.color,
+                if remote.is_favorite { 1_i64 } else { 0_i64 },
+                if remote.is_inbox { 1_i64 } else { 0_i64 },
+                child_order,
+                now_local,
+                now_local,
+                synced_at_utc,
+                remote.todoist_id
+            ],
+        )?;
+        Ok(SyncApplyOutcome::Created)
+    }
+
+    fn apply_remote_section(
+        &self,
+        remote: &RemoteSectionRecord,
+        synced_at_utc: &str,
+        dry_run: bool,
+    ) -> Result<SyncApplyOutcome> {
+        let Some(project_local_id) =
+            self.lookup_local_id_by_todoist("projects", remote.project_todoist_id.as_str())?
+        else {
+            return Ok(SyncApplyOutcome::Skipped);
+        };
+        let now_local = Local::now();
+        let mapped = self
+            .connection
+            .query_row(
+                "SELECT id, updated_at, synced_at
+                 FROM sections
+                 WHERE todoist_id = ?1
+                 LIMIT 1",
+                params![remote.todoist_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, DateTime<Local>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        if let Some((local_id, updated_at, local_synced_at)) = mapped {
+            if local_changed_since_sync(updated_at, local_synced_at.as_deref()) {
+                return Ok(SyncApplyOutcome::Skipped);
+            }
+            if dry_run {
+                return Ok(SyncApplyOutcome::Updated);
+            }
+            self.connection.execute(
+                "UPDATE sections
+                 SET project_id = ?1, name = ?2, updated_at = ?3, synced_at = ?4, deleted_at = NULL
+                 WHERE id = ?5",
+                params![
+                    project_local_id,
+                    remote.name,
+                    now_local,
+                    synced_at_utc,
+                    local_id
+                ],
+            )?;
+            return Ok(SyncApplyOutcome::Updated);
+        }
+
+        if dry_run {
+            return Ok(SyncApplyOutcome::Created);
+        }
+        let section_order = self.next_section_order(ProjectId(project_local_id))?;
+        self.connection.execute(
+            "INSERT INTO sections(project_id, name, section_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            params![
+                project_local_id,
+                remote.name,
+                section_order,
+                now_local,
+                now_local,
+                synced_at_utc,
+                remote.todoist_id
+            ],
+        )?;
+        Ok(SyncApplyOutcome::Created)
+    }
+
+    fn apply_remote_tag(
+        &self,
+        remote: &RemoteTagRecord,
+        synced_at_utc: &str,
+        dry_run: bool,
+    ) -> Result<SyncApplyOutcome> {
+        let now_local = Local::now();
+        let mapped = self
+            .connection
+            .query_row(
+                "SELECT id, updated_at, synced_at
+                 FROM tags
+                 WHERE todoist_id = ?1
+                 LIMIT 1",
+                params![remote.todoist_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, DateTime<Local>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        if let Some((local_id, updated_at, local_synced_at)) = mapped {
+            if local_changed_since_sync(updated_at, local_synced_at.as_deref()) {
+                return Ok(SyncApplyOutcome::Skipped);
+            }
+            if dry_run {
+                return Ok(SyncApplyOutcome::Updated);
+            }
+            self.connection.execute(
+                "UPDATE tags
+                 SET name = ?1, color = ?2, is_favorite = ?3,
+                     updated_at = ?4, synced_at = ?5, deleted_at = NULL
+                 WHERE id = ?6",
+                params![
+                    remote.name,
+                    remote.color,
+                    if remote.is_favorite { 1_i64 } else { 0_i64 },
+                    now_local,
+                    synced_at_utc,
+                    local_id
+                ],
+            )?;
+            return Ok(SyncApplyOutcome::Updated);
+        }
+
+        if let Some(existing_local_id) = self.match_unmapped_tag_by_name(remote.name.as_str())? {
+            if dry_run {
+                return Ok(SyncApplyOutcome::Updated);
+            }
+            self.connection.execute(
+                "UPDATE tags
+                 SET todoist_id = ?1, name = ?2, color = ?3, is_favorite = ?4,
+                     updated_at = ?5, synced_at = ?6, deleted_at = NULL
+                 WHERE id = ?7",
+                params![
+                    remote.todoist_id,
+                    remote.name,
+                    remote.color,
+                    if remote.is_favorite { 1_i64 } else { 0_i64 },
+                    now_local,
+                    synced_at_utc,
+                    existing_local_id
+                ],
+            )?;
+            return Ok(SyncApplyOutcome::Updated);
+        }
+
+        if dry_run {
+            return Ok(SyncApplyOutcome::Created);
+        }
+        let item_order = self.next_tag_item_order()?;
+        self.connection.execute(
+            "INSERT INTO tags(name, color, is_favorite, item_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+            params![
+                remote.name,
+                remote.color,
+                if remote.is_favorite { 1_i64 } else { 0_i64 },
+                item_order,
+                now_local,
+                now_local,
+                synced_at_utc,
+                remote.todoist_id
+            ],
+        )?;
+        Ok(SyncApplyOutcome::Created)
+    }
+
+    fn apply_remote_filter(
+        &self,
+        remote: &RemoteFilterRecord,
+        synced_at_utc: &str,
+        dry_run: bool,
+    ) -> Result<SyncApplyOutcome> {
+        let now_local = Local::now();
+        let mapped = self
+            .connection
+            .query_row(
+                "SELECT id, updated_at, synced_at
+                 FROM filters
+                 WHERE todoist_id = ?1
+                 LIMIT 1",
+                params![remote.todoist_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, DateTime<Local>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        if let Some((local_id, updated_at, local_synced_at)) = mapped {
+            if local_changed_since_sync(updated_at, local_synced_at.as_deref()) {
+                return Ok(SyncApplyOutcome::Skipped);
+            }
+            if dry_run {
+                return Ok(SyncApplyOutcome::Updated);
+            }
+            self.connection.execute(
+                "UPDATE filters
+                 SET name = ?1, query = ?2, color = ?3, is_favorite = ?4,
+                     updated_at = ?5, synced_at = ?6, deleted_at = NULL
+                 WHERE id = ?7",
+                params![
+                    remote.name,
+                    remote.query,
+                    remote.color,
+                    if remote.is_favorite { 1_i64 } else { 0_i64 },
+                    now_local,
+                    synced_at_utc,
+                    local_id
+                ],
+            )?;
+            return Ok(SyncApplyOutcome::Updated);
+        }
+
+        if dry_run {
+            return Ok(SyncApplyOutcome::Created);
+        }
+        let item_order = self.next_filter_item_order()?;
+        self.connection.execute(
+            "INSERT INTO filters(name, query, color, is_favorite, item_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
+            params![
+                remote.name,
+                remote.query,
+                remote.color,
+                if remote.is_favorite { 1_i64 } else { 0_i64 },
+                item_order,
+                now_local,
+                now_local,
+                synced_at_utc,
+                remote.todoist_id
+            ],
+        )?;
+        Ok(SyncApplyOutcome::Created)
+    }
+
+    fn apply_remote_task(
+        &self,
+        remote: &RemoteTaskRecord,
+        synced_at_utc: &str,
+        dry_run: bool,
+    ) -> Result<SyncApplyOutcome> {
+        let now_local = Local::now();
+        let project_local_id =
+            if let Some(project_todoist_id) = remote.project_todoist_id.as_deref() {
+                self.lookup_local_id_by_todoist("projects", project_todoist_id)?
+                    .unwrap_or(self.inbox_project_local_id()?)
+            } else {
+                self.inbox_project_local_id()?
+            };
+        let section_local_id = match remote.section_todoist_id.as_deref() {
+            Some(todoist_id) => self.lookup_local_id_by_todoist("sections", todoist_id)?,
+            None => None,
+        };
+        let parent_local_id = match remote.parent_todoist_id.as_deref() {
+            Some(todoist_id) => self.lookup_local_id_by_todoist("tasks", todoist_id)?,
+            None => None,
+        };
+        let status = if remote.completed_at.is_some() {
+            TaskStatus::Done.as_str()
+        } else {
+            TaskStatus::Todo.as_str()
+        };
+
+        let mapped = self
+            .connection
+            .query_row(
+                "SELECT id, updated_at, synced_at
+                 FROM tasks
+                 WHERE todoist_id = ?1
+                 LIMIT 1",
+                params![remote.todoist_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, DateTime<Local>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        if let Some((local_id, updated_at, local_synced_at)) = mapped {
+            if local_changed_since_sync(updated_at, local_synced_at.as_deref()) {
+                return Ok(SyncApplyOutcome::Skipped);
+            }
+            if dry_run {
+                return Ok(SyncApplyOutcome::Updated);
+            }
+            self.connection.execute(
+                "UPDATE tasks
+                 SET project_id = ?1, section_id = ?2, parent_task_id = ?3,
+                     title = ?4, description = ?5, status = ?6, completed_at = ?7, priority = ?8,
+                     due_date = ?9, due_datetime_utc = ?10, due_timezone = ?11, due_string = ?12, due_is_recurring = ?13,
+                     updated_at = ?14, synced_at = ?15, deleted_at = NULL
+                 WHERE id = ?16",
+                params![
+                    project_local_id,
+                    section_local_id,
+                    parent_local_id,
+                    remote.content,
+                    remote.description,
+                    status,
+                    remote.completed_at,
+                    remote.priority,
+                    remote.due_date,
+                    remote.due_datetime_utc,
+                    remote.due_timezone,
+                    remote.due_string,
+                    if remote.due_is_recurring { 1_i64 } else { 0_i64 },
+                    now_local,
+                    synced_at_utc,
+                    local_id
+                ],
+            )?;
+            self.replace_task_tags_by_names(TaskId(local_id), remote.labels.as_slice())?;
+            return Ok(SyncApplyOutcome::Updated);
+        }
+
+        if dry_run {
+            return Ok(SyncApplyOutcome::Created);
+        }
+        let child_order = self.next_task_child_order(parent_local_id.map(TaskId))?;
+        self.connection.execute(
+            "INSERT INTO tasks(project_id, section_id, parent_task_id, child_order, title, description, status, priority, created_at, updated_at, synced_at, todoist_id, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                project_local_id,
+                section_local_id,
+                parent_local_id,
+                child_order,
+                remote.content,
+                remote.description,
+                status,
+                remote.priority,
+                now_local,
+                now_local,
+                synced_at_utc,
+                remote.todoist_id,
+                remote.completed_at,
+                remote.due_date,
+                remote.due_datetime_utc,
+                remote.due_timezone,
+                remote.due_string,
+                if remote.due_is_recurring { 1_i64 } else { 0_i64 },
+            ],
+        )?;
+        let local_id = self.connection.last_insert_rowid();
+        self.replace_task_tags_by_names(TaskId(local_id), remote.labels.as_slice())?;
+        Ok(SyncApplyOutcome::Created)
+    }
+}
+
+impl SqliteSyncRepository<'_> {
+    fn lookup_local_id_by_todoist(&self, table: &str, todoist_id: &str) -> Result<Option<i64>> {
+        self.connection
+            .query_row(
+                format!("SELECT id FROM {table} WHERE todoist_id = ?1 LIMIT 1").as_str(),
+                params![todoist_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .with_context(|| format!("failed to lookup local id in {table} by todoist id"))
+    }
+
+    fn inbox_project_local_id(&self) -> Result<i64> {
+        self.connection
+            .query_row(
+                "SELECT id FROM projects WHERE is_inbox = 1 ORDER BY id LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to load inbox project for remote task apply")
+    }
+
+    fn match_unmapped_tag_by_name(&self, name: &str) -> Result<Option<i64>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id
+             FROM tags
+             WHERE todoist_id IS NULL
+               AND deleted_at IS NULL
+               AND lower(name) = lower(?1)",
+        )?;
+        let rows = statement.query_map(params![name], |row| row.get::<_, i64>(0))?;
+        let ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(if ids.len() == 1 { Some(ids[0]) } else { None })
+    }
+
+    fn match_unmapped_project_by_name_and_parent(
+        &self,
+        name: &str,
+        parent_project_id: Option<i64>,
+    ) -> Result<Option<i64>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id
+             FROM projects
+             WHERE todoist_id IS NULL
+               AND deleted_at IS NULL
+               AND lower(name) = lower(?1)
+               AND parent_project_id IS ?2",
+        )?;
+        let rows =
+            statement.query_map(params![name, parent_project_id], |row| row.get::<_, i64>(0))?;
+        let ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(if ids.len() == 1 { Some(ids[0]) } else { None })
+    }
+
+    fn next_project_child_order(&self, parent_project_id: Option<i64>) -> Result<i64> {
+        self.connection
+            .query_row(
+                "SELECT COALESCE(MAX(child_order), -1) + 1
+                 FROM projects
+                 WHERE deleted_at IS NULL
+                   AND parent_project_id IS ?1",
+                params![parent_project_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to compute remote project child order")
+    }
+
+    fn next_section_order(&self, project_id: ProjectId) -> Result<i64> {
+        self.connection
+            .query_row(
+                "SELECT COALESCE(MAX(section_order), 0) + 1
+                 FROM sections
+                 WHERE project_id = ?1 AND deleted_at IS NULL",
+                params![project_id.0],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to compute remote section order")
+    }
+
+    fn next_tag_item_order(&self) -> Result<i64> {
+        self.connection
+            .query_row(
+                "SELECT COALESCE(MAX(item_order), -1) + 1
+                 FROM tags
+                 WHERE deleted_at IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to compute remote tag order")
+    }
+
+    fn next_filter_item_order(&self) -> Result<i64> {
+        self.connection
+            .query_row(
+                "SELECT COALESCE(MAX(item_order), -1) + 1
+                 FROM filters
+                 WHERE deleted_at IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to compute remote filter order")
+    }
+
+    fn next_task_child_order(&self, parent_task_id: Option<TaskId>) -> Result<i64> {
+        if let Some(parent_task_id) = parent_task_id {
+            self.connection
+                .query_row(
+                    "SELECT COALESCE(MAX(child_order), 0) + 1
+                     FROM tasks
+                     WHERE deleted_at IS NULL AND parent_task_id = ?1",
+                    params![parent_task_id.0],
+                    |row| row.get::<_, i64>(0),
+                )
+                .context("failed to compute remote task child order")
+        } else {
+            self.connection
+                .query_row(
+                    "SELECT COALESCE(MAX(child_order), 0) + 1
+                     FROM tasks
+                     WHERE deleted_at IS NULL AND parent_task_id IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .context("failed to compute remote task root order")
+        }
+    }
+
+    fn replace_task_tags_by_names(&self, task_id: TaskId, tag_names: &[String]) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM task_tags WHERE task_id = ?1",
+            params![task_id.0],
+        )?;
+        if !tag_names.is_empty() {
+            let mut insert = transaction.prepare(
+                "INSERT OR IGNORE INTO task_tags(task_id, tag_id)
+                 SELECT ?1, id FROM tags WHERE deleted_at IS NULL AND lower(name) = lower(?2)",
+            )?;
+            for name in tag_names {
+                insert.execute(params![task_id.0, name])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+fn local_changed_since_sync(updated_at: DateTime<Local>, synced_at_utc: Option<&str>) -> bool {
+    let Some(synced_at_utc) = synced_at_utc else {
+        return true;
+    };
+    let Ok(parsed_synced) = DateTime::parse_from_rfc3339(synced_at_utc) else {
+        return true;
+    };
+    let synced_local = parsed_synced.with_timezone(&Local);
+    updated_at > synced_local
 }
 
 pub struct SqliteTaskRepository<'a> {

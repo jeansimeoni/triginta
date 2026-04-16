@@ -22,6 +22,7 @@ Current implementation includes:
   - outbox retry metadata with backoff scheduling
   - Todoist token configuration via env var or strict command execution
   - outbound Todoist REST transport for create/update/delete operations
+  - downstream Todoist pull + local merge for core entities
 - Unit and bootstrap tests around app state, storage, and configuration
 
 Still in progress:
@@ -208,7 +209,7 @@ mise exec -- cargo test
 - The repository is intentionally a single Cargo package for now.
 - SQLite remains the local source of truth.
 - Empty-state behavior is intentional and should continue to work on a fresh database.
-- Outbound Todoist transport is wired; downstream remote-to-local apply/merge is still in progress.
+- Full sync is wired for core entities (outbound + downstream merge) while keeping local SQLite as source of truth.
 
 ## License
 
