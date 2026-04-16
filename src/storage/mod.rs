@@ -49,12 +49,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     FOREIGN KEY(parent_task_id) REFERENCES tasks(id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id
-    ON tasks(parent_task_id);
-
-CREATE INDEX IF NOT EXISTS idx_tasks_parent_child_order
-    ON tasks(parent_task_id, child_order, created_at, id);
-
 CREATE TABLE IF NOT EXISTS tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -306,6 +300,7 @@ impl Database {
             "child_order",
             "ALTER TABLE tasks ADD COLUMN child_order INTEGER NOT NULL DEFAULT 0",
         )?;
+        self.ensure_task_indexes()?;
         self.ensure_session_history_column(
             "notes",
             "ALTER TABLE session_history ADD COLUMN notes TEXT NOT NULL DEFAULT ''",
@@ -359,6 +354,20 @@ impl Database {
         self.connection
             .execute(alter_sql, [])
             .with_context(|| format!("failed to add {column_name} column to session_history"))?;
+        Ok(())
+    }
+
+    fn ensure_task_indexes(&self) -> Result<()> {
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id
+             ON tasks(parent_task_id)",
+            [],
+        )?;
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_parent_child_order
+             ON tasks(parent_task_id, child_order, created_at, id)",
+            [],
+        )?;
         Ok(())
     }
 
