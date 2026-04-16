@@ -22,10 +22,10 @@ use crate::{
         FavoriteListRowView, FilterDeleteConfirmationView, FilterEditorView, FilterListRowView,
         FilterSortPopupView, FormPreviewPanelView, HistoryPanelTab, PanelFocus, PreviewLineView,
         ProjectDeleteConfirmationView, ProjectEditorView, ProjectSortPopupView, ProjectTreeRowView,
-        RightPanelTab, ScreenData, SessionNoteEditorView, SessionNoteViewerView, ShortcutSection,
-        ShortcutTip, SidebarTab, TagDeleteConfirmationView, TagEditorView, TagListRowView,
-        TagSortPopupView, TaskEditorView, TaskInputView, TaskListRowView, TaskSearchView,
-        TaskSortPopupView, TaskView, TimerPhase,
+        RightPanelTab, ScreenData, SectionDeleteConfirmationView, SectionEditorView,
+        SessionNoteEditorView, SessionNoteViewerView, ShortcutSection, ShortcutTip, SidebarTab,
+        TagDeleteConfirmationView, TagEditorView, TagListRowView, TagSortPopupView, TaskEditorView,
+        TaskInputView, TaskListRowView, TaskSearchView, TaskSortPopupView, TaskView, TimerPhase,
     },
     domain::{
         DayHistorySummary, FilterColor, SessionEntry, SessionKind, SessionOutcome, TagColor, Task,
@@ -2131,6 +2131,15 @@ fn task_project_line(
     let (project_name, project_color) = project_meta_for_task(data, task)
         .map(|(name, color)| (name, palette.project_color(color)))
         .unwrap_or(("Inbox", palette.subtle_text));
+    let section_name = task.section_id.and_then(|section_id| {
+        data.sections
+            .iter()
+            .find(|section| section.id == section_id && section.deleted_at.is_none())
+            .map(|section| section.name.as_str())
+    });
+    let project_label = section_name
+        .map(|section| format!("{project_name}::{section}"))
+        .unwrap_or_else(|| project_name.to_string());
     let priority_indicator = task_priority_indicator(task.priority, symbols);
     let priority_meta_width = priority_indicator
         .as_ref()
@@ -2179,7 +2188,7 @@ fn task_project_line(
         ),
         Span::styled(
             ellipsize_end(
-                project_name,
+                project_label.as_str(),
                 width
                     .saturating_sub(leading_padding as u16)
                     .saturating_sub(symbols.project.width() as u16)
@@ -2458,9 +2467,14 @@ fn project_tree_line(
         Style::default()
     };
     let count_text = format!(" {}", row.task_count);
+    let item_glyph = if row.section_id.is_some() {
+        symbols.section
+    } else {
+        symbols.project
+    };
     let name_width = ((width as usize)
         .saturating_sub(label.width())
-        .saturating_sub(symbols.project.width())
+        .saturating_sub(item_glyph.width())
         .saturating_sub(1)
         .saturating_sub(count_text.width()))
     .max(1);
@@ -2474,7 +2488,7 @@ fn project_tree_line(
             },
         ),
         Span::styled(
-            format!("{} ", symbols.project),
+            format!("{item_glyph} "),
             if row.is_selected {
                 selection_style
             } else {
@@ -2706,6 +2720,11 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
         return;
     }
 
+    if let Some(editor) = app.section_editor_view() {
+        render_section_editor_popup(frame, &editor, symbols, palette);
+        return;
+    }
+
     if let Some(editor) = app.tag_editor_view() {
         render_tag_editor_popup(frame, &editor, symbols, palette);
         return;
@@ -2723,6 +2742,11 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
 
     if let Some(confirmation) = app.project_delete_confirmation_view() {
         render_project_delete_confirmation(frame, &confirmation, symbols, palette);
+        return;
+    }
+
+    if let Some(confirmation) = app.section_delete_confirmation_view() {
+        render_section_delete_confirmation(frame, &confirmation, symbols, palette);
         return;
     }
 
@@ -4214,6 +4238,88 @@ fn render_project_editor_popup(
     }
 }
 
+fn render_section_editor_popup(
+    frame: &mut Frame<'_>,
+    editor: &SectionEditorView,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let area = centered_rect(frame.area(), 64, 9);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(Span::styled(
+            editor.title,
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(section_editor_shortcuts_line(symbols, palette))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(3)])
+        .split(inner);
+
+    render_project_value_field(
+        frame,
+        rows[0],
+        "Project",
+        editor.project_name.as_str(),
+        false,
+        None,
+        palette,
+    );
+    render_editor_field(
+        frame,
+        rows[1],
+        "Name",
+        &editor.name_value,
+        editor.name_cursor,
+        true,
+        Some("Type section name"),
+        palette,
+    );
+}
+
+fn render_section_delete_confirmation(
+    frame: &mut Frame<'_>,
+    confirmation: &SectionDeleteConfirmationView,
+    symbols: Symbols,
+    palette: ThemePalette,
+) {
+    let area = centered_rect(frame.area(), 64, 7);
+    frame.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from("Remove this section?"),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("\"{}\"", confirmation.section_name),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Tasks in this section will keep the same project."),
+        Line::from("Their section assignment will be cleared."),
+    ];
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                format!("{} Remove Section", symbols.delete),
+                Style::default()
+                    .fg(palette.error)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .title_bottom(confirm_shortcuts_line(symbols, palette))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.error)),
+    );
+
+    frame.render_widget(popup, area);
+}
+
 fn render_tag_editor_popup(
     frame: &mut Frame<'_>,
     editor: &TagEditorView,
@@ -5111,6 +5217,28 @@ fn project_editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Lin
         Span::raw(" h/l  "),
         Span::styled(symbols.save, Style::default().fg(palette.subtle_text)),
         Span::raw(" save"),
+    ])
+    .right_aligned()
+}
+
+fn section_editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
+    if symbols.is_ascii() {
+        return Line::from(vec![Span::styled(
+            "Home/End move  Backspace/Del edit  Enter save  Esc cancel",
+            Style::default().fg(palette.subtle_text),
+        )])
+        .right_aligned();
+    }
+
+    Line::from(vec![
+        Span::styled("Home/End", Style::default().fg(palette.subtle_text)),
+        Span::raw(" move  "),
+        Span::styled("⌫/Del", Style::default().fg(palette.subtle_text)),
+        Span::raw(" edit  "),
+        Span::styled(symbols.save, Style::default().fg(palette.subtle_text)),
+        Span::raw(" save  "),
+        Span::styled(symbols.voided, Style::default().fg(palette.subtle_text)),
+        Span::raw(" cancel"),
     ])
     .right_aligned()
 }

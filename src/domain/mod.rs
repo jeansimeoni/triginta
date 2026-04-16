@@ -10,6 +10,9 @@ pub struct TaskId(pub i64);
 pub struct ProjectId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SectionId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TagId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -508,6 +511,7 @@ pub struct TaskDue {
 pub struct Task {
     pub id: TaskId,
     pub project_id: ProjectId,
+    pub section_id: Option<SectionId>,
     pub parent_task_id: Option<TaskId>,
     pub child_order: i64,
     pub title: String,
@@ -525,6 +529,7 @@ pub struct TaskUpdate {
     pub title: String,
     pub description: String,
     pub project_id: ProjectId,
+    pub section_id: Option<SectionId>,
     pub parent_task_id: Option<TaskId>,
     pub priority: TaskPriority,
     pub due: Option<TaskDue>,
@@ -549,6 +554,21 @@ pub struct ProjectUpdate {
     pub parent_project_id: Option<ProjectId>,
     pub color: ProjectColor,
     pub is_favorite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Section {
+    pub id: SectionId,
+    pub project_id: ProjectId,
+    pub name: String,
+    pub section_order: i64,
+    pub created_at: DateTime<Local>,
+    pub deleted_at: Option<DateTime<Local>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionUpdate {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -19,15 +19,15 @@ use crate::{
     },
     domain::{
         DayHistorySummary, Filter, FilterColor, FilterId, FilterUpdate, FocusDaySummary,
-        FocusHourSummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate,
-        SessionEntry, SessionKind, SessionOutcome, Tag, TagColor, TagId, TagUpdate, Task, TaskId,
-        TaskPriority, TaskStatus, TaskUpdate,
+        FocusHourSummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate, Section,
+        SectionId, SectionUpdate, SessionEntry, SessionKind, SessionOutcome, Tag, TagColor, TagId,
+        TagUpdate, Task, TaskId, TaskPriority, TaskStatus, TaskUpdate,
     },
     filters,
     integrations::{DisabledTodoistProvider, TaskSyncProvider},
     storage::{
-        Database, FilterRepository, PomodoroRepository, ProjectRepository, TagRepository,
-        TaskRepository,
+        Database, FilterRepository, PomodoroRepository, ProjectRepository, SectionRepository,
+        TagRepository, TaskRepository,
     },
     task_nlp::{next_recurring_due, parse_due_input, parse_due_time_input, parse_task_input},
     theme::ThemePalette,
@@ -412,6 +412,7 @@ pub struct TimerView {
 pub struct ScreenData {
     pub tasks: Vec<Task>,
     pub projects: Vec<Project>,
+    pub sections: Vec<Section>,
     pub tags: Vec<Tag>,
     pub filters: Vec<Filter>,
     pub task_tag_links: Vec<(TaskId, TagId)>,
@@ -428,6 +429,7 @@ struct TaskInputState {
     value: String,
     cursor: usize,
     project_id: ProjectId,
+    section_id: Option<SectionId>,
     tag_suggestion_index: usize,
     suggestion_index: usize,
 }
@@ -486,6 +488,7 @@ struct TaskEditorState {
     project_input: String,
     project_cursor: usize,
     project_id: ProjectId,
+    section_id: Option<SectionId>,
     tags_input: String,
     tags_cursor: usize,
     suggestion_index: usize,
@@ -599,6 +602,14 @@ struct ProjectEditorState {
     focused_field: ProjectEditorField,
 }
 
+#[derive(Debug, Clone)]
+struct SectionEditorState {
+    section_id: Option<SectionId>,
+    project_id: ProjectId,
+    name_input: String,
+    name_cursor: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TaskSortPopupState {
     selected_index: usize,
@@ -652,6 +663,7 @@ pub struct TaskInputView {
     pub value: String,
     pub cursor: usize,
     pub project_name: String,
+    pub section_name: Option<String>,
     pub show_project_assignment: bool,
     pub project_suggestions: Vec<String>,
     pub selected_project_suggestion: usize,
@@ -691,6 +703,7 @@ pub struct TaskEditorView {
     pub description_cursor: usize,
     pub description_scroll: usize,
     pub project_value: String,
+    pub section_value: Option<String>,
     pub project_cursor: usize,
     pub project_suggestions: Vec<String>,
     pub selected_project_suggestion: usize,
@@ -795,8 +808,16 @@ struct ParsedTaskDraft {
     cleaned_title: String,
     due: Option<crate::domain::TaskDue>,
     project_id: ProjectId,
+    section_id: Option<SectionId>,
     tag_queries: Vec<String>,
     priority: TaskPriority,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectTokenSuggestion {
+    label: String,
+    project_id: ProjectId,
+    section_id: Option<SectionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -845,6 +866,7 @@ pub struct PanelSearchStatusView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectTreeRowView {
     pub project_id: Option<ProjectId>,
+    pub section_id: Option<SectionId>,
     pub name: String,
     pub depth: usize,
     pub tree_prefix: String,
@@ -884,6 +906,20 @@ pub struct ProjectEditorView {
 pub struct ProjectDeleteConfirmationView {
     pub project_id: ProjectId,
     pub project_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionEditorView {
+    pub title: &'static str,
+    pub project_name: String,
+    pub name_value: String,
+    pub name_cursor: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionDeleteConfirmationView {
+    pub section_id: SectionId,
+    pub section_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1387,7 +1423,7 @@ const PROJECTS_SHORTCUTS: &[ShortcutTip] = &[
     },
     ShortcutTip {
         keys: "j/k or ↑/↓",
-        description: "move project",
+        description: "move item",
     },
     ShortcutTip {
         keys: "PgUp/PgDn",
@@ -1398,8 +1434,16 @@ const PROJECTS_SHORTCUTS: &[ShortcutTip] = &[
         description: "all projects",
     },
     ShortcutTip {
-        keys: "C/e/d",
-        description: "new/edit/delete project",
+        keys: "C",
+        description: "new project",
+    },
+    ShortcutTip {
+        keys: "s",
+        description: "new section",
+    },
+    ShortcutTip {
+        keys: "e/d",
+        description: "edit/delete project or section",
     },
     ShortcutTip {
         keys: "o",
@@ -1693,6 +1737,36 @@ const PROJECT_DELETE_CONFIRMATION_SHORTCUTS: &[ShortcutTip] = &[
     },
 ];
 
+const SECTION_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter",
+        description: "save",
+    },
+    ShortcutTip {
+        keys: "Esc",
+        description: "cancel",
+    },
+    ShortcutTip {
+        keys: "Home/End",
+        description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "Backspace/Del",
+        description: "delete char",
+    },
+];
+
+const SECTION_DELETE_CONFIRMATION_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter/y",
+        description: "confirm",
+    },
+    ShortcutTip {
+        keys: "Esc/n",
+        description: "cancel",
+    },
+];
+
 const SORT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "Enter",
@@ -1729,6 +1803,7 @@ pub struct App {
     history_scroll: usize,
     selected_task_id: Option<TaskId>,
     selected_project_id: Option<ProjectId>,
+    selected_section_id: Option<SectionId>,
     selected_tag_id: Option<TagId>,
     selected_filter_id: Option<FilterId>,
     selected_favorite_item: Option<FavoriteItemKind>,
@@ -1740,6 +1815,7 @@ pub struct App {
     session_note_editor: Option<SessionNoteEditorState>,
     session_note_viewer: Option<SessionNoteViewerState>,
     project_editor: Option<ProjectEditorState>,
+    section_editor: Option<SectionEditorState>,
     tag_editor: Option<TagEditorState>,
     filter_editor: Option<FilterEditorState>,
     task_search: Option<TaskSearchState>,
@@ -1750,6 +1826,7 @@ pub struct App {
     filter_sort_popup: Option<FilterSortPopupState>,
     delete_confirmation: Option<TaskId>,
     project_delete_confirmation: Option<ProjectId>,
+    section_delete_confirmation: Option<SectionId>,
     tag_delete_confirmation: Option<TagId>,
     filter_delete_confirmation: Option<FilterId>,
     help_open: bool,
@@ -1764,16 +1841,22 @@ pub struct App {
 }
 
 impl App {
-    fn task_input_parse(&self, raw: &str, fallback_project_id: ProjectId) -> ParsedTaskDraft {
+    fn task_input_parse(
+        &self,
+        raw: &str,
+        fallback_project_id: ProjectId,
+        fallback_section_id: Option<SectionId>,
+    ) -> ParsedTaskDraft {
         let (without_tag_tokens, tag_queries) = self.extract_tag_references(raw.to_string());
-        let (without_project_tokens, project_id) =
-            self.extract_project_reference(without_tag_tokens.as_str(), fallback_project_id);
+        let (without_project_tokens, project_id, section_id) =
+            self.extract_task_project_reference(without_tag_tokens.as_str(), fallback_project_id);
         let (content, priority) = Self::extract_priority_reference(without_project_tokens.as_str());
         let parsed = parse_task_input(content.as_str(), self.today());
         ParsedTaskDraft {
             cleaned_title: parsed.cleaned_title,
             due: parsed.due,
             project_id,
+            section_id: section_id.or(fallback_section_id),
             tag_queries,
             priority,
         }
@@ -1814,6 +1897,7 @@ impl App {
             history_scroll: 0,
             selected_task_id: None,
             selected_project_id: None,
+            selected_section_id: None,
             selected_tag_id: None,
             selected_filter_id: None,
             selected_favorite_item: None,
@@ -1825,6 +1909,7 @@ impl App {
             session_note_editor: None,
             session_note_viewer: None,
             project_editor: None,
+            section_editor: None,
             tag_editor: None,
             filter_editor: None,
             task_search: None,
@@ -1835,6 +1920,7 @@ impl App {
             filter_sort_popup: None,
             delete_confirmation: None,
             project_delete_confirmation: None,
+            section_delete_confirmation: None,
             tag_delete_confirmation: None,
             filter_delete_confirmation: None,
             help_open: false,
@@ -1895,11 +1981,9 @@ impl App {
         self.visible_task_rows()
             .into_iter()
             .map(|(depth, task)| {
-                let has_children = self
-                    .screen_data
-                    .tasks
-                    .iter()
-                    .any(|candidate| self.task_is_active(candidate) && candidate.parent_task_id == Some(task.id));
+                let has_children = self.screen_data.tasks.iter().any(|candidate| {
+                    self.task_is_active(candidate) && candidate.parent_task_id == Some(task.id)
+                });
                 TaskListRowView {
                     task_id: task.id,
                     depth,
@@ -2178,10 +2262,10 @@ impl App {
             let project_suggestions = self
                 .active_project_query(input.value.as_str(), input.cursor)
                 .map(|(_, _, query)| {
-                    self.project_suggestions(query.as_str())
+                    self.project_token_suggestions(query.as_str())
                         .into_iter()
                         .take(4)
-                        .map(|project| project.name.clone())
+                        .map(|suggestion| suggestion.label)
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -2205,7 +2289,8 @@ impl App {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let parsed_draft = self.task_input_parse(input.value.as_str(), input.project_id);
+            let parsed_draft =
+                self.task_input_parse(input.value.as_str(), input.project_id, input.section_id);
             let ParsedTaskDraft {
                 due,
                 tag_queries,
@@ -2222,6 +2307,9 @@ impl App {
                 .project_name(input.project_id)
                 .unwrap_or("Inbox")
                 .to_string();
+            let section_name = input
+                .section_id
+                .and_then(|section_id| self.section_name(section_id).map(str::to_string));
             let show_project_assignment = input.project_id != self.inbox_project_id();
 
             TaskInputView {
@@ -2229,6 +2317,7 @@ impl App {
                 value: input.value.clone(),
                 cursor: input.cursor,
                 project_name: project_name.clone(),
+                section_name: section_name.clone(),
                 show_project_assignment,
                 project_suggestions: project_suggestions.clone(),
                 selected_project_suggestion: input
@@ -2246,6 +2335,7 @@ impl App {
                 preview_panel: Self::task_input_preview_panel(
                     show_project_assignment,
                     project_name.as_str(),
+                    section_name.as_deref(),
                     tag_queries.as_slice(),
                     priority,
                     due_preview.as_ref(),
@@ -2263,23 +2353,29 @@ impl App {
                 None
             };
             let current_project_name = self.project_name(editor.project_id).unwrap_or("Inbox");
+            let current_section_name = editor
+                .section_id
+                .and_then(|section_id| self.section_name(section_id));
+            let current_project_field_value = current_section_name
+                .map(|section_name| format!("{current_project_name}::{section_name}"))
+                .unwrap_or_else(|| current_project_name.to_string());
             let show_project_suggestions = editor.focused_field == TaskEditorField::Project
                 && !editor.project_input.trim().is_empty()
                 && !editor
                     .project_input
                     .trim()
-                    .eq_ignore_ascii_case(current_project_name);
+                    .eq_ignore_ascii_case(current_project_field_value.as_str());
             let project_suggestions = if let Some(query) = title_project_query {
-                self.project_suggestions(query.as_str())
+                self.project_token_suggestions(query.as_str())
                     .into_iter()
                     .take(4)
-                    .map(|project| project.name.clone())
+                    .map(|suggestion| suggestion.label)
                     .collect::<Vec<_>>()
             } else if show_project_suggestions {
-                self.project_suggestions(editor.project_input.as_str())
+                self.project_token_suggestions(editor.project_input.as_str())
                     .into_iter()
                     .take(4)
-                    .map(|project| project.name.clone())
+                    .map(|suggestion| suggestion.label)
                     .collect::<Vec<_>>()
             } else {
                 Vec::new()
@@ -2369,6 +2465,9 @@ impl App {
                 description_cursor: editor.description_cursor,
                 description_scroll: editor.description_scroll,
                 project_value: editor.project_input.clone(),
+                section_value: editor
+                    .section_id
+                    .and_then(|section_id| self.section_name(section_id).map(str::to_string)),
                 project_cursor: editor.project_cursor,
                 project_suggestions: project_suggestions.clone(),
                 selected_project_suggestion: editor
@@ -2508,13 +2607,17 @@ impl App {
     fn task_input_preview_panel(
         show_project_assignment: bool,
         project_name: &str,
+        section_name: Option<&str>,
         tag_queries: &[String],
         priority: TaskPriority,
         due_preview: Option<&TaskDuePreviewView>,
     ) -> FormPreviewPanelView {
         let mut preview_lines = Vec::new();
         if show_project_assignment {
-            preview_lines.push(PreviewLineView::key_value("Project", project_name));
+            let value = section_name
+                .map(|section| format!("{project_name}::{section}"))
+                .unwrap_or_else(|| project_name.to_string());
+            preview_lines.push(PreviewLineView::key_value("Project", value));
         }
         if !tag_queries.is_empty() {
             let tags = tag_queries
@@ -2689,6 +2792,37 @@ impl App {
         Some(ProjectDeleteConfirmationView {
             project_id,
             project_name: project.name.clone(),
+        })
+    }
+
+    pub fn section_editor_view(&self) -> Option<SectionEditorView> {
+        let editor = self.section_editor.as_ref()?;
+        let project_name = self
+            .project_name(editor.project_id)
+            .unwrap_or("Unknown Project")
+            .to_string();
+        Some(SectionEditorView {
+            title: if editor.section_id.is_some() {
+                "Edit Section"
+            } else {
+                "New Section"
+            },
+            project_name,
+            name_value: editor.name_input.clone(),
+            name_cursor: editor.name_cursor,
+        })
+    }
+
+    pub fn section_delete_confirmation_view(&self) -> Option<SectionDeleteConfirmationView> {
+        let section_id = self.section_delete_confirmation?;
+        let section = self
+            .screen_data
+            .sections
+            .iter()
+            .find(|section| section.id == section_id)?;
+        Some(SectionDeleteConfirmationView {
+            section_id,
+            section_name: section.name.clone(),
         })
     }
 
@@ -2935,13 +3069,14 @@ impl App {
             .unwrap_or("");
         let mut rows = vec![ProjectTreeRowView {
             project_id: None,
+            section_id: None,
             name: "All Projects".to_string(),
             depth: 0,
             tree_prefix: String::new(),
             is_favorite: false,
             color: None,
             task_count: self.tasks_for_project_filter(None),
-            is_selected: self.selected_project_id.is_none(),
+            is_selected: self.selected_project_id.is_none() && self.selected_section_id.is_none(),
         }];
         self.append_project_tree_rows(&mut rows, None, 0, &[]);
         if !query.is_empty() {
@@ -3049,6 +3184,9 @@ impl App {
         if self.project_editor.is_some() {
             return PROJECT_EDITOR_SHORTCUTS;
         }
+        if self.section_editor.is_some() {
+            return SECTION_EDITOR_SHORTCUTS;
+        }
         if self.tag_editor.is_some() {
             return TAG_EDITOR_SHORTCUTS;
         }
@@ -3067,6 +3205,9 @@ impl App {
         }
         if self.project_delete_confirmation.is_some() {
             return PROJECT_DELETE_CONFIRMATION_SHORTCUTS;
+        }
+        if self.section_delete_confirmation.is_some() {
+            return SECTION_DELETE_CONFIRMATION_SHORTCUTS;
         }
         if self.tag_delete_confirmation.is_some() {
             return TAG_DELETE_CONFIRMATION_SHORTCUTS;
@@ -3165,6 +3306,12 @@ impl App {
                 tips: PROJECT_EDITOR_SHORTCUTS,
             });
         }
+        if self.section_editor.is_some() {
+            sections.push(ShortcutSection {
+                title: "Section Editor",
+                tips: SECTION_EDITOR_SHORTCUTS,
+            });
+        }
         if self.tag_editor.is_some() {
             sections.push(ShortcutSection {
                 title: "Tag Editor",
@@ -3223,6 +3370,12 @@ impl App {
             sections.push(ShortcutSection {
                 title: "Project Delete Confirmation",
                 tips: PROJECT_DELETE_CONFIRMATION_SHORTCUTS,
+            });
+        }
+        if self.section_delete_confirmation.is_some() {
+            sections.push(ShortcutSection {
+                title: "Section Delete Confirmation",
+                tips: SECTION_DELETE_CONFIRMATION_SHORTCUTS,
             });
         }
         if self.tag_delete_confirmation.is_some() {
@@ -3551,14 +3704,17 @@ impl App {
                 self.sync_task_selection();
             }
             PanelSearchTarget::Projects => {
-                let filtered_ids = self
+                let filtered_selection = self
                     .project_tree_rows()
                     .into_iter()
-                    .map(|row| row.project_id)
+                    .map(|row| (row.project_id, row.section_id))
                     .collect::<Vec<_>>();
-                if let Some(first) = filtered_ids.first().copied() {
-                    if !filtered_ids.contains(&self.selected_project_id) {
-                        self.selected_project_id = first;
+                if let Some((first_project, first_section)) = filtered_selection.first().copied() {
+                    if !filtered_selection
+                        .contains(&(self.selected_project_id, self.selected_section_id))
+                    {
+                        self.selected_project_id = first_project;
+                        self.selected_section_id = first_section;
                     }
                 }
                 self.sync_task_selection();
@@ -3614,6 +3770,9 @@ impl App {
     }
 
     fn task_matches_selected_project(&self, task: &Task) -> bool {
+        if let Some(section_id) = self.selected_section_id {
+            return task.section_id == Some(section_id);
+        }
         self.selected_project_id
             .map(|project_id| self.project_is_in_subtree(task.project_id, project_id))
             .unwrap_or(true)
@@ -3681,6 +3840,21 @@ impl App {
                     && self.task_matches_view(task, self.active_task_view)
                     && project_id
                         .map(|selected| self.project_is_in_subtree(task.project_id, selected))
+                        .unwrap_or(true)
+                    && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
+            })
+            .count()
+    }
+
+    fn tasks_for_section_filter(&self, section_id: Option<SectionId>) -> usize {
+        self.screen_data
+            .tasks
+            .iter()
+            .filter(|task| {
+                self.task_is_active(task)
+                    && self.task_matches_view(task, self.active_task_view)
+                    && section_id
+                        .map(|selected| task.section_id == Some(selected))
                         .unwrap_or(true)
                     && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
             })
@@ -3760,6 +3934,18 @@ impl App {
             .map(|project| project.name.as_str())
     }
 
+    fn section_by_id(&self, section_id: SectionId) -> Option<&Section> {
+        self.screen_data
+            .sections
+            .iter()
+            .find(|section| section.id == section_id)
+    }
+
+    fn section_name(&self, section_id: SectionId) -> Option<&str> {
+        self.section_by_id(section_id)
+            .map(|section| section.name.as_str())
+    }
+
     fn resolve_project_input(
         &self,
         query: &str,
@@ -3785,6 +3971,35 @@ impl App {
                     .map(|project| project.id)
             })
             .unwrap_or_else(|| fallback_project_id.unwrap_or_else(|| self.inbox_project_id()))
+    }
+
+    fn resolve_project_section_input(
+        &self,
+        query: &str,
+        fallback_project_id: Option<ProjectId>,
+        fallback_section_id: Option<SectionId>,
+    ) -> (ProjectId, Option<SectionId>) {
+        let normalized = query.trim();
+        if normalized.is_empty() {
+            return (
+                fallback_project_id.unwrap_or_else(|| self.inbox_project_id()),
+                fallback_section_id,
+            );
+        }
+        let suggestions = self.project_token_suggestions(normalized);
+        if let Some(exact) = suggestions
+            .iter()
+            .find(|option| option.label.eq_ignore_ascii_case(normalized))
+        {
+            return (exact.project_id, exact.section_id);
+        }
+        if let Some(first) = suggestions.first() {
+            return (first.project_id, first.section_id);
+        }
+        (
+            self.resolve_project_input(normalized, fallback_project_id),
+            fallback_section_id,
+        )
     }
 
     fn matched_project_prefix(
@@ -3843,6 +4058,89 @@ impl App {
         let project_id = self.resolve_project_input(query, Some(fallback_project_id));
         let cleaned = raw[..start].trim_end().to_string();
         (cleaned, project_id)
+    }
+
+    fn extract_task_project_reference(
+        &self,
+        raw: &str,
+        fallback_project_id: ProjectId,
+    ) -> (String, ProjectId, Option<SectionId>) {
+        let Some(start) = raw.rfind('#') else {
+            return (raw.trim().to_string(), fallback_project_id, None);
+        };
+        if start > 0 && !raw[..start].chars().last().is_some_and(char::is_whitespace) {
+            return (raw.trim().to_string(), fallback_project_id, None);
+        }
+        let query = raw[start + 1..].trim();
+        if query.is_empty() {
+            return (raw.trim().to_string(), fallback_project_id, None);
+        }
+        let best_project = self
+            .screen_data
+            .projects
+            .iter()
+            .filter(|project| project.deleted_at.is_none())
+            .filter_map(|project| {
+                let name = project.name.as_str();
+                let query_prefix = query.get(..name.len())?;
+                if !query_prefix.eq_ignore_ascii_case(name) {
+                    return None;
+                }
+                let remainder = &query[name.len()..];
+                if !remainder.is_empty()
+                    && !remainder.starts_with(char::is_whitespace)
+                    && !remainder.starts_with("::")
+                {
+                    return None;
+                }
+                Some((project, name.len()))
+            })
+            .max_by_key(|(_, len)| *len);
+
+        if let Some((project, project_len)) = best_project {
+            let mut remainder = query[project_len..].trim_start();
+            let mut section_id = None;
+            if let Some(section_query) = remainder.strip_prefix("::") {
+                let section_query = section_query.trim_start();
+                let best_section = self
+                    .screen_data
+                    .sections
+                    .iter()
+                    .filter(|section| {
+                        section.deleted_at.is_none() && section.project_id == project.id
+                    })
+                    .filter_map(|section| {
+                        let name = section.name.as_str();
+                        let query_prefix = section_query.get(..name.len())?;
+                        if !query_prefix.eq_ignore_ascii_case(name) {
+                            return None;
+                        }
+                        let suffix = &section_query[name.len()..];
+                        if suffix.is_empty() || suffix.starts_with(char::is_whitespace) {
+                            Some((section, name.len()))
+                        } else {
+                            None
+                        }
+                    })
+                    .max_by_key(|(_, len)| *len);
+                if let Some((section, section_len)) = best_section {
+                    section_id = Some(section.id);
+                    remainder = section_query[section_len..].trim_start();
+                }
+            }
+            let cleaned = if raw[..start].trim().is_empty() {
+                remainder.to_string()
+            } else if remainder.is_empty() {
+                raw[..start].trim_end().to_string()
+            } else {
+                format!("{} {}", raw[..start].trim_end(), remainder)
+            };
+            return (cleaned.trim().to_string(), project.id, section_id);
+        }
+
+        let project_id = self.resolve_project_input(query, Some(fallback_project_id));
+        let cleaned = raw[..start].trim_end().to_string();
+        (cleaned, project_id, None)
     }
 
     fn parse_priority_input(value: &str) -> Option<TaskPriority> {
@@ -4455,14 +4753,62 @@ impl App {
             };
             rows.push(ProjectTreeRowView {
                 project_id: Some(project.id),
+                section_id: None,
                 name: project.name.clone(),
                 depth,
                 tree_prefix,
                 is_favorite: project.is_favorite,
                 color: Some(project.color),
                 task_count: self.tasks_for_project_filter(Some(project.id)),
-                is_selected: self.selected_project_id == Some(project.id),
+                is_selected: self.selected_project_id == Some(project.id)
+                    && self.selected_section_id.is_none(),
             });
+            if self.selected_project_id == Some(project.id) {
+                let section_prefix_base = rows
+                    .last()
+                    .map(|row| row.tree_prefix.clone())
+                    .unwrap_or_default();
+                let sections = self
+                    .screen_data
+                    .sections
+                    .iter()
+                    .filter(|section| {
+                        section.deleted_at.is_none() && section.project_id == project.id
+                    })
+                    .collect::<Vec<_>>();
+                let section_total = sections.len();
+                for (section_index, section) in sections.into_iter().enumerate() {
+                    let is_last_section = section_index + 1 == section_total;
+                    let section_prefix = if depth == 0 {
+                        if is_last_section {
+                            "└ ".to_string()
+                        } else {
+                            "├ ".to_string()
+                        }
+                    } else {
+                        let mut prefix = String::new();
+                        for has_more in ancestor_has_more {
+                            prefix.push_str(if *has_more { "│ " } else { "  " });
+                        }
+                        prefix.push_str(if is_last { "  " } else { "│ " });
+                        prefix.push_str(if is_last_section { "└ " } else { "├ " });
+                        prefix
+                    };
+                    let _ = &section_prefix_base;
+                    rows.push(ProjectTreeRowView {
+                        project_id: Some(project.id),
+                        section_id: Some(section.id),
+                        name: section.name.clone(),
+                        depth: depth + 1,
+                        tree_prefix: section_prefix,
+                        is_favorite: false,
+                        color: Some(project.color),
+                        task_count: self.tasks_for_section_filter(Some(section.id)),
+                        is_selected: self.selected_project_id == Some(project.id)
+                            && self.selected_section_id == Some(section.id),
+                    });
+                }
+            }
             let next_ancestor = if parent_project_id.is_none() {
                 Vec::new()
             } else {
@@ -4474,27 +4820,57 @@ impl App {
         }
     }
 
-    fn project_suggestions(&self, query: &str) -> Vec<&Project> {
+    fn project_token_suggestions(&self, query: &str) -> Vec<ProjectTokenSuggestion> {
         let normalized = query.trim();
         if normalized.is_empty() {
             return Vec::new();
         }
 
-        let mut matches = self
+        let mut matches = Vec::new();
+        for project in self
             .screen_data
             .projects
             .iter()
             .filter(|project| project.deleted_at.is_none())
-            .filter(|project| fuzzy_matches(normalized, project.name.as_str()))
-            .collect::<Vec<_>>();
+        {
+            let project_label = project.name.clone();
+            if fuzzy_matches(normalized, project_label.as_str()) {
+                matches.push(ProjectTokenSuggestion {
+                    label: project_label,
+                    project_id: project.id,
+                    section_id: None,
+                });
+            }
+
+            for section in
+                self.screen_data.sections.iter().filter(|section| {
+                    section.deleted_at.is_none() && section.project_id == project.id
+                })
+            {
+                let label = format!("{}::{}", project.name, section.name);
+                if fuzzy_matches(normalized, label.as_str())
+                    || fuzzy_matches(normalized, project.name.as_str())
+                    || fuzzy_matches(normalized, section.name.as_str())
+                {
+                    matches.push(ProjectTokenSuggestion {
+                        label,
+                        project_id: project.id,
+                        section_id: Some(section.id),
+                    });
+                }
+            }
+        }
+
+        let normalized_lower = normalized.to_lowercase();
         matches.sort_by(|left, right| {
-            let left_name = left.name.to_lowercase();
-            let right_name = right.name.to_lowercase();
-            left_name
-                .starts_with(&normalized.to_lowercase())
-                .cmp(&right_name.starts_with(&normalized.to_lowercase()))
+            let left_lower = left.label.to_lowercase();
+            let right_lower = right.label.to_lowercase();
+            left_lower
+                .starts_with(normalized_lower.as_str())
+                .cmp(&right_lower.starts_with(normalized_lower.as_str()))
                 .reverse()
-                .then_with(|| left_name.cmp(&right_name))
+                .then_with(|| left.section_id.is_some().cmp(&right.section_id.is_some()))
+                .then_with(|| left_lower.cmp(&right_lower))
         });
         matches
     }
@@ -4588,6 +4964,9 @@ impl App {
             if remainder.is_empty() {
                 return None;
             }
+            if !remainder.starts_with("::") {
+                return None;
+            }
         }
         Some((token_start, safe_cursor, query.to_string()))
     }
@@ -4604,23 +4983,24 @@ impl App {
                 return false;
             }
         }
-        let suggestions = self.project_suggestions(query.as_str());
-        let Some(project) = suggestions
+        let suggestions = self.project_token_suggestions(query.as_str());
+        let Some(option) = suggestions
             .get(
                 input
                     .suggestion_index
                     .min(suggestions.len().saturating_sub(1)),
             )
-            .copied()
+            .cloned()
         else {
             return false;
         };
 
-        input.project_id = project.id;
+        input.project_id = option.project_id;
+        input.section_id = option.section_id;
         input
             .value
-            .replace_range(start..end, format!("#{} ", project.name).as_str());
-        input.cursor = (start + project.name.len() + 2).min(input.value.len());
+            .replace_range(start..end, format!("#{} ", option.label).as_str());
+        input.cursor = (start + option.label.len() + 2).min(input.value.len());
         input.suggestion_index = 0;
         while input.cursor < input.value.len() && input.value[input.cursor..].starts_with(' ') {
             input.value.remove(input.cursor);
@@ -4670,25 +5050,26 @@ impl App {
                 return false;
             }
         }
-        let suggestions = self.project_suggestions(query.as_str());
-        let Some(project) = suggestions
+        let suggestions = self.project_token_suggestions(query.as_str());
+        let Some(option) = suggestions
             .get(
                 editor
                     .suggestion_index
                     .min(suggestions.len().saturating_sub(1)),
             )
-            .copied()
+            .cloned()
         else {
             return false;
         };
 
-        editor.project_id = project.id;
-        editor.project_input = project.name.clone();
+        editor.project_id = option.project_id;
+        editor.section_id = option.section_id;
+        editor.project_input = option.label.clone();
         editor.project_cursor = editor.project_input.len();
         editor
             .title_input
-            .replace_range(start..end, format!("#{} ", project.name).as_str());
-        editor.title_cursor = (start + project.name.len() + 2).min(editor.title_input.len());
+            .replace_range(start..end, format!("#{} ", option.label).as_str());
+        editor.title_cursor = (start + option.label.len() + 2).min(editor.title_input.len());
         editor.suggestion_index = 0;
         while editor.title_cursor < editor.title_input.len()
             && editor.title_input[editor.title_cursor..].starts_with(' ')
@@ -5037,6 +5418,25 @@ impl App {
                 return;
             }
             self.selected_project_id = None;
+            self.selected_section_id = None;
+        }
+    }
+
+    fn sync_section_selection(&mut self) {
+        let Some(section_id) = self.selected_section_id else {
+            return;
+        };
+        let Some(section) = self
+            .screen_data
+            .sections
+            .iter()
+            .find(|section| section.id == section_id && section.deleted_at.is_none())
+        else {
+            self.selected_section_id = None;
+            return;
+        };
+        if self.selected_project_id != Some(section.project_id) {
+            self.selected_section_id = None;
         }
     }
 
@@ -5083,6 +5483,7 @@ impl App {
     fn refresh_tasks(&mut self) -> Result<()> {
         self.screen_data.tasks = self.database.task_repository().list_all()?;
         self.screen_data.projects = self.database.project_repository().list_all()?;
+        self.screen_data.sections = self.database.section_repository().list_all()?;
         self.screen_data.tags = self.database.tag_repository().list_all()?;
         self.screen_data.filters = self.database.filter_repository().list_all()?;
         self.screen_data.task_tag_links = self.database.tag_repository().list_task_tag_links()?;
@@ -5111,6 +5512,7 @@ impl App {
         self.expanded_task_ids
             .retain(|task_id| active_task_ids.contains(task_id));
         self.sync_project_selection();
+        self.sync_section_selection();
         self.sync_tag_selection();
         self.sync_filter_selection();
         self.sync_task_selection();
@@ -5228,19 +5630,17 @@ impl App {
         let Some(task) = self.selected_task() else {
             return;
         };
-        if self
-            .screen_data
-            .tasks
-            .iter()
-            .any(|candidate| self.task_is_active(candidate) && candidate.parent_task_id == Some(task.id))
-        {
+        if self.screen_data.tasks.iter().any(|candidate| {
+            self.task_is_active(candidate) && candidate.parent_task_id == Some(task.id)
+        }) {
             self.expanded_task_ids.insert(task.id);
         }
     }
 
     fn collapse_selected_task(&mut self) {
-        let Some((task_id, parent_task_id)) =
-            self.selected_task().map(|task| (task.id, task.parent_task_id))
+        let Some((task_id, parent_task_id)) = self
+            .selected_task()
+            .map(|task| (task.id, task.parent_task_id))
         else {
             return;
         };
@@ -5284,6 +5684,7 @@ impl App {
             project_id: self
                 .selected_project_id
                 .unwrap_or_else(|| self.inbox_project_id()),
+            section_id: self.selected_section_id,
             tag_suggestion_index: 0,
             suggestion_index: 0,
         });
@@ -5308,6 +5709,7 @@ impl App {
             project_input: project_name.clone(),
             project_cursor: project_name.len(),
             project_id: parent_task.project_id,
+            section_id: parent_task.section_id,
             tags_input: String::new(),
             tags_cursor: 0,
             suggestion_index: 0,
@@ -5331,7 +5733,8 @@ impl App {
     }
 
     fn open_full_add_task_popup_from_input(&mut self, input: &TaskInputState) {
-        let parsed = self.task_input_parse(input.value.as_str(), input.project_id);
+        let parsed =
+            self.task_input_parse(input.value.as_str(), input.project_id, input.section_id);
         let (due_date_input, due_time_input, recurrence_input, due_natural) =
             if let Some(due) = parsed.due.as_ref() {
                 (
@@ -5361,6 +5764,15 @@ impl App {
             .project_name(parsed.project_id)
             .unwrap_or("Inbox")
             .to_string();
+        let section_name = parsed
+            .section_id
+            .and_then(|section_id| self.section_name(section_id))
+            .unwrap_or("");
+        let project_field = if section_name.is_empty() {
+            project_name.clone()
+        } else {
+            format!("{project_name}::{section_name}")
+        };
 
         self.task_editor = Some(TaskEditorState {
             task_id: None,
@@ -5369,9 +5781,10 @@ impl App {
             description_input: String::new(),
             description_cursor: 0,
             description_scroll: 0,
-            project_input: project_name.clone(),
-            project_cursor: project_name.len(),
+            project_input: project_field.clone(),
+            project_cursor: project_field.len(),
             project_id: parsed.project_id,
+            section_id: parsed.section_id,
             tags_input: tags_input.clone(),
             tags_cursor: tags_input.len(),
             suggestion_index: 0,
@@ -5447,12 +5860,37 @@ impl App {
             description_cursor: task.description.len(),
             description_input: task.description.clone(),
             description_scroll: 0,
-            project_input: self
-                .project_name(task.project_id)
-                .unwrap_or("Inbox")
-                .to_string(),
-            project_cursor: self.project_name(task.project_id).unwrap_or("Inbox").len(),
+            project_input: task
+                .section_id
+                .and_then(|section_id| {
+                    self.section_name(section_id).map(|section_name| {
+                        format!(
+                            "{}::{}",
+                            self.project_name(task.project_id).unwrap_or("Inbox"),
+                            section_name
+                        )
+                    })
+                })
+                .unwrap_or_else(|| {
+                    self.project_name(task.project_id)
+                        .unwrap_or("Inbox")
+                        .to_string()
+                }),
+            project_cursor: task
+                .section_id
+                .and_then(|section_id| {
+                    self.section_name(section_id).map(|section_name| {
+                        format!(
+                            "{}::{}",
+                            self.project_name(task.project_id).unwrap_or("Inbox"),
+                            section_name
+                        )
+                        .len()
+                    })
+                })
+                .unwrap_or_else(|| self.project_name(task.project_id).unwrap_or("Inbox").len()),
             project_id: task.project_id,
+            section_id: task.section_id,
             tags_input: tags_input.clone(),
             tags_cursor: tags_input.len(),
             suggestion_index: 0,
@@ -6054,9 +6492,16 @@ impl App {
         editor: TaskEditorState,
         now: DateTime<Local>,
     ) -> Result<bool> {
-        let project_from_field =
-            self.resolve_project_input(editor.project_input.as_str(), Some(editor.project_id));
-        let parsed = self.task_input_parse(editor.title_input.as_str(), project_from_field);
+        let (project_from_field, section_from_field) = self.resolve_project_section_input(
+            editor.project_input.as_str(),
+            Some(editor.project_id),
+            editor.section_id,
+        );
+        let parsed = self.task_input_parse(
+            editor.title_input.as_str(),
+            project_from_field,
+            section_from_field,
+        );
         if parsed.cleaned_title.is_empty() {
             self.task_editor = Some(editor);
             return Ok(true);
@@ -6073,17 +6518,24 @@ impl App {
             Self::parse_priority_input(editor.priority_input.as_str()).unwrap_or(TaskPriority::P4);
         let title_priority = Self::last_priority_token(editor.title_input.as_str());
         let priority = title_priority.unwrap_or(field_priority);
-        let resolved_parent_task_id =
-            self.resolve_parent_task_input(editor.parent_input.as_str(), editor.task_id, parsed.project_id);
-        let effective_project_id = resolved_parent_task_id
-            .and_then(|parent_task_id| {
-                self.screen_data
-                    .tasks
-                    .iter()
-                    .find(|task| task.id == parent_task_id)
-                    .map(|task| task.project_id)
-            })
+        let resolved_parent_task_id = self.resolve_parent_task_input(
+            editor.parent_input.as_str(),
+            editor.task_id,
+            parsed.project_id,
+        );
+        let effective_parent = resolved_parent_task_id.and_then(|parent_task_id| {
+            self.screen_data
+                .tasks
+                .iter()
+                .find(|task| task.id == parent_task_id)
+        });
+        let effective_project_id = effective_parent
+            .map(|task| task.project_id)
             .unwrap_or(parsed.project_id);
+        let effective_section_id = effective_parent
+            .and_then(|task| task.section_id)
+            .or(parsed.section_id)
+            .or(section_from_field);
 
         let description = editor.description_input.trim_end_matches('\n').to_string();
         let task_id = if let Some(task_id) = editor.task_id {
@@ -6093,6 +6545,7 @@ impl App {
                     title: parsed.cleaned_title,
                     description: description.clone(),
                     project_id: effective_project_id,
+                    section_id: effective_section_id,
                     parent_task_id: resolved_parent_task_id,
                     priority,
                     due,
@@ -6112,6 +6565,7 @@ impl App {
                     title: parsed.cleaned_title,
                     description,
                     project_id: effective_project_id,
+                    section_id: effective_section_id,
                     parent_task_id: resolved_parent_task_id,
                     priority,
                     due,
@@ -6341,7 +6795,93 @@ impl App {
         });
     }
 
+    fn selected_section_project_id(&self) -> Option<ProjectId> {
+        if let Some(section_id) = self.selected_section_id {
+            return self
+                .section_by_id(section_id)
+                .map(|section| section.project_id);
+        }
+        self.selected_project_id
+    }
+
+    fn open_create_section_popup(&mut self) {
+        let Some(project_id) = self.selected_section_project_id() else {
+            return;
+        };
+        let Some(project) = self.project_by_id(project_id) else {
+            return;
+        };
+        if project.is_inbox || project.deleted_at.is_some() {
+            return;
+        }
+        self.section_editor = Some(SectionEditorState {
+            section_id: None,
+            project_id,
+            name_input: String::new(),
+            name_cursor: 0,
+        });
+    }
+
+    fn open_edit_section_popup(&mut self) {
+        let Some(section_id) = self.selected_section_id else {
+            return;
+        };
+        let Some(section) = self.section_by_id(section_id) else {
+            return;
+        };
+        self.section_editor = Some(SectionEditorState {
+            section_id: Some(section_id),
+            project_id: section.project_id,
+            name_input: section.name.clone(),
+            name_cursor: section.name.len(),
+        });
+    }
+
+    fn submit_section_editor(
+        &mut self,
+        editor: SectionEditorState,
+        now: DateTime<Local>,
+    ) -> Result<()> {
+        let name = editor.name_input.trim();
+        if name.is_empty() {
+            self.section_editor = Some(editor);
+            return Ok(());
+        }
+
+        let section_id = if let Some(section_id) = editor.section_id {
+            self.database.section_repository().update(
+                section_id,
+                &SectionUpdate {
+                    name: name.to_string(),
+                },
+            )?;
+            section_id
+        } else {
+            let section =
+                self.database
+                    .section_repository()
+                    .create(editor.project_id, name, now)?;
+            section.id
+        };
+        self.refresh_tasks()?;
+        self.selected_project_id = Some(editor.project_id);
+        self.selected_section_id = Some(section_id);
+        Ok(())
+    }
+
+    fn open_section_delete_confirmation(&mut self) {
+        let Some(section_id) = self.selected_section_id else {
+            return;
+        };
+        if self.section_by_id(section_id).is_some() {
+            self.section_delete_confirmation = Some(section_id);
+        }
+    }
+
     fn open_edit_project_popup(&mut self) {
+        if self.selected_section_id.is_some() {
+            return;
+        }
         let Some(project_id) = self.selected_project_id else {
             return;
         };
@@ -6377,6 +6917,9 @@ impl App {
     }
 
     fn open_project_delete_confirmation(&mut self) {
+        if self.selected_section_id.is_some() {
+            return;
+        }
         let Some(project_id) = self.selected_project_id else {
             return;
         };
@@ -6392,19 +6935,32 @@ impl App {
         let rows = self.project_tree_rows();
         if rows.is_empty() {
             self.selected_project_id = None;
+            self.selected_section_id = None;
             return;
         }
         let current_index = rows
             .iter()
-            .position(|row| row.project_id == self.selected_project_id)
+            .position(|row| {
+                row.project_id == self.selected_project_id
+                    && row.section_id == self.selected_section_id
+            })
             .unwrap_or(0);
         let next_index = (current_index as isize + offset)
             .clamp(0, rows.len().saturating_sub(1) as isize) as usize;
         self.selected_project_id = rows[next_index].project_id;
+        self.selected_section_id = rows[next_index].section_id;
     }
 
     fn reorder_selected_project(&mut self, direction: isize) -> Result<()> {
         if self.config.ui.project_list_sort != ProjectSortOrder::Manual {
+            return Ok(());
+        }
+        if let Some(section_id) = self.selected_section_id {
+            self.database
+                .section_repository()
+                .move_within_project(section_id, direction)?;
+            self.refresh_tasks()?;
+            self.selected_section_id = Some(section_id);
             return Ok(());
         }
         let Some(project_id) = self.selected_project_id else {
@@ -6744,6 +7300,9 @@ impl App {
     }
 
     fn toggle_selected_project_favorite(&mut self) -> Result<()> {
+        if self.selected_section_id.is_some() {
+            return Ok(());
+        }
         let Some(project_id) = self.selected_project_id else {
             return Ok(());
         };
@@ -6854,6 +7413,7 @@ impl App {
                 },
             )?;
             self.selected_project_id = Some(project_id);
+            self.selected_section_id = None;
         } else {
             let project = self.database.project_repository().create(
                 name,
@@ -6863,6 +7423,7 @@ impl App {
                 now,
             )?;
             self.selected_project_id = Some(project.id);
+            self.selected_section_id = None;
         }
         self.refresh_tasks()?;
         Ok(())
@@ -6940,6 +7501,7 @@ impl App {
                                         title: next_task.title.clone(),
                                         description: next_task.description.clone(),
                                         project_id: next_task.project_id,
+                                        section_id: next_task.section_id,
                                         parent_task_id: task.parent_task_id,
                                         priority: next_task.priority,
                                         due: next_task.due.clone(),
@@ -7436,6 +7998,22 @@ impl App {
                 }
                 KeyCode::Esc | KeyCode::Char('n') => {
                     self.project_delete_confirmation = None;
+                }
+                _ => {}
+            }
+            return Ok(true);
+        }
+
+        if let Some(section_id) = self.section_delete_confirmation {
+            match code {
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    self.database.section_repository().delete(section_id, now)?;
+                    self.section_delete_confirmation = None;
+                    self.selected_section_id = None;
+                    self.refresh_tasks()?;
+                }
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    self.section_delete_confirmation = None;
                 }
                 _ => {}
             }
@@ -8053,6 +8631,75 @@ impl App {
             return Ok(true);
         }
 
+        if let Some(mut editor) = self.section_editor.take() {
+            match code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => {
+                    self.submit_section_editor(editor, now)?;
+                }
+                KeyCode::Backspace => {
+                    if editor.name_cursor > 0 {
+                        let previous_index = editor.name_input[..editor.name_cursor]
+                            .char_indices()
+                            .last()
+                            .map(|(index, _)| index)
+                            .unwrap_or(0);
+                        editor.name_input.drain(previous_index..editor.name_cursor);
+                        editor.name_cursor = previous_index;
+                    }
+                    self.section_editor = Some(editor);
+                }
+                KeyCode::Delete => {
+                    if editor.name_cursor < editor.name_input.len() {
+                        let next_index = editor.name_input[editor.name_cursor..]
+                            .char_indices()
+                            .nth(1)
+                            .map(|(offset, _)| editor.name_cursor + offset)
+                            .unwrap_or(editor.name_input.len());
+                        editor.name_input.drain(editor.name_cursor..next_index);
+                    }
+                    self.section_editor = Some(editor);
+                }
+                KeyCode::Home => {
+                    editor.name_cursor = 0;
+                    self.section_editor = Some(editor);
+                }
+                KeyCode::Left => {
+                    if editor.name_cursor > 0 {
+                        editor.name_cursor = editor.name_input[..editor.name_cursor]
+                            .char_indices()
+                            .last()
+                            .map(|(index, _)| index)
+                            .unwrap_or(0);
+                    }
+                    self.section_editor = Some(editor);
+                }
+                KeyCode::Right => {
+                    if editor.name_cursor < editor.name_input.len() {
+                        editor.name_cursor = editor.name_input[editor.name_cursor..]
+                            .char_indices()
+                            .nth(1)
+                            .map(|(offset, _)| editor.name_cursor + offset)
+                            .unwrap_or(editor.name_input.len());
+                    }
+                    self.section_editor = Some(editor);
+                }
+                KeyCode::End => {
+                    editor.name_cursor = editor.name_input.len();
+                    self.section_editor = Some(editor);
+                }
+                KeyCode::Char(character) => {
+                    editor.name_input.insert(editor.name_cursor, character);
+                    editor.name_cursor += character.len_utf8();
+                    self.section_editor = Some(editor);
+                }
+                _ => {
+                    self.section_editor = Some(editor);
+                }
+            }
+            return Ok(true);
+        }
+
         if let Some(mut editor) = self.task_editor.take() {
             if editor.calendar.is_some() {
                 match code {
@@ -8140,23 +8787,25 @@ impl App {
                     if editor.focused_field == TaskEditorField::Project {
                         let query = editor.project_input.trim();
                         if !query.is_empty() {
-                            let suggestions = self.project_suggestions(query);
-                            if let Some(project) = suggestions
+                            let suggestions = self.project_token_suggestions(query);
+                            if let Some(option) = suggestions
                                 .get(
                                     editor
                                         .suggestion_index
                                         .min(suggestions.len().saturating_sub(1)),
                                 )
-                                .copied()
+                                .cloned()
                             {
-                                let already_selected = editor.project_id == project.id
+                                let already_selected = editor.project_id == option.project_id
+                                    && editor.section_id == option.section_id
                                     && editor
                                         .project_input
                                         .trim()
-                                        .eq_ignore_ascii_case(project.name.as_str());
+                                        .eq_ignore_ascii_case(option.label.as_str());
                                 if !already_selected {
-                                    editor.project_id = project.id;
-                                    editor.project_input = project.name.clone();
+                                    editor.project_id = option.project_id;
+                                    editor.section_id = option.section_id;
+                                    editor.project_input = option.label.clone();
                                     editor.project_cursor = editor.project_input.len();
                                     editor.suggestion_index = 0;
                                     self.task_editor = Some(editor);
@@ -8224,23 +8873,25 @@ impl App {
                     if editor.focused_field == TaskEditorField::Project {
                         let query = editor.project_input.trim();
                         if !query.is_empty() {
-                            let suggestions = self.project_suggestions(query);
-                            if let Some(project) = suggestions
+                            let suggestions = self.project_token_suggestions(query);
+                            if let Some(option) = suggestions
                                 .get(
                                     editor
                                         .suggestion_index
                                         .min(suggestions.len().saturating_sub(1)),
                                 )
-                                .copied()
+                                .cloned()
                             {
-                                let already_selected = editor.project_id == project.id
+                                let already_selected = editor.project_id == option.project_id
+                                    && editor.section_id == option.section_id
                                     && editor
                                         .project_input
                                         .trim()
-                                        .eq_ignore_ascii_case(project.name.as_str());
+                                        .eq_ignore_ascii_case(option.label.as_str());
                                 if !already_selected {
-                                    editor.project_id = project.id;
-                                    editor.project_input = project.name.clone();
+                                    editor.project_id = option.project_id;
+                                    editor.section_id = option.section_id;
+                                    editor.project_input = option.label.clone();
                                     editor.project_cursor = editor.project_input.len();
                                     editor.suggestion_index = 0;
                                     self.task_editor = Some(editor);
@@ -8349,7 +9000,7 @@ impl App {
                     if editor.focused_field == TaskEditorField::Project =>
                 {
                     let last_index = self
-                        .project_suggestions(editor.project_input.as_str())
+                        .project_token_suggestions(editor.project_input.as_str())
                         .len()
                         .saturating_sub(1);
                     editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
@@ -8366,7 +9017,7 @@ impl App {
                         self.active_project_query(editor.title_input.as_str(), editor.title_cursor)
                     {
                         let last_index = self
-                            .project_suggestions(query.as_str())
+                            .project_token_suggestions(query.as_str())
                             .len()
                             .saturating_sub(1);
                         editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
@@ -8532,7 +9183,7 @@ impl App {
                     self.active_project_query(input.value.as_str(), input.cursor)
                 {
                     let last_index = self
-                        .project_suggestions(query.as_str())
+                        .project_token_suggestions(query.as_str())
                         .len()
                         .saturating_sub(1);
                     input.suggestion_index = (input.suggestion_index + 1).min(last_index);
@@ -8591,7 +9242,8 @@ impl App {
                     self.task_input = Some(input);
                     return Ok(true);
                 }
-                let parsed = self.task_input_parse(input.value.as_str(), input.project_id);
+                let parsed =
+                    self.task_input_parse(input.value.as_str(), input.project_id, input.section_id);
                 if parsed.cleaned_title.is_empty() {
                     self.task_input = Some(input);
                     return Ok(true);
@@ -8603,13 +9255,14 @@ impl App {
                     parsed.due.as_ref(),
                     now,
                 )?;
-                if parsed.priority != TaskPriority::P4 {
+                if parsed.priority != TaskPriority::P4 || parsed.section_id.is_some() {
                     self.database.task_repository().update(
                         task.id,
                         &TaskUpdate {
                             title: parsed.cleaned_title.clone(),
                             description: String::new(),
                             project_id: parsed.project_id,
+                            section_id: parsed.section_id,
                             parent_task_id: None,
                             priority: parsed.priority,
                             due: parsed.due.clone(),
@@ -9069,10 +9722,10 @@ impl App {
                 match self.active_sidebar_tab {
                     SidebarTab::Navigation => self.select_first_navigation_task_view(),
                     SidebarTab::Projects => {
-                        self.selected_project_id = self
-                            .project_tree_rows()
-                            .first()
-                            .and_then(|row| row.project_id)
+                        if let Some(row) = self.project_tree_rows().first() {
+                            self.selected_project_id = row.project_id;
+                            self.selected_section_id = row.section_id;
+                        }
                     }
                     SidebarTab::Tags => {
                         self.selected_tag_id = self.tags_rows().first().and_then(|row| row.tag_id)
@@ -9087,10 +9740,10 @@ impl App {
                 match self.active_sidebar_tab {
                     SidebarTab::Navigation => self.select_last_navigation_task_view(),
                     SidebarTab::Projects => {
-                        self.selected_project_id = self
-                            .project_tree_rows()
-                            .last()
-                            .and_then(|row| row.project_id)
+                        if let Some(row) = self.project_tree_rows().last() {
+                            self.selected_project_id = row.project_id;
+                            self.selected_section_id = row.section_id;
+                        }
                     }
                     SidebarTab::Tags => {
                         self.selected_tag_id = self.tags_rows().last().and_then(|row| row.tag_id)
@@ -9107,10 +9760,12 @@ impl App {
                     self.selected_filter_id = None;
                 } else if self.active_sidebar_tab == SidebarTab::Tags {
                     self.selected_project_id = None;
+                    self.selected_section_id = None;
                     self.selected_filter_id = None;
                 } else if self.active_sidebar_tab == SidebarTab::Filters {
                     self.selected_tag_id = None;
                     self.selected_project_id = None;
+                    self.selected_section_id = None;
                 }
                 self.focused_panel = PanelFocus::RightPane;
                 self.active_right_panel_tab = RightPanelTab::Tasks;
@@ -9163,17 +9818,31 @@ impl App {
             {
                 self.open_create_project_popup();
             }
+            KeyCode::Char('s')
+                if self.focused_panel == PanelFocus::Navigation
+                    && self.active_sidebar_tab == SidebarTab::Projects =>
+            {
+                self.open_create_section_popup();
+            }
             KeyCode::Char('e')
                 if self.focused_panel == PanelFocus::Navigation
                     && self.active_sidebar_tab == SidebarTab::Projects =>
             {
-                self.open_edit_project_popup();
+                if self.selected_section_id.is_some() {
+                    self.open_edit_section_popup();
+                } else {
+                    self.open_edit_project_popup();
+                }
             }
             KeyCode::Char('d')
                 if self.focused_panel == PanelFocus::Navigation
                     && self.active_sidebar_tab == SidebarTab::Projects =>
             {
-                self.open_project_delete_confirmation();
+                if self.selected_section_id.is_some() {
+                    self.open_section_delete_confirmation();
+                } else {
+                    self.open_project_delete_confirmation();
+                }
             }
             KeyCode::Char('f')
                 if self.focused_panel == PanelFocus::Navigation
@@ -9600,6 +10269,7 @@ pub fn run(options: RunOptions) -> Result<()> {
     let screen_data = ScreenData {
         tasks: database.task_repository().list_all()?,
         projects: database.project_repository().list_all()?,
+        sections: database.section_repository().list_all()?,
         tags: database.tag_repository().list_all()?,
         filters: database.filter_repository().list_all()?,
         task_tag_links: database.tag_repository().list_task_tag_links()?,
@@ -10547,6 +11217,7 @@ mod tests {
             project_input: "Inbox".to_string(),
             project_cursor: "Inbox".len(),
             project_id: ProjectId(1),
+            section_id: None,
             tags_input: String::new(),
             tags_cursor: 0,
             suggestion_index: 0,
@@ -12067,7 +12738,7 @@ mod tests {
         }
         let editor = app.task_editor_view().expect("editor should stay open");
         assert_eq!(editor.project_value, "web");
-        assert!(!app.project_suggestions("web").is_empty());
+        assert!(!app.project_token_suggestions("web").is_empty());
 
         app.handle_key(crossterm::event::KeyCode::Enter)
             .expect("enter should accept suggestion");
@@ -12370,6 +13041,36 @@ mod tests {
             .expect("project editor should be visible");
         assert_eq!(editor.name_value, "");
         assert_eq!(editor.parent_value, "Selected Parent");
+    }
+
+    #[test]
+    fn section_editor_create_opens_with_selected_project_using_s() {
+        let mut app = test_app();
+        let parent = app
+            .database
+            .project_repository()
+            .create(
+                "Selected Parent",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('4'))
+            .expect("focus should switch");
+        app.selected_project_id = Some(parent.id);
+
+        app.handle_key(crossterm::event::KeyCode::Char('s'))
+            .expect("section editor should open");
+        let editor = app
+            .section_editor_view()
+            .expect("section editor should be visible");
+        assert_eq!(editor.title, "New Section");
+        assert_eq!(editor.project_name, "Selected Parent");
+        assert_eq!(editor.name_value, "");
     }
 
     #[test]
@@ -13029,6 +13730,7 @@ mod tests {
                     title: "Alpha".to_string(),
                     description: String::new(),
                     project_id: inbox_project_id,
+                    section_id: None,
                     parent_task_id: None,
                     priority: TaskPriority::P4,
                     due: None,
@@ -13042,6 +13744,7 @@ mod tests {
                     title: "Bravo".to_string(),
                     description: String::new(),
                     project_id: inbox_project_id,
+                    section_id: None,
                     parent_task_id: None,
                     priority: TaskPriority::P1,
                     due: None,
@@ -13055,6 +13758,7 @@ mod tests {
                     title: "Charlie".to_string(),
                     description: String::new(),
                     project_id: inbox_project_id,
+                    section_id: None,
                     parent_task_id: None,
                     priority: TaskPriority::P2,
                     due: None,

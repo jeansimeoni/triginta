@@ -6,9 +6,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
     DayHistorySummary, Filter, FilterColor, FilterId, FilterUpdate, FocusDaySummary,
-    FocusHourSummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate, SessionEntry,
-    SessionKind, SessionOutcome, Tag, TagColor, TagId, TagUpdate, Task, TaskDue, TaskId,
-    TaskPriority, TaskStatus, TaskUpdate,
+    FocusHourSummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate, Section,
+    SectionId, SectionUpdate, SessionEntry, SessionKind, SessionOutcome, Tag, TagColor, TagId,
+    TagUpdate, Task, TaskDue, TaskId, TaskPriority, TaskStatus, TaskUpdate,
 };
 
 // Keeping the schema as a string literal makes bootstrap simple for this early
@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER,
+    section_id INTEGER,
     parent_task_id INTEGER,
     child_order INTEGER NOT NULL DEFAULT 0,
     title TEXT NOT NULL,
@@ -46,7 +47,18 @@ CREATE TABLE IF NOT EXISTS tasks (
     due_string TEXT,
     due_is_recurring INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY(project_id) REFERENCES projects(id),
+    FOREIGN KEY(section_id) REFERENCES sections(id),
     FOREIGN KEY(parent_task_id) REFERENCES tasks(id)
+);
+
+CREATE TABLE IF NOT EXISTS sections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    section_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    deleted_at TEXT,
+    FOREIGN KEY(project_id) REFERENCES projects(id)
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -151,6 +163,14 @@ pub trait ProjectRepository {
     fn update(&self, project_id: ProjectId, update: &ProjectUpdate) -> Result<Project>;
     fn move_within_parent(&self, project_id: ProjectId, direction: isize) -> Result<()>;
     fn delete(&self, project_id: ProjectId, now: DateTime<Local>) -> Result<()>;
+}
+
+pub trait SectionRepository {
+    fn list_all(&self) -> Result<Vec<Section>>;
+    fn create(&self, project_id: ProjectId, name: &str, now: DateTime<Local>) -> Result<Section>;
+    fn update(&self, section_id: SectionId, update: &SectionUpdate) -> Result<Section>;
+    fn move_within_project(&self, section_id: SectionId, direction: isize) -> Result<()>;
+    fn delete(&self, section_id: SectionId, now: DateTime<Local>) -> Result<()>;
 }
 
 pub trait TagRepository {
@@ -300,6 +320,11 @@ impl Database {
             "child_order",
             "ALTER TABLE tasks ADD COLUMN child_order INTEGER NOT NULL DEFAULT 0",
         )?;
+        self.ensure_tasks_column(
+            "section_id",
+            "ALTER TABLE tasks ADD COLUMN section_id INTEGER",
+        )?;
+        self.ensure_sections_table()?;
         self.ensure_task_indexes()?;
         self.ensure_session_history_column(
             "notes",
@@ -366,6 +391,32 @@ impl Database {
         self.connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_parent_child_order
              ON tasks(parent_task_id, child_order, created_at, id)",
+            [],
+        )?;
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_section_id
+             ON tasks(section_id)",
+            [],
+        )?;
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sections_project_order
+             ON sections(project_id, section_order, created_at, id)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn ensure_sections_table(&self) -> Result<()> {
+        self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS sections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                section_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                deleted_at TEXT,
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            )",
             [],
         )?;
         Ok(())
@@ -437,6 +488,12 @@ impl Database {
         }
     }
 
+    pub fn section_repository(&self) -> SqliteSectionRepository<'_> {
+        SqliteSectionRepository {
+            connection: &self.connection,
+        }
+    }
+
     pub fn filter_repository(&self) -> SqliteFilterRepository<'_> {
         SqliteFilterRepository {
             connection: &self.connection,
@@ -488,7 +545,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         // closure. The closure is conceptually similar to a row-to-struct
         // callback in C, but its return type is checked by the compiler.
         let mut statement = self.connection.prepare(
-            "SELECT id, project_id, parent_task_id, child_order, title, description, status, priority, created_at, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring
+            "SELECT id, project_id, section_id, parent_task_id, child_order, title, description, status, priority, created_at, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring
              FROM tasks
              ORDER BY created_at DESC, id DESC",
         )?;
@@ -497,16 +554,17 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             Ok(Task {
                 id: TaskId(row.get(0)?),
                 project_id: ProjectId(row.get(1)?),
-                parent_task_id: row.get::<_, Option<i64>>(2)?.map(TaskId),
-                child_order: row.get(3)?,
-                title: row.get(4)?,
-                description: row.get(5)?,
-                status: TaskStatus::from_db(row.get::<_, String>(6)?.as_str()),
-                priority: TaskPriority::from_db(row.get::<_, i64>(7)?),
-                created_at: row.get(8)?,
-                completed_at: row.get(9)?,
-                deleted_at: row.get(10)?,
-                due: Self::row_due(row, 11, 12, 13, 14, 15)?,
+                section_id: row.get::<_, Option<i64>>(2)?.map(SectionId),
+                parent_task_id: row.get::<_, Option<i64>>(3)?.map(TaskId),
+                child_order: row.get(4)?,
+                title: row.get(5)?,
+                description: row.get(6)?,
+                status: TaskStatus::from_db(row.get::<_, String>(7)?.as_str()),
+                priority: TaskPriority::from_db(row.get::<_, i64>(8)?),
+                created_at: row.get(9)?,
+                completed_at: row.get(10)?,
+                deleted_at: row.get(11)?,
+                due: Self::row_due(row, 12, 13, 14, 15, 16)?,
             })
         })?;
 
@@ -525,8 +583,8 @@ impl TaskRepository for SqliteTaskRepository<'_> {
     ) -> Result<Task> {
         self.connection
             .execute(
-                "INSERT INTO tasks(project_id, parent_task_id, child_order, title, status, priority, created_at, completed_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring)
-                 VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO tasks(project_id, section_id, parent_task_id, child_order, title, status, priority, created_at, completed_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring)
+                 VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     project_id.0,
                     self.next_child_order(None)?,
@@ -553,7 +611,12 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         let current = self
             .load_task(task_id)?
             .context("task to update does not exist")?;
-        self.validate_parent(task_id, update.project_id, update.parent_task_id)?;
+        self.validate_parent(
+            task_id,
+            update.project_id,
+            update.section_id,
+            update.parent_task_id,
+        )?;
         let child_order = if current.parent_task_id == update.parent_task_id {
             current.child_order
         } else {
@@ -563,12 +626,13 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         self.connection
             .execute(
                 "UPDATE tasks
-                 SET title = ?1, description = ?2, project_id = ?3, parent_task_id = ?4, child_order = ?5, priority = ?6, due_date = ?7, due_datetime_utc = ?8, due_timezone = ?9, due_string = ?10, due_is_recurring = ?11
-                 WHERE id = ?12",
+                 SET title = ?1, description = ?2, project_id = ?3, section_id = ?4, parent_task_id = ?5, child_order = ?6, priority = ?7, due_date = ?8, due_datetime_utc = ?9, due_timezone = ?10, due_string = ?11, due_is_recurring = ?12
+                 WHERE id = ?13",
                 params![
                     update.title,
                     update.description,
                     update.project_id.0,
+                    update.section_id.map(|id| id.0),
                     update.parent_task_id.map(|id| id.0),
                     child_order,
                     update.priority.to_db(),
@@ -632,7 +696,8 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             return Ok(());
         };
         let target_index = (current_index as isize + direction)
-            .clamp(0, sibling_ids.len().saturating_sub(1) as isize) as usize;
+            .clamp(0, sibling_ids.len().saturating_sub(1) as isize)
+            as usize;
         if target_index == current_index {
             return Ok(());
         }
@@ -649,7 +714,9 @@ impl TaskRepository for SqliteTaskRepository<'_> {
     }
 
     fn delete(&self, task_id: TaskId) -> Result<()> {
-        let parent_task_id = self.load_task(task_id)?.and_then(|task| task.parent_task_id);
+        let parent_task_id = self
+            .load_task(task_id)?
+            .and_then(|task| task.parent_task_id);
         self.connection
             .execute(
                 "UPDATE tasks SET deleted_at = ?1 WHERE id = ?2",
@@ -666,8 +733,10 @@ impl SqliteTaskRepository<'_> {
         &self,
         task_id: TaskId,
         project_id: ProjectId,
+        section_id: Option<SectionId>,
         parent_task_id: Option<TaskId>,
     ) -> Result<()> {
+        self.validate_section(project_id, section_id)?;
         let Some(parent_task_id) = parent_task_id else {
             return Ok(());
         };
@@ -683,6 +752,9 @@ impl SqliteTaskRepository<'_> {
         }
         if parent.project_id != project_id {
             bail!("parent and child tasks must belong to the same project");
+        }
+        if parent.section_id != section_id {
+            bail!("parent and child tasks must belong to the same section");
         }
 
         let mut ancestor = parent.parent_task_id;
@@ -757,7 +829,7 @@ impl SqliteTaskRepository<'_> {
     fn load_task(&self, task_id: TaskId) -> Result<Option<Task>> {
         self.connection
             .query_row(
-                "SELECT id, project_id, parent_task_id, child_order, title, description, status,
+                "SELECT id, project_id, section_id, parent_task_id, child_order, title, description, status,
                         created_at, completed_at, priority, deleted_at, due_date,
                         due_datetime_utc, due_timezone, due_string, due_is_recurring
                  FROM tasks
@@ -767,21 +839,50 @@ impl SqliteTaskRepository<'_> {
                     Ok(Task {
                         id: TaskId(row.get(0)?),
                         project_id: ProjectId(row.get(1)?),
-                        parent_task_id: row.get::<_, Option<i64>>(2)?.map(TaskId),
-                        child_order: row.get(3)?,
-                        title: row.get(4)?,
-                        description: row.get(5)?,
-                        status: TaskStatus::from_db(row.get::<_, String>(6)?.as_str()),
-                        created_at: row.get(7)?,
-                        completed_at: row.get(8)?,
-                        priority: TaskPriority::from_db(row.get::<_, i64>(9)?),
-                        deleted_at: row.get(10)?,
-                        due: Self::row_due(row, 11, 12, 13, 14, 15)?,
+                        section_id: row.get::<_, Option<i64>>(2)?.map(SectionId),
+                        parent_task_id: row.get::<_, Option<i64>>(3)?.map(TaskId),
+                        child_order: row.get(4)?,
+                        title: row.get(5)?,
+                        description: row.get(6)?,
+                        status: TaskStatus::from_db(row.get::<_, String>(7)?.as_str()),
+                        created_at: row.get(8)?,
+                        completed_at: row.get(9)?,
+                        priority: TaskPriority::from_db(row.get::<_, i64>(10)?),
+                        deleted_at: row.get(11)?,
+                        due: Self::row_due(row, 12, 13, 14, 15, 16)?,
                     })
                 },
             )
             .optional()
             .context("failed to load task")
+    }
+
+    fn validate_section(&self, project_id: ProjectId, section_id: Option<SectionId>) -> Result<()> {
+        let Some(section_id) = section_id else {
+            return Ok(());
+        };
+        let section = self
+            .connection
+            .query_row(
+                "SELECT project_id, deleted_at FROM sections WHERE id = ?1",
+                params![section_id.0],
+                |row| {
+                    Ok((
+                        ProjectId(row.get::<_, i64>(0)?),
+                        row.get::<_, Option<DateTime<Local>>>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to load section for task validation")?
+            .context("selected section does not exist")?;
+        if section.1.is_some() {
+            bail!("selected section is deleted");
+        }
+        if section.0 != project_id {
+            bail!("task project and section project must match");
+        }
+        Ok(())
     }
 
     fn row_due(
@@ -997,6 +1098,26 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
                 params![project_id.0, now],
             )
             .with_context(|| format!("failed to soft-delete tasks for project {}", project_id.0))?;
+        self.connection
+            .execute(
+                "WITH RECURSIVE project_tree(id) AS (
+                     SELECT id FROM projects WHERE id = ?1
+                     UNION ALL
+                     SELECT projects.id
+                     FROM projects
+                     INNER JOIN project_tree ON projects.parent_project_id = project_tree.id
+                 )
+                 UPDATE sections
+                 SET deleted_at = COALESCE(deleted_at, ?2)
+                 WHERE project_id IN (SELECT id FROM project_tree)",
+                params![project_id.0, now],
+            )
+            .with_context(|| {
+                format!(
+                    "failed to soft-delete sections for project {}",
+                    project_id.0
+                )
+            })?;
         Ok(())
     }
 }
@@ -1106,6 +1227,191 @@ impl SqliteProjectRepository<'_> {
         }
 
         Ok(())
+    }
+}
+
+pub struct SqliteSectionRepository<'a> {
+    connection: &'a Connection,
+}
+
+impl SectionRepository for SqliteSectionRepository<'_> {
+    fn list_all(&self) -> Result<Vec<Section>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, name, section_order, created_at, deleted_at
+             FROM sections
+             ORDER BY section_order ASC, name COLLATE NOCASE ASC, id ASC",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(Section {
+                id: SectionId(row.get(0)?),
+                project_id: ProjectId(row.get(1)?),
+                name: row.get(2)?,
+                section_order: row.get(3)?,
+                created_at: row.get(4)?,
+                deleted_at: row.get(5)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load sections")
+    }
+
+    fn create(&self, project_id: ProjectId, name: &str, now: DateTime<Local>) -> Result<Section> {
+        self.validate_project(project_id)?;
+        let section_order = self.next_section_order(project_id)?;
+        self.connection
+            .execute(
+                "INSERT INTO sections(project_id, name, section_order, created_at, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL)",
+                params![project_id.0, name, section_order, now],
+            )
+            .context("failed to create section")?;
+        self.load_section(SectionId(self.connection.last_insert_rowid()))?
+            .context("created section could not be reloaded")
+    }
+
+    fn update(&self, section_id: SectionId, update: &SectionUpdate) -> Result<Section> {
+        let current = self
+            .load_section(section_id)?
+            .context("section to update does not exist")?;
+        if current.deleted_at.is_some() {
+            bail!("section is deleted");
+        }
+        self.connection
+            .execute(
+                "UPDATE sections SET name = ?1 WHERE id = ?2",
+                params![update.name, section_id.0],
+            )
+            .with_context(|| format!("failed to update section {}", section_id.0))?;
+        self.load_section(section_id)?
+            .context("updated section could not be reloaded")
+    }
+
+    fn move_within_project(&self, section_id: SectionId, direction: isize) -> Result<()> {
+        if direction == 0 {
+            return Ok(());
+        }
+        let Some(section) = self.load_section(section_id)? else {
+            return Ok(());
+        };
+        if section.deleted_at.is_some() {
+            return Ok(());
+        }
+        let mut sibling_ids = self.active_sibling_ids(section.project_id)?;
+        let Some(current_index) = sibling_ids.iter().position(|id| *id == section_id) else {
+            return Ok(());
+        };
+        let target_index = (current_index as isize + direction)
+            .clamp(0, sibling_ids.len().saturating_sub(1) as isize)
+            as usize;
+        if target_index == current_index {
+            return Ok(());
+        }
+        sibling_ids.remove(current_index);
+        sibling_ids.insert(target_index, section_id);
+        let mut statement = self
+            .connection
+            .prepare("UPDATE sections SET section_order = ?1 WHERE id = ?2")?;
+        for (index, sibling_id) in sibling_ids.iter().enumerate() {
+            statement.execute(params![index as i64 + 1, sibling_id.0])?;
+        }
+        Ok(())
+    }
+
+    fn delete(&self, section_id: SectionId, now: DateTime<Local>) -> Result<()> {
+        let section = self
+            .load_section(section_id)?
+            .context("section to delete does not exist")?;
+        if section.deleted_at.is_some() {
+            return Ok(());
+        }
+        self.connection
+            .execute(
+                "UPDATE sections SET deleted_at = ?1 WHERE id = ?2",
+                params![now, section_id.0],
+            )
+            .with_context(|| format!("failed to soft-delete section {}", section_id.0))?;
+        self.connection
+            .execute(
+                "UPDATE tasks SET section_id = NULL WHERE section_id = ?1",
+                params![section_id.0],
+            )
+            .with_context(|| format!("failed to detach tasks from section {}", section_id.0))?;
+        Ok(())
+    }
+}
+
+impl SqliteSectionRepository<'_> {
+    fn validate_project(&self, project_id: ProjectId) -> Result<()> {
+        let project = self
+            .connection
+            .query_row(
+                "SELECT deleted_at, is_inbox FROM projects WHERE id = ?1",
+                params![project_id.0],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<DateTime<Local>>>(0)?,
+                        row.get::<_, i64>(1)? != 0,
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to validate section project")?
+            .context("section project does not exist")?;
+        if project.0.is_some() {
+            bail!("section project is deleted");
+        }
+        if project.1 {
+            bail!("inbox project cannot have sections");
+        }
+        Ok(())
+    }
+
+    fn load_section(&self, section_id: SectionId) -> Result<Option<Section>> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, name, section_order, created_at, deleted_at
+                 FROM sections
+                 WHERE id = ?1",
+                params![section_id.0],
+                |row| {
+                    Ok(Section {
+                        id: SectionId(row.get(0)?),
+                        project_id: ProjectId(row.get(1)?),
+                        name: row.get(2)?,
+                        section_order: row.get(3)?,
+                        created_at: row.get(4)?,
+                        deleted_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load section")
+    }
+
+    fn next_section_order(&self, project_id: ProjectId) -> Result<i64> {
+        self.connection
+            .query_row(
+                "SELECT COALESCE(MAX(section_order), 0) + 1
+                 FROM sections
+                 WHERE project_id = ?1 AND deleted_at IS NULL",
+                params![project_id.0],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to calculate next section order")
+    }
+
+    fn active_sibling_ids(&self, project_id: ProjectId) -> Result<Vec<SectionId>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id
+             FROM sections
+             WHERE project_id = ?1 AND deleted_at IS NULL
+             ORDER BY section_order ASC, name COLLATE NOCASE ASC, id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.0], |row| Ok(SectionId(row.get(0)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load section siblings")
     }
 }
 
@@ -1917,7 +2223,10 @@ mod tests {
 
         let hourly = repository.summarize_completed_focus_hours(range_start, range_end)?;
         assert_eq!(hourly.len(), 2);
-        let mut seconds = hourly.iter().map(|bucket| bucket.focus_seconds).collect::<Vec<_>>();
+        let mut seconds = hourly
+            .iter()
+            .map(|bucket| bucket.focus_seconds)
+            .collect::<Vec<_>>();
         seconds.sort_unstable();
         assert_eq!(seconds, vec![1200, 1500]);
 
@@ -1993,6 +2302,7 @@ mod tests {
                 title: "Ship release notes".to_string(),
                 description: "Ship checklist".to_string(),
                 project_id: inbox_project_id,
+                section_id: None,
                 parent_task_id: None,
                 priority: TaskPriority::P4,
                 due: None,
@@ -2145,6 +2455,7 @@ mod tests {
                 title: "Draft quarterly roadmap".to_string(),
                 description: "Weekly planning note".to_string(),
                 project_id: inbox_project_id,
+                section_id: None,
                 parent_task_id: None,
                 priority: TaskPriority::P2,
                 due: Some(TaskDue {
@@ -2177,6 +2488,7 @@ mod tests {
                 title: "Draft quarterly roadmap".to_string(),
                 description: String::new(),
                 project_id: inbox_project_id,
+                section_id: None,
                 parent_task_id: None,
                 priority: TaskPriority::P4,
                 due: None,

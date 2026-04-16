@@ -321,6 +321,7 @@ mod tests {
         Task {
             id: TaskId(1),
             project_id: ProjectId(1),
+            section_id: None,
             parent_task_id: None,
             child_order: 1,
             title: title.to_string(),
