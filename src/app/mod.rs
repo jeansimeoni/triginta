@@ -1468,6 +1468,10 @@ const TASKS_SHORTCUTS: &[ShortcutTip] = &[
         description: "new task",
     },
     ShortcutTip {
+        keys: "C",
+        description: "new subtask",
+    },
+    ShortcutTip {
         keys: "e/d",
         description: "edit/delete",
     },
@@ -5283,6 +5287,47 @@ impl App {
             tag_suggestion_index: 0,
             suggestion_index: 0,
         });
+    }
+
+    fn open_create_child_task_popup(&mut self) {
+        let Some(parent_task) = self.selected_task().cloned() else {
+            return;
+        };
+        let project_name = self
+            .project_name(parent_task.project_id)
+            .unwrap_or("Inbox")
+            .to_string();
+        let parent_title = parent_task.title;
+        self.task_editor = Some(TaskEditorState {
+            task_id: None,
+            title_input: String::new(),
+            title_cursor: 0,
+            description_input: String::new(),
+            description_cursor: 0,
+            description_scroll: 0,
+            project_input: project_name.clone(),
+            project_cursor: project_name.len(),
+            project_id: parent_task.project_id,
+            tags_input: String::new(),
+            tags_cursor: 0,
+            suggestion_index: 0,
+            due_date_input: String::new(),
+            due_date_cursor: 0,
+            priority_input: "p4".to_string(),
+            priority_cursor: 2,
+            due_time_input: String::new(),
+            due_time_cursor: 0,
+            recurrence_input: String::new(),
+            recurrence_cursor: 0,
+            parent_input: parent_title.clone(),
+            parent_cursor: parent_title.len(),
+            parent_task_id: Some(parent_task.id),
+            due_natural: String::new(),
+            due_from_title: false,
+            focused_field: TaskEditorField::Title,
+            calendar: None,
+        });
+        self.task_input = None;
     }
 
     fn open_full_add_task_popup_from_input(&mut self, input: &TaskInputState) {
@@ -9229,6 +9274,12 @@ impl App {
             {
                 self.open_edit_task_popup();
             }
+            KeyCode::Char('C')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.open_create_child_task_popup();
+            }
             KeyCode::Char('d')
                 if self.focused_panel == PanelFocus::RightPane
                     && self.active_right_panel_tab == RightPanelTab::Tasks =>
@@ -10258,6 +10309,62 @@ mod tests {
             .expect("edit should submit");
 
         assert_eq!(app.screen_data.tasks[0].title, "Ship tests");
+    }
+
+    #[test]
+    fn task_list_shortcut_opens_child_task_editor_with_parent_prefilled() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Parent Task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("child task editor should open");
+        assert!(app.task_input_view().is_none());
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_eq!(editor.title, "New Task");
+        assert_eq!(editor.parent_value, "Parent Task");
+    }
+
+    #[test]
+    fn task_list_child_task_shortcut_creates_task_with_selected_parent() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Parent Task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+        let parent_id = app.selected_task().expect("parent should be selected").id;
+
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("child task editor should open");
+        for character in "Child Task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("child task should be created");
+
+        let child = app
+            .screen_data
+            .tasks
+            .iter()
+            .find(|task| task.title == "Child Task")
+            .expect("child should exist");
+        assert_eq!(child.title, "Child Task");
+        assert_eq!(child.parent_task_id, Some(parent_id));
     }
 
     #[test]
