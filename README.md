@@ -15,10 +15,13 @@ Current implementation includes:
 - Local task management with projects, sections, tags, filters, and subtasks
 - SQLite bootstrap with first-run empty-state behavior
 - Todoist sync foundations:
-  - provider boundary and startup sync hook
+  - provider boundary with startup + periodic sync triggers
   - local sync state and outbox tables
   - local mutation tracking for syncable entities
+  - debounced mutation sync scheduling + adaptive polling
+  - outbox retry metadata with backoff scheduling
   - Todoist token configuration via env var or strict command execution
+  - outbound Todoist REST transport for create/update/delete operations
 - Unit and bootstrap tests around app state, storage, and configuration
 
 Still in progress:
@@ -169,6 +172,7 @@ Debug-only overrides:
 - `--ascii`: force ASCII glyphs regardless of config
 - `--short-timer`: force `30s/10s/20s` timer lengths for testing
 - `--reset-data`: delete local debug SQLite data files before startup
+- `--dry-run-sync`: run sync cycles in preview mode without writing to Todoist
 
 ## Project Layout
 
@@ -204,7 +208,7 @@ mise exec -- cargo test
 - The repository is intentionally a single Cargo package for now.
 - SQLite remains the local source of truth.
 - Empty-state behavior is intentional and should continue to work on a fresh database.
-- Todoist sync foundations are implemented, and remote sync should remain decoupled from core app logic.
+- Outbound Todoist transport is wired; downstream remote-to-local apply/merge is still in progress.
 
 ## License
 

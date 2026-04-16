@@ -24,10 +24,10 @@ use crate::{
         TagUpdate, Task, TaskId, TaskPriority, TaskStatus, TaskUpdate,
     },
     filters,
-    integrations::{TaskSyncProvider, TodoistSyncProvider},
+    integrations::{SyncReport, SyncTrigger, TaskSyncProvider, TodoistSyncProvider},
     storage::{
         Database, FilterRepository, PomodoroRepository, ProjectRepository, SectionRepository,
-        TagRepository, TaskRepository,
+        SyncRepository, TagRepository, TaskRepository,
     },
     task_nlp::{next_recurring_due, parse_due_input, parse_due_time_input, parse_task_input},
     theme::ThemePalette,
@@ -41,6 +41,7 @@ pub struct RunOptions {
     pub force_ascii: bool,
     pub force_short_timer: bool,
     pub reset_data: bool,
+    pub dry_run_sync: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1782,6 +1783,17 @@ const SORT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     },
 ];
 
+#[derive(Debug, Clone)]
+struct TodoistSyncUiState {
+    provider: TodoistSyncProvider,
+    pending_push_at: Option<DateTime<Local>>,
+    next_poll_at: DateTime<Local>,
+    poll_interval: Duration,
+    last_seen_outbox_len: usize,
+    latest_status_line: String,
+    banner_until: Option<DateTime<Local>>,
+}
+
 // `App` owns the mutable runtime state for the TUI loop.
 // Compared with a C program, this is the central state struct you would pass
 // around to input/render functions, but here methods are attached directly to
@@ -1835,6 +1847,7 @@ pub struct App {
     task_details_scroll: usize,
     task_details_anchor_task_id: Option<TaskId>,
     expanded_task_ids: HashSet<TaskId>,
+    todoist_sync: Option<TodoistSyncUiState>,
     needs_full_redraw: bool,
     should_quit: bool,
     screen_data: ScreenData,
@@ -1881,6 +1894,29 @@ impl App {
         let glyph_mode = config.ui.glyph_mode;
         let timer_settings = config.timer.clone();
         let long_break_interval = timer_settings.long_break_interval;
+        let todoist_sync = if config.integrations.todoist.enabled {
+            let poll_min = Duration::from_secs(
+                config
+                    .integrations
+                    .todoist
+                    .sync_runtime
+                    .poll_min_interval_seconds,
+            );
+            Some(TodoistSyncUiState {
+                provider: TodoistSyncProvider::new(
+                    config.integrations.todoist.clone(),
+                    debug_dry_run_sync_enabled(),
+                ),
+                pending_push_at: None,
+                next_poll_at: Local::now(),
+                poll_interval: poll_min,
+                last_seen_outbox_len: 0,
+                latest_status_line: "sync idle".to_string(),
+                banner_until: None,
+            })
+        } else {
+            None
+        };
         let mut app = Self {
             database,
             config,
@@ -1929,6 +1965,7 @@ impl App {
             task_details_scroll: 0,
             task_details_anchor_task_id: None,
             expanded_task_ids: HashSet::new(),
+            todoist_sync,
             needs_full_redraw: false,
             should_quit: false,
             screen_data,
@@ -3134,6 +3171,16 @@ impl App {
 
     pub fn donate_label(&self) -> &'static str {
         "Donate"
+    }
+
+    pub fn sync_status_line(&self) -> Option<&str> {
+        let state = self.todoist_sync.as_ref()?;
+        if let Some(until) = state.banner_until {
+            if Local::now() <= until {
+                return Some(state.latest_status_line.as_str());
+            }
+        }
+        Some(state.latest_status_line.as_str())
     }
 
     pub fn focused_panel_search_status(&self) -> Option<PanelSearchStatusView> {
@@ -10094,6 +10141,7 @@ impl App {
 
     fn on_tick_at(&mut self, now: DateTime<Local>) -> Result<()> {
         self.sync_task_details_anchor();
+        self.handle_todoist_sync_tick(now)?;
         if self.timer.run_state != TimerRunState::Running {
             return Ok(());
         }
@@ -10161,6 +10209,147 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn handle_todoist_sync_tick(&mut self, now: DateTime<Local>) -> Result<()> {
+        if self.todoist_sync.is_none() {
+            return Ok(());
+        }
+
+        let pending_outbox_len = self
+            .database
+            .sync_repository()
+            .list_outbox("todoist", i64::MAX)?
+            .len();
+        let push_debounce = Duration::from_millis(
+            self.config
+                .integrations
+                .todoist
+                .sync_runtime
+                .push_debounce_ms,
+        );
+
+        let mut trigger = None;
+        if let Some(sync) = self.todoist_sync.as_mut() {
+            if pending_outbox_len > sync.last_seen_outbox_len {
+                sync.pending_push_at = Some(now + chrono_duration(push_debounce));
+            }
+            sync.last_seen_outbox_len = pending_outbox_len;
+
+            if pending_outbox_len > 0
+                && sync
+                    .pending_push_at
+                    .is_some_and(|scheduled_at| now >= scheduled_at)
+            {
+                sync.pending_push_at = None;
+                trigger = Some(SyncTrigger::MutationDebounced);
+            } else if now >= sync.next_poll_at {
+                trigger = Some(SyncTrigger::Poll);
+            }
+        }
+
+        if let Some(trigger) = trigger {
+            self.run_todoist_sync(trigger, now);
+        }
+
+        Ok(())
+    }
+
+    fn run_todoist_sync(&mut self, trigger: SyncTrigger, now: DateTime<Local>) {
+        let Some(sync) = self.todoist_sync.as_ref() else {
+            return;
+        };
+        let provider = sync.provider.clone();
+        let sync_result = provider.sync(&self.database.sync_repository(), trigger);
+
+        match sync_result {
+            Ok(report) => self.apply_todoist_sync_report(report, now),
+            Err(error) => {
+                warn!(
+                    provider = provider.provider_name(),
+                    trigger = trigger.as_str(),
+                    error = %error,
+                    "todoist sync cycle failed"
+                );
+                if let Some(sync) = self.todoist_sync.as_mut() {
+                    sync.latest_status_line =
+                        format!("sync error [{}]: {}", trigger.as_str(), error);
+                    sync.banner_until = Some(now + ChronoDuration::seconds(10));
+                    let min_interval = Duration::from_secs(
+                        self.config
+                            .integrations
+                            .todoist
+                            .sync_runtime
+                            .poll_min_interval_seconds,
+                    );
+                    let max_interval = Duration::from_secs(
+                        self.config
+                            .integrations
+                            .todoist
+                            .sync_runtime
+                            .poll_max_interval_seconds,
+                    );
+                    sync.poll_interval =
+                        (sync.poll_interval.saturating_mul(2)).clamp(min_interval, max_interval);
+                    sync.next_poll_at = now + chrono_duration(sync.poll_interval);
+                }
+            }
+        }
+    }
+
+    fn apply_todoist_sync_report(&mut self, report: SyncReport, now: DateTime<Local>) {
+        let Some(sync) = self.todoist_sync.as_mut() else {
+            return;
+        };
+
+        let min_interval = Duration::from_secs(
+            self.config
+                .integrations
+                .todoist
+                .sync_runtime
+                .poll_min_interval_seconds,
+        );
+        let max_interval = Duration::from_secs(
+            self.config
+                .integrations
+                .todoist
+                .sync_runtime
+                .poll_max_interval_seconds,
+        );
+
+        sync.latest_status_line = if let Some(error) = report.last_error.as_ref() {
+            format!(
+                "sync {} [{}] pending={} failed={} ({})",
+                report.status,
+                report.trigger.as_str(),
+                report.pending_outbox,
+                report.failed_outbox,
+                error
+            )
+        } else {
+            format!(
+                "sync {} [{}] pending={} delivered={}",
+                report.status,
+                report.trigger.as_str(),
+                report.pending_outbox,
+                report.delivered_outbox
+            )
+        };
+
+        if report.last_error.is_some() {
+            sync.banner_until = Some(now + ChronoDuration::seconds(8));
+            sync.poll_interval =
+                (sync.poll_interval.saturating_mul(2)).clamp(min_interval, max_interval);
+        } else if report.pending_outbox == 0 {
+            sync.poll_interval =
+                (sync.poll_interval.saturating_mul(2)).clamp(min_interval, max_interval);
+            sync.banner_until = None;
+        } else {
+            sync.poll_interval = min_interval;
+        }
+
+        sync.last_seen_outbox_len = report.pending_outbox;
+        sync.next_poll_at = now + chrono_duration(sync.poll_interval);
     }
 
     fn refresh_history(&mut self) -> Result<()> {
@@ -10278,6 +10467,14 @@ pub fn run(options: RunOptions) -> Result<()> {
     let _tracing_guard = init_tracing(&paths)?;
     let mut config = load_app_config(&paths)?;
     apply_debug_overrides(&mut config, options);
+    #[cfg(debug_assertions)]
+    unsafe {
+        if options.dry_run_sync {
+            env::set_var("TRIGINTA_DRY_RUN_SYNC", "1");
+        } else {
+            env::remove_var("TRIGINTA_DRY_RUN_SYNC");
+        }
+    }
     let theme = ThemePalette::load(&paths, &config.ui.theme)?;
 
     info!("starting triginta");
@@ -10314,20 +10511,24 @@ pub fn run(options: RunOptions) -> Result<()> {
             .summarize_completed_focus_hours(monthly_started_at, monthly_ended_at)?,
     };
 
-    let provider = TodoistSyncProvider::new(config.integrations.todoist.clone());
+    let provider =
+        TodoistSyncProvider::new(config.integrations.todoist.clone(), options.dry_run_sync);
     info!(
         provider = provider.provider_name(),
         configured = provider.is_configured(),
         "integration boundary initialized"
     );
     if config.integrations.todoist.sync_on_startup {
-        match provider.sync(&database.sync_repository()) {
+        match provider.sync(&database.sync_repository(), SyncTrigger::Startup) {
             Ok(report) => {
                 info!(
                     provider = report.provider,
                     configured = report.configured,
+                    trigger = report.trigger.as_str(),
                     status = report.status,
                     pending_outbox = report.pending_outbox,
+                    delivered_outbox = report.delivered_outbox,
+                    failed_outbox = report.failed_outbox,
                     "startup sync finished"
                 );
             }
@@ -10437,6 +10638,19 @@ fn apply_debug_overrides(config: &mut AppConfig, options: RunOptions) {
     }
     if options.force_short_timer {
         config.timer = TimerSettings::short_timer_preset();
+    }
+}
+
+fn debug_dry_run_sync_enabled() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        return env::var("TRIGINTA_DRY_RUN_SYNC")
+            .map(|value| value == "1")
+            .unwrap_or(false);
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
     }
 }
 
@@ -14761,6 +14975,7 @@ mod tests {
                 force_ascii: false,
                 force_short_timer: true,
                 reset_data: false,
+                dry_run_sync: false,
             },
         );
 

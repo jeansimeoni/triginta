@@ -386,6 +386,33 @@ impl TodoistIntegrationConfig {
             }
         }
 
+        self.sync_runtime.validate()?;
+
+        Ok(())
+    }
+}
+
+impl TodoistSyncRuntimeConfig {
+    fn validate(&self) -> Result<()> {
+        if self.push_debounce_ms == 0 {
+            bail!("integrations.todoist.sync-runtime.push-debounce-ms must be greater than zero");
+        }
+        if self.poll_min_interval_seconds == 0 {
+            bail!(
+                "integrations.todoist.sync-runtime.poll-min-interval-seconds must be greater than zero"
+            );
+        }
+        if self.poll_max_interval_seconds < self.poll_min_interval_seconds {
+            bail!(
+                "integrations.todoist.sync-runtime.poll-max-interval-seconds must be greater than or equal to poll-min-interval-seconds"
+            );
+        }
+        if self.max_batch_size == 0 {
+            bail!("integrations.todoist.sync-runtime.max-batch-size must be greater than zero");
+        }
+        if self.max_retry_attempts == 0 {
+            bail!("integrations.todoist.sync-runtime.max-retry-attempts must be greater than zero");
+        }
         Ok(())
     }
 }
@@ -429,6 +456,7 @@ pub struct TodoistIntegrationConfig {
     pub token_source: TodoistTokenSource,
     pub token_env_var: String,
     pub token_command: Option<TokenCommandConfig>,
+    pub sync_runtime: TodoistSyncRuntimeConfig,
 }
 
 impl Default for TodoistIntegrationConfig {
@@ -439,6 +467,28 @@ impl Default for TodoistIntegrationConfig {
             token_source: TodoistTokenSource::Env,
             token_env_var: "TRIGINTA_TODOIST_TOKEN".to_string(),
             token_command: None,
+            sync_runtime: TodoistSyncRuntimeConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoistSyncRuntimeConfig {
+    pub push_debounce_ms: u64,
+    pub poll_min_interval_seconds: u64,
+    pub poll_max_interval_seconds: u64,
+    pub max_batch_size: u32,
+    pub max_retry_attempts: u32,
+}
+
+impl Default for TodoistSyncRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            push_debounce_ms: 1_200,
+            poll_min_interval_seconds: 30,
+            poll_max_interval_seconds: 300,
+            max_batch_size: 50,
+            max_retry_attempts: 8,
         }
     }
 }
@@ -554,6 +604,7 @@ struct TodoistIntegrationConfigFile {
     token_source: TodoistTokenSource,
     token_env_var: String,
     token_command: Option<TokenCommandConfigFile>,
+    sync_runtime: TodoistSyncRuntimeConfigFile,
 }
 
 impl Default for TodoistIntegrationConfigFile {
@@ -565,6 +616,30 @@ impl Default for TodoistIntegrationConfigFile {
             token_source: defaults.token_source,
             token_env_var: defaults.token_env_var,
             token_command: None,
+            sync_runtime: TodoistSyncRuntimeConfigFile::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+struct TodoistSyncRuntimeConfigFile {
+    push_debounce_ms: u64,
+    poll_min_interval_seconds: u64,
+    poll_max_interval_seconds: u64,
+    max_batch_size: u32,
+    max_retry_attempts: u32,
+}
+
+impl Default for TodoistSyncRuntimeConfigFile {
+    fn default() -> Self {
+        let defaults = TodoistSyncRuntimeConfig::default();
+        Self {
+            push_debounce_ms: defaults.push_debounce_ms,
+            poll_min_interval_seconds: defaults.poll_min_interval_seconds,
+            poll_max_interval_seconds: defaults.poll_max_interval_seconds,
+            max_batch_size: defaults.max_batch_size,
+            max_retry_attempts: defaults.max_retry_attempts,
         }
     }
 }
@@ -635,6 +710,25 @@ impl From<AppConfigFile> for AppConfig {
                             timeout_ms: command.timeout_ms,
                         }
                     }),
+                    sync_runtime: TodoistSyncRuntimeConfig {
+                        push_debounce_ms: value.integrations.todoist.sync_runtime.push_debounce_ms,
+                        poll_min_interval_seconds: value
+                            .integrations
+                            .todoist
+                            .sync_runtime
+                            .poll_min_interval_seconds,
+                        poll_max_interval_seconds: value
+                            .integrations
+                            .todoist
+                            .sync_runtime
+                            .poll_max_interval_seconds,
+                        max_batch_size: value.integrations.todoist.sync_runtime.max_batch_size,
+                        max_retry_attempts: value
+                            .integrations
+                            .todoist
+                            .sync_runtime
+                            .max_retry_attempts,
+                    },
                 },
             },
         }
@@ -667,6 +761,25 @@ impl From<&AppConfig> for AppConfigFile {
                             timeout_ms: command.timeout_ms,
                         },
                     ),
+                    sync_runtime: TodoistSyncRuntimeConfigFile {
+                        push_debounce_ms: value.integrations.todoist.sync_runtime.push_debounce_ms,
+                        poll_min_interval_seconds: value
+                            .integrations
+                            .todoist
+                            .sync_runtime
+                            .poll_min_interval_seconds,
+                        poll_max_interval_seconds: value
+                            .integrations
+                            .todoist
+                            .sync_runtime
+                            .poll_max_interval_seconds,
+                        max_batch_size: value.integrations.todoist.sync_runtime.max_batch_size,
+                        max_retry_attempts: value
+                            .integrations
+                            .todoist
+                            .sync_runtime
+                            .max_retry_attempts,
+                    },
                 },
             },
         }

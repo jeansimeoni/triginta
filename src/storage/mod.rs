@@ -159,6 +159,9 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
     op_timestamp_utc TEXT NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
+    error_code TEXT,
+    next_attempt_at TEXT,
+    last_attempt_at TEXT,
     created_at TEXT NOT NULL
 );
 "#;
@@ -184,7 +187,75 @@ pub struct SyncOutboxEntry {
     pub op_timestamp_utc: String,
     pub attempts: i64,
     pub last_error: Option<String>,
+    pub error_code: Option<String>,
+    pub next_attempt_at: Option<String>,
+    pub last_attempt_at: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncTaskSnapshot {
+    pub local_id: i64,
+    pub todoist_id: Option<String>,
+    pub project_todoist_id: Option<String>,
+    pub section_todoist_id: Option<String>,
+    pub parent_todoist_id: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub priority: i64,
+    pub due_string: Option<String>,
+    pub labels: Vec<String>,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncProjectSnapshot {
+    pub local_id: i64,
+    pub todoist_id: Option<String>,
+    pub parent_todoist_id: Option<String>,
+    pub name: String,
+    pub color: String,
+    pub is_favorite: bool,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncSectionSnapshot {
+    pub local_id: i64,
+    pub todoist_id: Option<String>,
+    pub project_todoist_id: Option<String>,
+    pub name: String,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncTagSnapshot {
+    pub local_id: i64,
+    pub todoist_id: Option<String>,
+    pub name: String,
+    pub color: String,
+    pub is_favorite: bool,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncFilterSnapshot {
+    pub local_id: i64,
+    pub todoist_id: Option<String>,
+    pub name: String,
+    pub query: String,
+    pub color: String,
+    pub is_favorite: bool,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncEntitySnapshot {
+    Task(SyncTaskSnapshot),
+    Project(SyncProjectSnapshot),
+    Section(SyncSectionSnapshot),
+    Tag(SyncTagSnapshot),
+    Filter(SyncFilterSnapshot),
 }
 
 // These traits define the storage-facing API the rest of the app relies on.
@@ -319,6 +390,12 @@ pub trait SyncRepository {
     fn get_state(&self, provider: &str) -> Result<Option<SyncStateRecord>>;
     fn upsert_state(&self, state: &SyncStateRecord) -> Result<()>;
     fn list_outbox(&self, provider: &str, limit: i64) -> Result<Vec<SyncOutboxEntry>>;
+    fn list_ready_outbox(
+        &self,
+        provider: &str,
+        limit: i64,
+        ready_before_utc: &str,
+    ) -> Result<Vec<SyncOutboxEntry>>;
     fn enqueue_outbox(
         &self,
         provider: &str,
@@ -329,7 +406,32 @@ pub trait SyncRepository {
         op_timestamp_utc: &str,
     ) -> Result<i64>;
     fn mark_outbox_delivered(&self, entry_id: i64) -> Result<()>;
-    fn mark_outbox_failed(&self, entry_id: i64, error: &str) -> Result<()>;
+    fn mark_outbox_failed(
+        &self,
+        entry_id: i64,
+        error: &str,
+        error_code: Option<&str>,
+        next_attempt_at: Option<&str>,
+        last_attempt_at: &str,
+    ) -> Result<()>;
+    fn load_entity_snapshot(
+        &self,
+        entity_type: &str,
+        entity_local_id: i64,
+    ) -> Result<Option<SyncEntitySnapshot>>;
+    fn set_entity_todoist_id(
+        &self,
+        entity_type: &str,
+        entity_local_id: i64,
+        todoist_id: &str,
+        synced_at_utc: &str,
+    ) -> Result<()>;
+    fn mark_entity_synced(
+        &self,
+        entity_type: &str,
+        entity_local_id: i64,
+        synced_at_utc: &str,
+    ) -> Result<()>;
 }
 
 #[derive(Debug)]
@@ -449,6 +551,18 @@ impl Database {
             "ALTER TABLE filters ADD COLUMN todoist_id TEXT",
         )?;
         self.ensure_sync_tables()?;
+        self.ensure_sync_outbox_column(
+            "error_code",
+            "ALTER TABLE sync_outbox ADD COLUMN error_code TEXT",
+        )?;
+        self.ensure_sync_outbox_column(
+            "next_attempt_at",
+            "ALTER TABLE sync_outbox ADD COLUMN next_attempt_at TEXT",
+        )?;
+        self.ensure_sync_outbox_column(
+            "last_attempt_at",
+            "ALTER TABLE sync_outbox ADD COLUMN last_attempt_at TEXT",
+        )?;
         self.backfill_sync_timestamps()?;
         self.ensure_task_indexes()?;
         self.ensure_sync_indexes()?;
@@ -486,6 +600,10 @@ impl Database {
 
     fn ensure_filters_column(&self, column_name: &str, alter_sql: &str) -> Result<()> {
         self.ensure_table_column("filters", column_name, alter_sql)
+    }
+
+    fn ensure_sync_outbox_column(&self, column_name: &str, alter_sql: &str) -> Result<()> {
+        self.ensure_table_column("sync_outbox", column_name, alter_sql)
     }
 
     fn ensure_table_column(
@@ -619,6 +737,9 @@ impl Database {
                 op_timestamp_utc TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
+                error_code TEXT,
+                next_attempt_at TEXT,
+                last_attempt_at TEXT,
                 created_at TEXT NOT NULL
             )",
             [],
@@ -807,8 +928,8 @@ fn enqueue_sync_outbox(
     op_timestamp_utc: &str,
 ) -> Result<()> {
     connection.execute(
-        "INSERT INTO sync_outbox(provider, entity_type, entity_local_id, op_kind, payload, op_timestamp_utc, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO sync_outbox(provider, entity_type, entity_local_id, op_kind, payload, op_timestamp_utc, attempts, last_error, error_code, next_attempt_at, last_attempt_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, NULL, ?7, NULL, ?8)",
         params![
             provider,
             entity_type,
@@ -816,7 +937,8 @@ fn enqueue_sync_outbox(
             op_kind,
             payload,
             op_timestamp_utc,
-            op_timestamp_utc
+            op_timestamp_utc,
+            op_timestamp_utc,
         ],
     )?;
     Ok(())
@@ -873,7 +995,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
 
     fn list_outbox(&self, provider: &str, limit: i64) -> Result<Vec<SyncOutboxEntry>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, provider, entity_type, entity_local_id, op_kind, payload, op_timestamp_utc, attempts, last_error, created_at
+            "SELECT id, provider, entity_type, entity_local_id, op_kind, payload, op_timestamp_utc, attempts, last_error, error_code, next_attempt_at, last_attempt_at, created_at
              FROM sync_outbox
              WHERE provider = ?1
              ORDER BY id ASC
@@ -890,11 +1012,49 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                 op_timestamp_utc: row.get(6)?,
                 attempts: row.get(7)?,
                 last_error: row.get(8)?,
-                created_at: row.get(9)?,
+                error_code: row.get(9)?,
+                next_attempt_at: row.get(10)?,
+                last_attempt_at: row.get(11)?,
+                created_at: row.get(12)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .context("failed to list sync outbox entries")
+    }
+
+    fn list_ready_outbox(
+        &self,
+        provider: &str,
+        limit: i64,
+        ready_before_utc: &str,
+    ) -> Result<Vec<SyncOutboxEntry>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, provider, entity_type, entity_local_id, op_kind, payload, op_timestamp_utc, attempts, last_error, error_code, next_attempt_at, last_attempt_at, created_at
+             FROM sync_outbox
+             WHERE provider = ?1
+               AND (next_attempt_at IS NULL OR next_attempt_at <= ?2)
+             ORDER BY id ASC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![provider, ready_before_utc, limit], |row| {
+            Ok(SyncOutboxEntry {
+                id: row.get(0)?,
+                provider: row.get(1)?,
+                entity_type: row.get(2)?,
+                entity_local_id: row.get(3)?,
+                op_kind: row.get(4)?,
+                payload: row.get(5)?,
+                op_timestamp_utc: row.get(6)?,
+                attempts: row.get(7)?,
+                last_error: row.get(8)?,
+                error_code: row.get(9)?,
+                next_attempt_at: row.get(10)?,
+                last_attempt_at: row.get(11)?,
+                created_at: row.get(12)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to list ready sync outbox entries")
     }
 
     fn enqueue_outbox(
@@ -924,13 +1084,251 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         Ok(())
     }
 
-    fn mark_outbox_failed(&self, entry_id: i64, error: &str) -> Result<()> {
+    fn mark_outbox_failed(
+        &self,
+        entry_id: i64,
+        error: &str,
+        error_code: Option<&str>,
+        next_attempt_at: Option<&str>,
+        last_attempt_at: &str,
+    ) -> Result<()> {
         self.connection.execute(
             "UPDATE sync_outbox
-             SET attempts = attempts + 1, last_error = ?1
-             WHERE id = ?2",
-            params![error, entry_id],
+             SET attempts = attempts + 1,
+                 last_error = ?1,
+                 error_code = ?2,
+                 next_attempt_at = ?3,
+                 last_attempt_at = ?4
+             WHERE id = ?5",
+            params![
+                error,
+                error_code,
+                next_attempt_at,
+                last_attempt_at,
+                entry_id
+            ],
         )?;
+        Ok(())
+    }
+
+    fn load_entity_snapshot(
+        &self,
+        entity_type: &str,
+        entity_local_id: i64,
+    ) -> Result<Option<SyncEntitySnapshot>> {
+        match entity_type {
+            "task" => {
+                let task = self
+                    .connection
+                    .query_row(
+                        "SELECT tasks.id, tasks.todoist_id, projects.todoist_id, sections.todoist_id, parent.todoist_id,
+                                tasks.title, tasks.description, tasks.priority, tasks.due_string, tasks.deleted_at
+                         FROM tasks
+                         LEFT JOIN projects ON projects.id = tasks.project_id
+                         LEFT JOIN sections ON sections.id = tasks.section_id
+                         LEFT JOIN tasks AS parent ON parent.id = tasks.parent_task_id
+                         WHERE tasks.id = ?1",
+                        params![entity_local_id],
+                        |row| {
+                            Ok(SyncTaskSnapshot {
+                                local_id: row.get(0)?,
+                                todoist_id: row.get(1)?,
+                                project_todoist_id: row.get(2)?,
+                                section_todoist_id: row.get(3)?,
+                                parent_todoist_id: row.get(4)?,
+                                title: row.get(5)?,
+                                description: row.get(6)?,
+                                priority: row.get(7)?,
+                                due_string: row.get(8)?,
+                                deleted_at: row.get(9)?,
+                                labels: Vec::new(),
+                            })
+                        },
+                    )
+                    .optional()?;
+                let Some(mut task) = task else {
+                    return Ok(None);
+                };
+                let mut statement = self.connection.prepare(
+                    "SELECT tags.name
+                     FROM task_tags
+                     INNER JOIN tags ON tags.id = task_tags.tag_id
+                     WHERE task_tags.task_id = ?1 AND tags.deleted_at IS NULL
+                     ORDER BY tags.item_order ASC, tags.name COLLATE NOCASE ASC, tags.id ASC",
+                )?;
+                let rows = statement.query_map(params![entity_local_id], |row| row.get(0))?;
+                task.labels = rows.collect::<std::result::Result<Vec<String>, _>>()?;
+                Ok(Some(SyncEntitySnapshot::Task(task)))
+            }
+            "project" => self
+                .connection
+                .query_row(
+                    "SELECT p.id, p.todoist_id, parent.todoist_id, p.name, p.color, p.is_favorite, p.deleted_at
+                     FROM projects p
+                     LEFT JOIN projects parent ON parent.id = p.parent_project_id
+                     WHERE p.id = ?1",
+                    params![entity_local_id],
+                    |row| {
+                        Ok(SyncEntitySnapshot::Project(SyncProjectSnapshot {
+                            local_id: row.get(0)?,
+                            todoist_id: row.get(1)?,
+                            parent_todoist_id: row.get(2)?,
+                            name: row.get(3)?,
+                            color: row.get(4)?,
+                            is_favorite: row.get::<_, i64>(5)? != 0,
+                            deleted_at: row.get(6)?,
+                        }))
+                    },
+                )
+                .optional()
+                .context("failed to load sync project snapshot"),
+            "section" => self
+                .connection
+                .query_row(
+                    "SELECT sections.id, sections.todoist_id, projects.todoist_id, sections.name, sections.deleted_at
+                     FROM sections
+                     LEFT JOIN projects ON projects.id = sections.project_id
+                     WHERE sections.id = ?1",
+                    params![entity_local_id],
+                    |row| {
+                        Ok(SyncEntitySnapshot::Section(SyncSectionSnapshot {
+                            local_id: row.get(0)?,
+                            todoist_id: row.get(1)?,
+                            project_todoist_id: row.get(2)?,
+                            name: row.get(3)?,
+                            deleted_at: row.get(4)?,
+                        }))
+                    },
+                )
+                .optional()
+                .context("failed to load sync section snapshot"),
+            "tag" => self
+                .connection
+                .query_row(
+                    "SELECT id, todoist_id, name, color, is_favorite, deleted_at
+                     FROM tags
+                     WHERE id = ?1",
+                    params![entity_local_id],
+                    |row| {
+                        Ok(SyncEntitySnapshot::Tag(SyncTagSnapshot {
+                            local_id: row.get(0)?,
+                            todoist_id: row.get(1)?,
+                            name: row.get(2)?,
+                            color: row.get(3)?,
+                            is_favorite: row.get::<_, i64>(4)? != 0,
+                            deleted_at: row.get(5)?,
+                        }))
+                    },
+                )
+                .optional()
+                .context("failed to load sync tag snapshot"),
+            "filter" => self
+                .connection
+                .query_row(
+                    "SELECT id, todoist_id, name, query, color, is_favorite, deleted_at
+                     FROM filters
+                     WHERE id = ?1",
+                    params![entity_local_id],
+                    |row| {
+                        Ok(SyncEntitySnapshot::Filter(SyncFilterSnapshot {
+                            local_id: row.get(0)?,
+                            todoist_id: row.get(1)?,
+                            name: row.get(2)?,
+                            query: row.get(3)?,
+                            color: row.get(4)?,
+                            is_favorite: row.get::<_, i64>(5)? != 0,
+                            deleted_at: row.get(6)?,
+                        }))
+                    },
+                )
+                .optional()
+                .context("failed to load sync filter snapshot"),
+            _ => Ok(None),
+        }
+    }
+
+    fn set_entity_todoist_id(
+        &self,
+        entity_type: &str,
+        entity_local_id: i64,
+        todoist_id: &str,
+        synced_at_utc: &str,
+    ) -> Result<()> {
+        match entity_type {
+            "task" => {
+                self.connection.execute(
+                    "UPDATE tasks SET todoist_id = ?1, synced_at = ?2 WHERE id = ?3",
+                    params![todoist_id, synced_at_utc, entity_local_id],
+                )?;
+            }
+            "project" => {
+                self.connection.execute(
+                    "UPDATE projects SET todoist_id = ?1, synced_at = ?2 WHERE id = ?3",
+                    params![todoist_id, synced_at_utc, entity_local_id],
+                )?;
+            }
+            "section" => {
+                self.connection.execute(
+                    "UPDATE sections SET todoist_id = ?1, synced_at = ?2 WHERE id = ?3",
+                    params![todoist_id, synced_at_utc, entity_local_id],
+                )?;
+            }
+            "tag" => {
+                self.connection.execute(
+                    "UPDATE tags SET todoist_id = ?1, synced_at = ?2 WHERE id = ?3",
+                    params![todoist_id, synced_at_utc, entity_local_id],
+                )?;
+            }
+            "filter" => {
+                self.connection.execute(
+                    "UPDATE filters SET todoist_id = ?1, synced_at = ?2 WHERE id = ?3",
+                    params![todoist_id, synced_at_utc, entity_local_id],
+                )?;
+            }
+            _ => {}
+        };
+        Ok(())
+    }
+
+    fn mark_entity_synced(
+        &self,
+        entity_type: &str,
+        entity_local_id: i64,
+        synced_at_utc: &str,
+    ) -> Result<()> {
+        match entity_type {
+            "task" => {
+                self.connection.execute(
+                    "UPDATE tasks SET synced_at = ?1 WHERE id = ?2",
+                    params![synced_at_utc, entity_local_id],
+                )?;
+            }
+            "project" => {
+                self.connection.execute(
+                    "UPDATE projects SET synced_at = ?1 WHERE id = ?2",
+                    params![synced_at_utc, entity_local_id],
+                )?;
+            }
+            "section" => {
+                self.connection.execute(
+                    "UPDATE sections SET synced_at = ?1 WHERE id = ?2",
+                    params![synced_at_utc, entity_local_id],
+                )?;
+            }
+            "tag" => {
+                self.connection.execute(
+                    "UPDATE tags SET synced_at = ?1 WHERE id = ?2",
+                    params![synced_at_utc, entity_local_id],
+                )?;
+            }
+            "filter" => {
+                self.connection.execute(
+                    "UPDATE filters SET synced_at = ?1 WHERE id = ?2",
+                    params![synced_at_utc, entity_local_id],
+                )?;
+            }
+            _ => {}
+        };
         Ok(())
     }
 }
@@ -2800,10 +3198,21 @@ mod tests {
         assert_eq!(outbox[0].id, entry_id);
         assert_eq!(outbox[0].entity_type, "task");
 
-        sync.mark_outbox_failed(entry_id, "temporary failure")?;
+        let retry_at = Utc::now().to_rfc3339();
+        let attempted_at = Utc::now().to_rfc3339();
+        sync.mark_outbox_failed(
+            entry_id,
+            "temporary failure",
+            Some("temporary"),
+            Some(retry_at.as_str()),
+            attempted_at.as_str(),
+        )?;
         let outbox = sync.list_outbox("todoist", 10)?;
         assert_eq!(outbox[0].attempts, 1);
         assert_eq!(outbox[0].last_error.as_deref(), Some("temporary failure"));
+        assert_eq!(outbox[0].error_code.as_deref(), Some("temporary"));
+        assert!(outbox[0].next_attempt_at.is_some());
+        assert!(outbox[0].last_attempt_at.is_some());
 
         sync.mark_outbox_delivered(entry_id)?;
         assert!(sync.list_outbox("todoist", 10)?.is_empty());

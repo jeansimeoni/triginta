@@ -255,6 +255,7 @@ Fields:
 - `token_source` (`env` or `command`, default: `env`)
 - `token_env_var` (default: `TRIGINTA_TODOIST_TOKEN`)
 - `token_command` (required when `token_source = "command"`)
+- `sync_runtime` (optional scheduler/retry tuning)
 
 `token_source = "env"` reads the token from `token_env_var`.
 
@@ -265,11 +266,23 @@ uses trimmed stdout as the token. Configure:
 - `token_command.args`
 - `token_command.timeout_ms`
 
+`sync_runtime` controls sync cadence and retry behavior:
+
+- `sync_runtime.push_debounce_ms` (default: `1200`)
+- `sync_runtime.poll_min_interval_seconds` (default: `30`)
+- `sync_runtime.poll_max_interval_seconds` (default: `300`)
+- `sync_runtime.max_batch_size` (default: `50`)
+- `sync_runtime.max_retry_attempts` (default: `8`)
+
 Current behavior note:
 
-- `sync_on_startup = true` currently runs provider bootstrap/diagnostic sync
-  work (including auth/token resolution and sync-state updates), but live remote
-  pull/push with Todoist is still under implementation.
+- Startup/manual/poll cycles now run with adaptive scheduling, outbox retry
+  metadata, and status reporting.
+- Outbound Todoist transport is wired through REST v2 for create/update/delete
+  operations on projects, sections, tasks, tags (labels), and filters.
+- Downstream remote-to-local apply/merge is still under implementation; polling
+  currently performs transport-level remote checks but does not apply remote
+  entity changes into local SQLite yet.
 
 TOML command example (for SOPS-style workflows):
 
@@ -284,6 +297,13 @@ token_env_var = "TRIGINTA_TODOIST_TOKEN"
 program = "/usr/bin/sops"
 args = ["-d", "/path/to/todoist-token.enc"]
 timeout_ms = 3000
+
+[integrations.todoist.sync_runtime]
+push_debounce_ms = 1200
+poll_min_interval_seconds = 30
+poll_max_interval_seconds = 300
+max_batch_size = 50
+max_retry_attempts = 8
 ```
 
 Security notes:

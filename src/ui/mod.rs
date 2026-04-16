@@ -1972,6 +1972,17 @@ fn render_status_bar(
         return;
     }
 
+    if let Some(sync_status) = app.sync_status_line() {
+        frame.render_widget(
+            Paragraph::new(
+                Line::from(ellipsize_end(sync_status, center_width as usize)).centered(),
+            )
+            .style(Style::default().fg(palette.subtle_text)),
+            center_area,
+        );
+        return;
+    }
+
     let center_text = footer_shortcuts_line(app, symbols, center_width as usize);
     if !center_text.is_empty() {
         frame.render_widget(
