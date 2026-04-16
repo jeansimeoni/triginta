@@ -786,18 +786,37 @@ fn render_task_details_panel(
             .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
         meta_lines.push(Line::from(format!("Due: {due_text}")));
     }
-    if let Some(project_name) = project_name_for_task(app.screen_data(), task) {
-        meta_lines.push(Line::from(format!("Project: {project_name}")));
+    if let Some((project_name, project_color)) = project_meta_for_task(app.screen_data(), task) {
+        let section_name = section_name_for_task(app.screen_data(), task);
+        let project_label = section_name
+            .map(|section| format!("{project_name}::{section}"))
+            .unwrap_or_else(|| project_name.to_string());
+        meta_lines.push(Line::from(vec![
+            Span::raw("Project: "),
+            Span::styled(
+                project_label,
+                Style::default().fg(palette.project_color(project_color)),
+            ),
+        ]));
     }
     let tags = task_tags_for_task(app.screen_data(), task.id);
     if !tags.is_empty() {
-        meta_lines.push(Line::from(format!(
-            "Tags: {}",
-            tags.into_iter()
-                .map(|(tag, _)| format!("@{tag}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        )));
+        let tag_segments = tags
+            .into_iter()
+            .map(|(tag, color)| TaskTagRowSegment {
+                text: format!("@{tag}"),
+                color: Some(color),
+            })
+            .collect::<Vec<_>>();
+        let mut spans = vec![Span::raw("Tags: ")];
+        spans.extend(task_tag_segments_spans(
+            tag_segments.as_slice(),
+            Style::default(),
+            false,
+            palette,
+            symbols,
+        ));
+        meta_lines.push(Line::from(spans));
     }
     frame.render_widget(
         Paragraph::new(meta_lines).wrap(Wrap { trim: true }),
@@ -2243,13 +2262,6 @@ fn task_project_line(
     Line::from(spans)
 }
 
-fn project_name_for_task<'a>(data: &'a ScreenData, task: &Task) -> Option<&'a str> {
-    data.projects
-        .iter()
-        .find(|project| project.id == task.project_id)
-        .map(|project| project.name.as_str())
-}
-
 fn project_meta_for_task<'a>(
     data: &'a ScreenData,
     task: &Task,
@@ -2258,6 +2270,14 @@ fn project_meta_for_task<'a>(
         .iter()
         .find(|project| project.id == task.project_id)
         .map(|project| (project.name.as_str(), project.color))
+}
+
+fn section_name_for_task<'a>(data: &'a ScreenData, task: &Task) -> Option<&'a str> {
+    let section_id = task.section_id?;
+    data.sections
+        .iter()
+        .find(|section| section.id == section_id && section.deleted_at.is_none())
+        .map(|section| section.name.as_str())
 }
 
 fn task_tags_for_task<'a>(
