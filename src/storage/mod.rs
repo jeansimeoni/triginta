@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER,
+    parent_task_id INTEGER,
+    child_order INTEGER NOT NULL DEFAULT 0,
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'todo',
@@ -43,8 +45,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     due_timezone TEXT,
     due_string TEXT,
     due_is_recurring INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY(project_id) REFERENCES projects(id)
+    FOREIGN KEY(project_id) REFERENCES projects(id),
+    FOREIGN KEY(parent_task_id) REFERENCES tasks(id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id
+    ON tasks(parent_task_id);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_parent_child_order
+    ON tasks(parent_task_id, child_order, created_at, id);
 
 CREATE TABLE IF NOT EXISTS tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,6 +139,7 @@ pub trait TaskRepository {
         status: TaskStatus,
         completed_at: Option<DateTime<Local>>,
     ) -> Result<Task>;
+    fn move_within_parent(&self, task_id: TaskId, direction: isize) -> Result<()>;
     fn delete(&self, task_id: TaskId) -> Result<()>;
 }
 
@@ -288,6 +298,14 @@ impl Database {
             "description",
             "ALTER TABLE tasks ADD COLUMN description TEXT NOT NULL DEFAULT ''",
         )?;
+        self.ensure_tasks_column(
+            "parent_task_id",
+            "ALTER TABLE tasks ADD COLUMN parent_task_id INTEGER",
+        )?;
+        self.ensure_tasks_column(
+            "child_order",
+            "ALTER TABLE tasks ADD COLUMN child_order INTEGER NOT NULL DEFAULT 0",
+        )?;
         self.ensure_session_history_column(
             "notes",
             "ALTER TABLE session_history ADD COLUMN notes TEXT NOT NULL DEFAULT ''",
@@ -300,6 +318,7 @@ impl Database {
             .context("failed to initialize app metadata")?;
         let inbox_project_id = self.ensure_inbox_project()?;
         self.assign_tasks_to_inbox(inbox_project_id)?;
+        self.normalize_task_child_order()?;
         Ok(())
     }
 
@@ -340,6 +359,45 @@ impl Database {
         self.connection
             .execute(alter_sql, [])
             .with_context(|| format!("failed to add {column_name} column to session_history"))?;
+        Ok(())
+    }
+
+    fn normalize_task_child_order(&self) -> Result<()> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, parent_task_id
+                 FROM tasks
+                 WHERE deleted_at IS NULL
+                 ORDER BY parent_task_id ASC, created_at ASC, id ASC",
+            )
+            .context("failed to prepare task ordering normalization query")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    TaskId(row.get::<_, i64>(0)?),
+                    row.get::<_, Option<i64>>(1)?.map(TaskId),
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load tasks for ordering normalization")?;
+
+        let mut last_parent: Option<TaskId> = None;
+        let mut order: i64 = 1;
+        let mut update = self
+            .connection
+            .prepare("UPDATE tasks SET child_order = ?1 WHERE id = ?2")
+            .context("failed to prepare task ordering update statement")?;
+        for (task_id, parent_task_id) in rows {
+            if parent_task_id != last_parent {
+                order = 1;
+                last_parent = parent_task_id;
+            }
+            update
+                .execute(params![order, task_id.0])
+                .with_context(|| format!("failed to normalize child_order for {}", task_id.0))?;
+            order += 1;
+        }
         Ok(())
     }
 
@@ -421,7 +479,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         // closure. The closure is conceptually similar to a row-to-struct
         // callback in C, but its return type is checked by the compiler.
         let mut statement = self.connection.prepare(
-            "SELECT id, project_id, title, description, status, priority, created_at, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring
+            "SELECT id, project_id, parent_task_id, child_order, title, description, status, priority, created_at, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring
              FROM tasks
              ORDER BY created_at DESC, id DESC",
         )?;
@@ -430,14 +488,16 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             Ok(Task {
                 id: TaskId(row.get(0)?),
                 project_id: ProjectId(row.get(1)?),
-                title: row.get(2)?,
-                description: row.get(3)?,
-                status: TaskStatus::from_db(row.get::<_, String>(4)?.as_str()),
-                priority: TaskPriority::from_db(row.get::<_, i64>(5)?),
-                created_at: row.get(6)?,
-                completed_at: row.get(7)?,
-                deleted_at: row.get(8)?,
-                due: Self::row_due(row, 9, 10, 11, 12, 13)?,
+                parent_task_id: row.get::<_, Option<i64>>(2)?.map(TaskId),
+                child_order: row.get(3)?,
+                title: row.get(4)?,
+                description: row.get(5)?,
+                status: TaskStatus::from_db(row.get::<_, String>(6)?.as_str()),
+                priority: TaskPriority::from_db(row.get::<_, i64>(7)?),
+                created_at: row.get(8)?,
+                completed_at: row.get(9)?,
+                deleted_at: row.get(10)?,
+                due: Self::row_due(row, 11, 12, 13, 14, 15)?,
             })
         })?;
 
@@ -456,10 +516,11 @@ impl TaskRepository for SqliteTaskRepository<'_> {
     ) -> Result<Task> {
         self.connection
             .execute(
-                "INSERT INTO tasks(project_id, title, status, priority, created_at, completed_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring)
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO tasks(project_id, parent_task_id, child_order, title, status, priority, created_at, completed_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring)
+                 VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     project_id.0,
+                    self.next_child_order(None)?,
                     title,
                     TaskStatus::Todo.as_str(),
                     TaskPriority::P4.to_db(),
@@ -480,15 +541,27 @@ impl TaskRepository for SqliteTaskRepository<'_> {
     }
 
     fn update(&self, task_id: TaskId, update: &TaskUpdate) -> Result<Task> {
+        let current = self
+            .load_task(task_id)?
+            .context("task to update does not exist")?;
+        self.validate_parent(task_id, update.project_id, update.parent_task_id)?;
+        let child_order = if current.parent_task_id == update.parent_task_id {
+            current.child_order
+        } else {
+            self.next_child_order(update.parent_task_id)?
+        };
+
         self.connection
             .execute(
                 "UPDATE tasks
-                 SET title = ?1, description = ?2, project_id = ?3, priority = ?4, due_date = ?5, due_datetime_utc = ?6, due_timezone = ?7, due_string = ?8, due_is_recurring = ?9
-                 WHERE id = ?10",
+                 SET title = ?1, description = ?2, project_id = ?3, parent_task_id = ?4, child_order = ?5, priority = ?6, due_date = ?7, due_datetime_utc = ?8, due_timezone = ?9, due_string = ?10, due_is_recurring = ?11
+                 WHERE id = ?12",
                 params![
                     update.title,
                     update.description,
                     update.project_id.0,
+                    update.parent_task_id.map(|id| id.0),
+                    child_order,
                     update.priority.to_db(),
                     update.due.as_ref().map(|due| due.date),
                     update
@@ -508,6 +581,8 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             )
             .with_context(|| format!("failed to update task {}", task_id.0))?;
 
+        self.normalize_sibling_order(current.parent_task_id)?;
+        self.normalize_sibling_order(update.parent_task_id)?;
         self.load_task(task_id)?
             .context("updated task could not be reloaded")
     }
@@ -531,23 +606,151 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             .context("updated task could not be reloaded")
     }
 
+    fn move_within_parent(&self, task_id: TaskId, direction: isize) -> Result<()> {
+        if direction == 0 {
+            return Ok(());
+        }
+
+        let Some(task) = self.load_task(task_id)? else {
+            return Ok(());
+        };
+        if task.deleted_at.is_some() {
+            return Ok(());
+        }
+
+        let mut sibling_ids = self.active_sibling_ids(task.parent_task_id)?;
+        let Some(current_index) = sibling_ids.iter().position(|id| *id == task_id) else {
+            return Ok(());
+        };
+        let target_index = (current_index as isize + direction)
+            .clamp(0, sibling_ids.len().saturating_sub(1) as isize) as usize;
+        if target_index == current_index {
+            return Ok(());
+        }
+
+        sibling_ids.remove(current_index);
+        sibling_ids.insert(target_index, task_id);
+        let mut statement = self
+            .connection
+            .prepare("UPDATE tasks SET child_order = ?1 WHERE id = ?2")?;
+        for (index, sibling_id) in sibling_ids.iter().enumerate() {
+            statement.execute(params![index as i64 + 1, sibling_id.0])?;
+        }
+        Ok(())
+    }
+
     fn delete(&self, task_id: TaskId) -> Result<()> {
+        let parent_task_id = self.load_task(task_id)?.and_then(|task| task.parent_task_id);
         self.connection
             .execute(
                 "UPDATE tasks SET deleted_at = ?1 WHERE id = ?2",
                 params![Local::now(), task_id.0],
             )
             .with_context(|| format!("failed to soft-delete task {}", task_id.0))?;
+        self.normalize_sibling_order(parent_task_id)?;
         Ok(())
     }
 }
 
 impl SqliteTaskRepository<'_> {
+    fn validate_parent(
+        &self,
+        task_id: TaskId,
+        project_id: ProjectId,
+        parent_task_id: Option<TaskId>,
+    ) -> Result<()> {
+        let Some(parent_task_id) = parent_task_id else {
+            return Ok(());
+        };
+        if parent_task_id == task_id {
+            bail!("task cannot be its own parent");
+        }
+
+        let parent = self
+            .load_task(parent_task_id)?
+            .context("selected parent task does not exist")?;
+        if parent.deleted_at.is_some() {
+            bail!("selected parent task is deleted");
+        }
+        if parent.project_id != project_id {
+            bail!("parent and child tasks must belong to the same project");
+        }
+
+        let mut ancestor = parent.parent_task_id;
+        while let Some(ancestor_id) = ancestor {
+            if ancestor_id == task_id {
+                bail!("task hierarchy cannot contain cycles");
+            }
+            ancestor = self
+                .load_task(ancestor_id)?
+                .and_then(|candidate| candidate.parent_task_id);
+        }
+        Ok(())
+    }
+
+    fn next_child_order(&self, parent_task_id: Option<TaskId>) -> Result<i64> {
+        let next = if let Some(parent_task_id) = parent_task_id {
+            self.connection.query_row(
+                "SELECT COALESCE(MAX(child_order), 0) + 1
+                 FROM tasks
+                 WHERE deleted_at IS NULL AND parent_task_id = ?1",
+                params![parent_task_id.0],
+                |row| row.get(0),
+            )?
+        } else {
+            self.connection.query_row(
+                "SELECT COALESCE(MAX(child_order), 0) + 1
+                 FROM tasks
+                 WHERE deleted_at IS NULL AND parent_task_id IS NULL",
+                [],
+                |row| row.get(0),
+            )?
+        };
+        Ok(next)
+    }
+
+    fn active_sibling_ids(&self, parent_task_id: Option<TaskId>) -> Result<Vec<TaskId>> {
+        if let Some(parent_task_id) = parent_task_id {
+            let mut statement = self.connection.prepare(
+                "SELECT id
+                 FROM tasks
+                 WHERE deleted_at IS NULL AND parent_task_id = ?1
+                 ORDER BY child_order ASC, created_at ASC, id ASC",
+            )?;
+            let rows =
+                statement.query_map(params![parent_task_id.0], |row| Ok(TaskId(row.get(0)?)))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .context("failed to load sibling tasks")
+        } else {
+            let mut statement = self.connection.prepare(
+                "SELECT id
+                 FROM tasks
+                 WHERE deleted_at IS NULL AND parent_task_id IS NULL
+                 ORDER BY child_order ASC, created_at ASC, id ASC",
+            )?;
+            let rows = statement.query_map([], |row| Ok(TaskId(row.get(0)?)))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .context("failed to load sibling tasks")
+        }
+    }
+
+    fn normalize_sibling_order(&self, parent_task_id: Option<TaskId>) -> Result<()> {
+        let sibling_ids = self.active_sibling_ids(parent_task_id)?;
+        let mut statement = self
+            .connection
+            .prepare("UPDATE tasks SET child_order = ?1 WHERE id = ?2")?;
+        for (index, sibling_id) in sibling_ids.iter().enumerate() {
+            statement.execute(params![index as i64 + 1, sibling_id.0])?;
+        }
+        Ok(())
+    }
+
     fn load_task(&self, task_id: TaskId) -> Result<Option<Task>> {
         self.connection
             .query_row(
-                "SELECT id, project_id, title, description, status, created_at, completed_at
-                 , priority, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring
+                "SELECT id, project_id, parent_task_id, child_order, title, description, status,
+                        created_at, completed_at, priority, deleted_at, due_date,
+                        due_datetime_utc, due_timezone, due_string, due_is_recurring
                  FROM tasks
                  WHERE id = ?1",
                 params![task_id.0],
@@ -555,14 +758,16 @@ impl SqliteTaskRepository<'_> {
                     Ok(Task {
                         id: TaskId(row.get(0)?),
                         project_id: ProjectId(row.get(1)?),
-                        title: row.get(2)?,
-                        description: row.get(3)?,
-                        status: TaskStatus::from_db(row.get::<_, String>(4)?.as_str()),
-                        created_at: row.get(5)?,
-                        completed_at: row.get(6)?,
-                        priority: TaskPriority::from_db(row.get::<_, i64>(7)?),
-                        deleted_at: row.get(8)?,
-                        due: Self::row_due(row, 9, 10, 11, 12, 13)?,
+                        parent_task_id: row.get::<_, Option<i64>>(2)?.map(TaskId),
+                        child_order: row.get(3)?,
+                        title: row.get(4)?,
+                        description: row.get(5)?,
+                        status: TaskStatus::from_db(row.get::<_, String>(6)?.as_str()),
+                        created_at: row.get(7)?,
+                        completed_at: row.get(8)?,
+                        priority: TaskPriority::from_db(row.get::<_, i64>(9)?),
+                        deleted_at: row.get(10)?,
+                        due: Self::row_due(row, 11, 12, 13, 14, 15)?,
                     })
                 },
             )
@@ -1732,6 +1937,7 @@ mod tests {
                 title: "Ship release notes".to_string(),
                 description: "Ship checklist".to_string(),
                 project_id: inbox_project_id,
+                parent_task_id: None,
                 priority: TaskPriority::P4,
                 due: None,
             },
@@ -1883,6 +2089,7 @@ mod tests {
                 title: "Draft quarterly roadmap".to_string(),
                 description: "Weekly planning note".to_string(),
                 project_id: inbox_project_id,
+                parent_task_id: None,
                 priority: TaskPriority::P2,
                 due: Some(TaskDue {
                     date: due_date,
@@ -1914,6 +2121,7 @@ mod tests {
                 title: "Draft quarterly roadmap".to_string(),
                 description: String::new(),
                 project_id: inbox_project_id,
+                parent_task_id: None,
                 priority: TaskPriority::P4,
                 due: None,
             },

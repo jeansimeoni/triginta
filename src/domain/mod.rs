@@ -508,6 +508,8 @@ pub struct TaskDue {
 pub struct Task {
     pub id: TaskId,
     pub project_id: ProjectId,
+    pub parent_task_id: Option<TaskId>,
+    pub child_order: i64,
     pub title: String,
     pub description: String,
     pub status: TaskStatus,
@@ -523,6 +525,7 @@ pub struct TaskUpdate {
     pub title: String,
     pub description: String,
     pub project_id: ProjectId,
+    pub parent_task_id: Option<TaskId>,
     pub priority: TaskPriority,
     pub due: Option<TaskDue>,
 }

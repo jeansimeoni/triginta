@@ -1,6 +1,6 @@
 #[cfg(debug_assertions)]
 use std::path::PathBuf;
-use std::{env, fs, process::Command, time::Duration};
+use std::{collections::HashSet, env, fs, process::Command, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone, Utc};
@@ -442,6 +442,7 @@ enum TaskEditorField {
     DueTime,
     Recurrence,
     Description,
+    Parent,
 }
 
 impl TaskEditorField {
@@ -454,7 +455,8 @@ impl TaskEditorField {
             Self::DueDate => Self::Priority,
             Self::Priority => Self::DueTime,
             Self::DueTime => Self::Recurrence,
-            Self::Recurrence => Self::Recurrence,
+            Self::Recurrence => Self::Parent,
+            Self::Parent => Self::Parent,
         }
     }
 
@@ -468,6 +470,7 @@ impl TaskEditorField {
             Self::Priority => Self::DueDate,
             Self::DueTime => Self::Priority,
             Self::Recurrence => Self::DueTime,
+            Self::Parent => Self::Recurrence,
         }
     }
 }
@@ -494,6 +497,9 @@ struct TaskEditorState {
     due_time_cursor: usize,
     recurrence_input: String,
     recurrence_cursor: usize,
+    parent_input: String,
+    parent_cursor: usize,
+    parent_task_id: Option<TaskId>,
     due_natural: String,
     due_from_title: bool,
     focused_field: TaskEditorField,
@@ -673,6 +679,7 @@ pub struct TaskEditorFocusView {
     pub priority: bool,
     pub due_time: bool,
     pub recurrence: bool,
+    pub parent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -701,10 +708,22 @@ pub struct TaskEditorView {
     pub due_time_cursor: usize,
     pub recurrence_value: String,
     pub recurrence_cursor: usize,
+    pub parent_value: String,
+    pub parent_cursor: usize,
+    pub parent_suggestions: Vec<String>,
+    pub selected_parent_suggestion: usize,
     pub focus: TaskEditorFocusView,
     pub due_preview: Option<TaskDuePreviewView>,
     pub calendar: Option<CalendarPickerView>,
     pub preview_panel: FormPreviewPanelView,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskListRowView {
+    pub task_id: TaskId,
+    pub depth: usize,
+    pub has_children: bool,
+    pub is_expanded: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1465,6 +1484,14 @@ const TASKS_SHORTCUTS: &[ShortcutTip] = &[
         description: "sort/filter",
     },
     ShortcutTip {
+        keys: "=/-",
+        description: "expand/collapse",
+    },
+    ShortcutTip {
+        keys: "J/K",
+        description: "reorder sibling",
+    },
+    ShortcutTip {
         keys: "PgUp/PgDn",
         description: "details scroll",
     },
@@ -1516,7 +1543,7 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "next/prev field",
     },
     ShortcutTip {
-        keys: "F1-F8",
+        keys: "F1-F9",
         description: "jump to field",
     },
     ShortcutTip {
@@ -1524,7 +1551,7 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "external editor",
     },
     ShortcutTip {
-        keys: "F8/F9",
+        keys: "F8/F10",
         description: "recurrence/calendar",
     },
     ShortcutTip {
@@ -1532,7 +1559,7 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "suggestions",
     },
     ShortcutTip {
-        keys: "F10",
+        keys: "F11",
         description: "clear due",
     },
 ];
@@ -1726,6 +1753,7 @@ pub struct App {
     help_viewport_lines: usize,
     task_details_scroll: usize,
     task_details_anchor_task_id: Option<TaskId>,
+    expanded_task_ids: HashSet<TaskId>,
     needs_full_redraw: bool,
     should_quit: bool,
     screen_data: ScreenData,
@@ -1810,6 +1838,7 @@ impl App {
             help_viewport_lines: 0,
             task_details_scroll: 0,
             task_details_anchor_task_id: None,
+            expanded_task_ids: HashSet::new(),
             needs_full_redraw: false,
             should_quit: false,
             screen_data,
@@ -1852,17 +1881,80 @@ impl App {
     }
 
     pub fn visible_tasks(&self) -> Vec<&Task> {
+        self.visible_task_rows()
+            .into_iter()
+            .map(|(_, task)| task)
+            .collect()
+    }
+
+    pub fn task_list_rows(&self) -> Vec<TaskListRowView> {
+        self.visible_task_rows()
+            .into_iter()
+            .map(|(depth, task)| {
+                let has_children = self
+                    .screen_data
+                    .tasks
+                    .iter()
+                    .any(|candidate| self.task_is_active(candidate) && candidate.parent_task_id == Some(task.id));
+                TaskListRowView {
+                    task_id: task.id,
+                    depth,
+                    has_children,
+                    is_expanded: self.expanded_task_ids.contains(&task.id),
+                }
+            })
+            .collect()
+    }
+
+    fn visible_task_rows(&self) -> Vec<(usize, &Task)> {
         let query = self
             .panel_search_query(PanelSearchTarget::TaskList)
             .unwrap_or("");
-        let mut tasks = self
+        let mut visible_roots = self
             .screen_data
             .tasks
             .iter()
-            .filter(|task| self.task_is_visible(task) && fuzzy_matches(query, task.title.as_str()))
+            .filter(|task| self.task_is_visible(task))
+            .filter(|task| task.parent_task_id.is_none())
+            .filter(|task| fuzzy_matches(query, task.title.as_str()))
             .collect::<Vec<_>>();
-        tasks.sort_by(|left, right| self.compare_tasks(left, right));
-        tasks
+        visible_roots.sort_by(|left, right| self.compare_tasks(left, right));
+
+        let mut rows = Vec::new();
+        for root in visible_roots {
+            self.append_visible_task_row(&mut rows, root, 0);
+        }
+        rows
+    }
+
+    fn append_visible_task_row<'a>(
+        &'a self,
+        rows: &mut Vec<(usize, &'a Task)>,
+        task: &'a Task,
+        depth: usize,
+    ) {
+        rows.push((depth, task));
+        if !self.expanded_task_ids.contains(&task.id) {
+            return;
+        }
+
+        let mut children = self
+            .screen_data
+            .tasks
+            .iter()
+            .filter(|candidate| self.task_is_active(candidate))
+            .filter(|candidate| candidate.parent_task_id == Some(task.id))
+            .collect::<Vec<_>>();
+        children.sort_by(|left, right| {
+            left.child_order
+                .cmp(&right.child_order)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.id.0.cmp(&right.id.0))
+        });
+
+        for child in children {
+            self.append_visible_task_row(rows, child, depth + 1);
+        }
     }
 
     pub fn selected_task(&self) -> Option<&Task> {
@@ -2236,6 +2328,19 @@ impl App {
             let field_priority = Self::parse_priority_input(editor.priority_input.as_str())
                 .unwrap_or(TaskPriority::P4);
             let effective_priority = title_priority.unwrap_or(field_priority);
+            let parent_suggestions = if editor.focused_field == TaskEditorField::Parent {
+                self.parent_task_suggestions(
+                    editor.parent_input.as_str(),
+                    editor.task_id,
+                    editor.project_id,
+                )
+                .into_iter()
+                .take(4)
+                .map(|task| task.title.clone())
+                .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let focus = TaskEditorFocusView {
                 title: editor.focused_field == TaskEditorField::Title,
                 description: editor.focused_field == TaskEditorField::Description,
@@ -2245,6 +2350,7 @@ impl App {
                 priority: editor.focused_field == TaskEditorField::Priority,
                 due_time: editor.focused_field == TaskEditorField::DueTime,
                 recurrence: editor.focused_field == TaskEditorField::Recurrence,
+                parent: editor.focused_field == TaskEditorField::Parent,
             };
             let due_preview = self.editor_due_preview(editor);
             TaskEditorView {
@@ -2282,6 +2388,12 @@ impl App {
                 due_time_cursor: editor.due_time_cursor,
                 recurrence_value: editor.recurrence_input.clone(),
                 recurrence_cursor: editor.recurrence_cursor,
+                parent_value: editor.parent_input.clone(),
+                parent_cursor: editor.parent_cursor,
+                parent_suggestions: parent_suggestions.clone(),
+                selected_parent_suggestion: editor
+                    .suggestion_index
+                    .min(parent_suggestions.len().saturating_sub(1)),
                 focus,
                 due_preview: due_preview.clone(),
                 calendar: editor.calendar.as_ref().map(|calendar| CalendarPickerView {
@@ -2293,6 +2405,7 @@ impl App {
                     editor.tags_input.as_str(),
                     effective_priority,
                     due_preview.as_ref(),
+                    editor.parent_input.as_str(),
                     editor.focused_field,
                 ),
             }
@@ -2454,6 +2567,7 @@ impl App {
         tags_value: &str,
         priority: TaskPriority,
         due_preview: Option<&TaskDuePreviewView>,
+        parent_value: &str,
         focused_field: TaskEditorField,
     ) -> FormPreviewPanelView {
         let mut preview_lines = vec![PreviewLineView::key_value("Project", project_value)];
@@ -2487,6 +2601,9 @@ impl App {
         } else {
             preview_lines.push(PreviewLineView::key_value("Summary", "no due date"));
         }
+        if !parent_value.trim().is_empty() {
+            preview_lines.push(PreviewLineView::key_value("Parent", parent_value.trim()));
+        }
 
         let tips = match focused_field {
             TaskEditorField::Title => vec!["Press # for selecting a project".to_string()],
@@ -2500,7 +2617,7 @@ impl App {
                 vec!["Type @ for selecting tags and use Enter/Tab to accept".to_string()]
             }
             TaskEditorField::DueDate => {
-                vec!["Type YYYY-MM-DD or use F9 to pick from calendar".to_string()]
+                vec!["Type YYYY-MM-DD or use F10 to pick from calendar".to_string()]
             }
             TaskEditorField::Priority => {
                 vec!["Type p1-p4 and use Enter/Tab to accept suggestion".to_string()]
@@ -2510,6 +2627,9 @@ impl App {
             }
             TaskEditorField::Recurrence => {
                 vec!["Type recurrence phrases like: every monday at 9am".to_string()]
+            }
+            TaskEditorField::Parent => {
+                vec!["Type a task title to fuzzy-match and use Enter/Tab to accept".to_string()]
             }
         };
 
@@ -4375,6 +4495,74 @@ impl App {
         matches
     }
 
+    fn parent_task_suggestions(
+        &self,
+        query: &str,
+        editing_task_id: Option<TaskId>,
+        project_id: ProjectId,
+    ) -> Vec<&Task> {
+        let normalized = query.trim();
+        if normalized.is_empty() {
+            return Vec::new();
+        }
+
+        let mut matches = self
+            .screen_data
+            .tasks
+            .iter()
+            .filter(|task| self.task_is_active(task))
+            .filter(|task| task.project_id == project_id)
+            .filter(|task| Some(task.id) != editing_task_id)
+            .filter(|task| {
+                editing_task_id
+                    .map(|task_id| !self.task_is_descendant_of(task.id, task_id))
+                    .unwrap_or(true)
+            })
+            .filter(|task| fuzzy_matches(normalized, task.title.as_str()))
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| self.compare_task_title(left, right));
+        matches
+    }
+
+    fn resolve_parent_task_input(
+        &self,
+        value: &str,
+        editing_task_id: Option<TaskId>,
+        project_id: ProjectId,
+    ) -> Option<TaskId> {
+        let normalized = value.trim();
+        if normalized.is_empty() {
+            return None;
+        }
+        let suggestions = self.parent_task_suggestions(normalized, editing_task_id, project_id);
+        suggestions
+            .iter()
+            .find(|task| task.title.eq_ignore_ascii_case(normalized))
+            .or_else(|| suggestions.first())
+            .map(|task| task.id)
+    }
+
+    fn task_is_descendant_of(&self, task_id: TaskId, potential_ancestor: TaskId) -> bool {
+        let mut current = self
+            .screen_data
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .and_then(|task| task.parent_task_id);
+        while let Some(parent_id) = current {
+            if parent_id == potential_ancestor {
+                return true;
+            }
+            current = self
+                .screen_data
+                .tasks
+                .iter()
+                .find(|task| task.id == parent_id)
+                .and_then(|task| task.parent_task_id);
+        }
+        false
+    }
+
     fn active_project_query(&self, value: &str, cursor: usize) -> Option<(usize, usize, String)> {
         let safe_cursor = cursor.min(value.len());
         let before_cursor = &value[..safe_cursor];
@@ -4909,6 +5097,15 @@ impl App {
                 self.active_focus_task_id = None;
             }
         }
+        let active_task_ids = self
+            .screen_data
+            .tasks
+            .iter()
+            .filter(|task| self.task_is_active(task))
+            .map(|task| task.id)
+            .collect::<HashSet<_>>();
+        self.expanded_task_ids
+            .retain(|task_id| active_task_ids.contains(task_id));
         self.sync_project_selection();
         self.sync_tag_selection();
         self.sync_filter_selection();
@@ -5023,6 +5220,46 @@ impl App {
         self.selected_task_id = visible_ids.get(next_index).copied();
     }
 
+    fn expand_selected_task(&mut self) {
+        let Some(task) = self.selected_task() else {
+            return;
+        };
+        if self
+            .screen_data
+            .tasks
+            .iter()
+            .any(|candidate| self.task_is_active(candidate) && candidate.parent_task_id == Some(task.id))
+        {
+            self.expanded_task_ids.insert(task.id);
+        }
+    }
+
+    fn collapse_selected_task(&mut self) {
+        let Some((task_id, parent_task_id)) =
+            self.selected_task().map(|task| (task.id, task.parent_task_id))
+        else {
+            return;
+        };
+        if self.expanded_task_ids.remove(&task_id) {
+            return;
+        }
+        if let Some(parent_task_id) = parent_task_id {
+            self.selected_task_id = Some(parent_task_id);
+        }
+    }
+
+    fn reorder_selected_task_within_parent(&mut self, direction: isize) -> Result<()> {
+        let Some(task_id) = self.selected_task().map(|task| task.id) else {
+            return Ok(());
+        };
+        self.database
+            .task_repository()
+            .move_within_parent(task_id, direction)?;
+        self.refresh_tasks()?;
+        self.selected_task_id = Some(task_id);
+        Ok(())
+    }
+
     fn searchable_tasks(&self, query: &str) -> Vec<&Task> {
         self.screen_data
             .tasks
@@ -5101,6 +5338,9 @@ impl App {
             due_time_cursor: due_time_input.len(),
             recurrence_input: recurrence_input.clone(),
             recurrence_cursor: recurrence_input.len(),
+            parent_input: String::new(),
+            parent_cursor: 0,
+            parent_task_id: None,
             due_natural,
             due_from_title: false,
             focused_field: TaskEditorField::Title,
@@ -5135,6 +5375,17 @@ impl App {
         let due_date_cursor = due_date_input.len();
         let due_time_cursor = due_time_input.len();
         let recurrence_cursor = recurrence_input.len();
+        let parent_input = task
+            .parent_task_id
+            .and_then(|parent_task_id| {
+                self.screen_data
+                    .tasks
+                    .iter()
+                    .find(|candidate| candidate.id == parent_task_id)
+                    .map(|candidate| candidate.title.clone())
+            })
+            .unwrap_or_default();
+        let parent_cursor = parent_input.len();
         let priority_input = format!("p{}", task.priority.level());
         let priority_cursor = priority_input.len();
         let tags_input = self
@@ -5168,6 +5419,9 @@ impl App {
             due_time_cursor,
             recurrence_input,
             recurrence_cursor,
+            parent_input,
+            parent_cursor,
+            parent_task_id: task.parent_task_id,
             due_natural,
             due_from_title: false,
             focused_field: TaskEditorField::Title,
@@ -5253,6 +5507,7 @@ impl App {
             TaskEditorField::Recurrence => {
                 (&mut editor.recurrence_input, &mut editor.recurrence_cursor)
             }
+            TaskEditorField::Parent => (&mut editor.parent_input, &mut editor.parent_cursor),
         }
     }
 
@@ -5394,6 +5649,9 @@ impl App {
             TaskEditorField::Recurrence => {
                 editor.due_from_title = false;
                 Self::sync_editor_due_from_recurrence(editor, reference_date);
+            }
+            TaskEditorField::Parent => {
+                editor.parent_task_id = None;
             }
         }
         if editor.focused_field == TaskEditorField::Description {
@@ -5770,6 +6028,17 @@ impl App {
             Self::parse_priority_input(editor.priority_input.as_str()).unwrap_or(TaskPriority::P4);
         let title_priority = Self::last_priority_token(editor.title_input.as_str());
         let priority = title_priority.unwrap_or(field_priority);
+        let resolved_parent_task_id =
+            self.resolve_parent_task_input(editor.parent_input.as_str(), editor.task_id, parsed.project_id);
+        let effective_project_id = resolved_parent_task_id
+            .and_then(|parent_task_id| {
+                self.screen_data
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == parent_task_id)
+                    .map(|task| task.project_id)
+            })
+            .unwrap_or(parsed.project_id);
 
         let description = editor.description_input.trim_end_matches('\n').to_string();
         let task_id = if let Some(task_id) = editor.task_id {
@@ -5778,7 +6047,8 @@ impl App {
                 &TaskUpdate {
                     title: parsed.cleaned_title,
                     description: description.clone(),
-                    project_id: parsed.project_id,
+                    project_id: effective_project_id,
+                    parent_task_id: resolved_parent_task_id,
                     priority,
                     due,
                 },
@@ -5796,7 +6066,8 @@ impl App {
                 &TaskUpdate {
                     title: parsed.cleaned_title,
                     description,
-                    project_id: parsed.project_id,
+                    project_id: effective_project_id,
+                    parent_task_id: resolved_parent_task_id,
                     priority,
                     due,
                 },
@@ -6617,6 +6888,19 @@ impl App {
                                 Some(&next_due),
                                 now,
                             )?;
+                            if task.parent_task_id.is_some() {
+                                self.database.task_repository().update(
+                                    next_task.id,
+                                    &TaskUpdate {
+                                        title: next_task.title.clone(),
+                                        description: next_task.description.clone(),
+                                        project_id: next_task.project_id,
+                                        parent_task_id: task.parent_task_id,
+                                        priority: next_task.priority,
+                                        due: next_task.due.clone(),
+                                    },
+                                )?;
+                            }
                             info!(
                                 task_id = task.id.0,
                                 title = task.title.as_str(),
@@ -7848,6 +8132,27 @@ impl App {
                         self.task_editor = Some(editor);
                         return Ok(true);
                     }
+                    if editor.focused_field == TaskEditorField::Parent {
+                        if let Some(parent_task_id) = self.resolve_parent_task_input(
+                            editor.parent_input.as_str(),
+                            editor.task_id,
+                            editor.project_id,
+                        ) {
+                            if let Some(parent_task) = self
+                                .screen_data
+                                .tasks
+                                .iter()
+                                .find(|task| task.id == parent_task_id)
+                            {
+                                editor.parent_task_id = Some(parent_task_id);
+                                editor.parent_input = parent_task.title.clone();
+                                editor.parent_cursor = editor.parent_input.len();
+                                editor.suggestion_index = 0;
+                                self.task_editor = Some(editor);
+                                return Ok(true);
+                            }
+                        }
+                    }
                     return self.submit_task_editor(editor, now);
                 }
                 KeyCode::Tab => {
@@ -7911,6 +8216,27 @@ impl App {
                         self.task_editor = Some(editor);
                         return Ok(true);
                     }
+                    if editor.focused_field == TaskEditorField::Parent {
+                        if let Some(parent_task_id) = self.resolve_parent_task_input(
+                            editor.parent_input.as_str(),
+                            editor.task_id,
+                            editor.project_id,
+                        ) {
+                            if let Some(parent_task) = self
+                                .screen_data
+                                .tasks
+                                .iter()
+                                .find(|task| task.id == parent_task_id)
+                            {
+                                editor.parent_task_id = Some(parent_task_id);
+                                editor.parent_input = parent_task.title.clone();
+                                editor.parent_cursor = editor.parent_input.len();
+                                editor.suggestion_index = 0;
+                                self.task_editor = Some(editor);
+                                return Ok(true);
+                            }
+                        }
+                    }
                     editor.focused_field = editor.focused_field.next();
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
@@ -7956,6 +8282,10 @@ impl App {
                 }
                 KeyCode::F(8) => {
                     Self::focus_editor_field(&mut editor, TaskEditorField::Recurrence);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::F(9) => {
+                    Self::focus_editor_field(&mut editor, TaskEditorField::Parent);
                     self.task_editor = Some(editor);
                 }
                 KeyCode::Down | KeyCode::Char('j')
@@ -8062,11 +8392,31 @@ impl App {
                     editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::F(9) if editor.focused_field == TaskEditorField::DueDate => {
+                KeyCode::Down | KeyCode::Char('j')
+                    if editor.focused_field == TaskEditorField::Parent =>
+                {
+                    let last_index = self
+                        .parent_task_suggestions(
+                            editor.parent_input.as_str(),
+                            editor.task_id,
+                            editor.project_id,
+                        )
+                        .len()
+                        .saturating_sub(1);
+                    editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::Up | KeyCode::Char('k')
+                    if editor.focused_field == TaskEditorField::Parent =>
+                {
+                    editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
+                    self.task_editor = Some(editor);
+                }
+                KeyCode::F(10) if editor.focused_field == TaskEditorField::DueDate => {
                     Self::open_editor_calendar(&mut editor, now.date_naive());
                     self.task_editor = Some(editor);
                 }
-                KeyCode::F(10) => {
+                KeyCode::F(11) => {
                     Self::clear_editor_due(&mut editor);
                     self.task_editor = Some(editor);
                 }
@@ -8215,6 +8565,7 @@ impl App {
                             title: parsed.cleaned_title.clone(),
                             description: String::new(),
                             project_id: parsed.project_id,
+                            parent_task_id: None,
                             priority: parsed.priority,
                             due: parsed.due.clone(),
                         },
@@ -8895,6 +9246,30 @@ impl App {
                     && self.active_right_panel_tab == RightPanelTab::Tasks =>
             {
                 self.open_task_sort_popup();
+            }
+            KeyCode::Char('=')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.expand_selected_task();
+            }
+            KeyCode::Char('-')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.collapse_selected_task();
+            }
+            KeyCode::Char('J')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.reorder_selected_task_within_parent(1)?;
+            }
+            KeyCode::Char('K')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.reorder_selected_task_within_parent(-1)?;
             }
             KeyCode::Char('f')
                 if self.focused_panel == PanelFocus::RightPane
@@ -9960,7 +10335,7 @@ mod tests {
 
         app.handle_key(crossterm::event::KeyCode::Char('e'))
             .expect("editor should open");
-        app.handle_key(crossterm::event::KeyCode::F(10))
+        app.handle_key(crossterm::event::KeyCode::F(11))
             .expect("clear due should succeed");
         app.handle_key(crossterm::event::KeyCode::Enter)
             .expect("edit should submit");
@@ -9988,7 +10363,7 @@ mod tests {
             .expect("editor should open");
         app.handle_key(crossterm::event::KeyCode::F(5))
             .expect("focus should switch to due date");
-        app.handle_key(crossterm::event::KeyCode::F(9))
+        app.handle_key(crossterm::event::KeyCode::F(10))
             .expect("calendar should open");
         assert!(
             app.task_editor_view()
@@ -10076,6 +10451,9 @@ mod tests {
             due_time_cursor: "09:00".len(),
             recurrence_input: "every tuesday at 10am".to_string(),
             recurrence_cursor: "every tuesday at 10am".len(),
+            parent_input: String::new(),
+            parent_cursor: 0,
+            parent_task_id: None,
             due_natural: "every monday at 9am".to_string(),
             due_from_title: false,
             focused_field: TaskEditorField::Recurrence,
@@ -10394,7 +10772,7 @@ mod tests {
         let editor = app.task_editor_view().expect("editor should be visible");
         assert_eq!(
             editor.preview_panel.tips,
-            vec!["Type YYYY-MM-DD or use F9 to pick from calendar".to_string()]
+            vec!["Type YYYY-MM-DD or use F10 to pick from calendar".to_string()]
         );
 
         app.handle_key(crossterm::event::KeyCode::F(8))
@@ -12544,6 +12922,7 @@ mod tests {
                     title: "Alpha".to_string(),
                     description: String::new(),
                     project_id: inbox_project_id,
+                    parent_task_id: None,
                     priority: TaskPriority::P4,
                     due: None,
                 },
@@ -12556,6 +12935,7 @@ mod tests {
                     title: "Bravo".to_string(),
                     description: String::new(),
                     project_id: inbox_project_id,
+                    parent_task_id: None,
                     priority: TaskPriority::P1,
                     due: None,
                 },
@@ -12568,6 +12948,7 @@ mod tests {
                     title: "Charlie".to_string(),
                     description: String::new(),
                     project_id: inbox_project_id,
+                    parent_task_id: None,
                     priority: TaskPriority::P2,
                     due: None,
                 },

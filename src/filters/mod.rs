@@ -321,6 +321,8 @@ mod tests {
         Task {
             id: TaskId(1),
             project_id: ProjectId(1),
+            parent_task_id: None,
+            child_order: 1,
             title: title.to_string(),
             description: String::new(),
             status,

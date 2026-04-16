@@ -25,7 +25,7 @@ use crate::{
         RightPanelTab, ScreenData, SessionNoteEditorView, SessionNoteViewerView, ShortcutSection,
         ShortcutTip, SidebarTab, TagDeleteConfirmationView, TagEditorView, TagListRowView,
         TagSortPopupView, TaskEditorView, TaskInputView, TaskSearchView, TaskSortPopupView,
-        TaskView, TimerPhase,
+        TaskListRowView, TaskView, TimerPhase,
     },
     domain::{
         DayHistorySummary, FilterColor, SessionEntry, SessionKind, SessionOutcome, TagColor, Task,
@@ -600,6 +600,7 @@ fn render_task_list_panel(
     palette: ThemePalette,
 ) {
     let visible_tasks = app.visible_tasks();
+    let task_rows = app.task_list_rows();
     let search_query = app.task_list_search_query().unwrap_or("");
     let footer = footer_with_filter_indicator(
         task_list_footer(app, symbols, palette),
@@ -658,8 +659,9 @@ fn render_task_list_panel(
 
     let mut lines = Vec::with_capacity(viewport_task_rows.saturating_mul(2));
     let show_selection = focused_panel == PanelFocus::RightPane;
-    for task in visible_tasks
+    for (task, row) in visible_tasks
         .iter()
+        .zip(task_rows.iter())
         .skip(task_scroll)
         .take(viewport_task_rows)
     {
@@ -667,6 +669,7 @@ fn render_task_list_panel(
             show_selection && app.selected_task().map(|selected| selected.id) == Some(task.id);
         lines.push(task_summary_line(
             task,
+            row,
             symbols,
             palette,
             selected,
@@ -675,6 +678,7 @@ fn render_task_list_panel(
         lines.push(task_project_line(
             app.screen_data(),
             task,
+            row,
             symbols,
             palette,
             selected,
@@ -2018,6 +2022,7 @@ fn favorite_item_line(
 
 fn task_summary_line(
     task: &Task,
+    row: &TaskListRowView,
     symbols: Symbols,
     palette: ThemePalette,
     selected: bool,
@@ -2026,6 +2031,15 @@ fn task_summary_line(
     let marker = match task.status {
         TaskStatus::Todo => symbols.todo,
         TaskStatus::Done => symbols.done,
+    };
+    let hierarchy_marker = if row.has_children {
+        if row.is_expanded {
+            symbols.expanded
+        } else {
+            symbols.collapsed
+        }
+    } else {
+        " "
     };
     let now = Local::now();
     let due_text = task
@@ -2037,7 +2051,7 @@ fn task_summary_line(
         .as_ref()
         .filter(|due| due.is_recurring)
         .map(|_| symbols.recurring);
-    let leading_padding = 2usize;
+    let leading_padding = 2usize.saturating_add(row.depth.saturating_mul(2));
     let due_gap = if due_text.is_some() { 2usize } else { 0usize };
 
     let due_meta_width = due_text
@@ -2053,7 +2067,10 @@ fn task_summary_line(
         .saturating_sub(leading_padding)
         .saturating_sub(due_meta_width)
         .saturating_sub(due_gap);
-    let title_text = ellipsize_end(&format!("{marker} {}", task.title), left_width);
+    let title_text = ellipsize_end(
+        &format!("{hierarchy_marker} {marker} {}", task.title),
+        left_width,
+    );
 
     let row_style = task_row_style(task, palette, selected, now);
     let due_style = task_due_style(task, palette, selected, now);
@@ -2097,6 +2114,7 @@ fn task_summary_line(
 fn task_project_line(
     data: &ScreenData,
     task: &Task,
+    row: &TaskListRowView,
     symbols: Symbols,
     palette: ThemePalette,
     selected: bool,
@@ -2115,6 +2133,7 @@ fn task_project_line(
     let tags_width = task_tag_segments_width(tags.as_slice(), symbols);
     let status_marker = task_status_symbol(task.status, symbols);
     let leading_padding = 2usize
+        .saturating_add(row.depth.saturating_mul(2))
         .saturating_add(status_marker.width())
         .saturating_add(1);
     let has_right_meta = priority_indicator.is_some() || !tags.is_empty();
@@ -3283,6 +3302,10 @@ fn task_list_footer_hints(
     Line::from(vec![
         Span::styled(symbols.sort, Style::default().fg(palette.accent)),
         Span::styled(" o sort  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.expanded, Style::default().fg(palette.accent)),
+        Span::styled(" =/- tree  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(symbols.move_hint, Style::default().fg(palette.accent)),
+        Span::styled(" J/K order  ", Style::default().fg(palette.subtle_text)),
         Span::styled(symbols.visible, Style::default().fg(palette.accent)),
         Span::styled(done_filter_hint, Style::default().fg(palette.subtle_text)),
         Span::styled(symbols.done, Style::default().fg(palette.accent)),
@@ -3297,8 +3320,8 @@ fn render_task_editor_popup(
     symbols: Symbols,
     palette: ThemePalette,
 ) {
-    let base_total_height = 30;
-    let form_height = 21;
+    let base_total_height = 33;
+    let form_height = 24;
     let preview_height = preview_panel_required_height(&editor.preview_panel, 3);
     let area = anchored_form_rect(
         frame.area(),
@@ -3330,6 +3353,7 @@ fn render_task_editor_popup(
         .constraints([
             Constraint::Length(3),
             Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
@@ -3428,6 +3452,16 @@ fn render_task_editor_popup(
         Some("every monday at 9am"),
         palette,
     );
+    render_editor_field(
+        frame,
+        form_rows[6],
+        "Parent [F9]",
+        &editor.parent_value,
+        editor.parent_cursor,
+        editor.focus.parent,
+        Some("type to fuzzy-match a parent task"),
+        palette,
+    );
     if sections[1].height > 0 {
         render_form_preview_panel(frame, sections[1], &editor.preview_panel, palette);
     }
@@ -3523,6 +3557,22 @@ fn render_task_editor_popup(
             dropdown_height,
         );
         render_editor_priority_suggestions(frame, dropdown_area, editor, palette);
+    }
+
+    if editor.focus.parent && !editor.parent_suggestions.is_empty() {
+        let dropdown_height = editor.parent_suggestions.len().min(4) as u16 + 2;
+        let parent_anchor = form_rows[6];
+        let visible_width = parent_anchor.width.saturating_sub(4) as usize;
+        let cursor_col =
+            editor_cursor_display_column(&editor.parent_value, editor.parent_cursor, visible_width);
+        let dropdown_area = project_parent_dropdown_rect(
+            frame.area(),
+            parent_anchor,
+            cursor_col as u16,
+            project_parent_dropdown_width(editor.parent_suggestions.as_slice()),
+            dropdown_height,
+        );
+        render_editor_parent_suggestions(frame, dropdown_area, editor, palette);
     }
 
     if let Some(calendar) = editor.calendar {
@@ -3811,6 +3861,58 @@ fn render_editor_priority_suggestions(
     );
 }
 
+fn render_editor_parent_suggestions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &TaskEditorView,
+    palette: ThemePalette,
+) {
+    let content_width = area.width.saturating_sub(2) as usize;
+    let lines = editor
+        .parent_suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let style = if index
+                == editor
+                    .selected_parent_suggestion
+                    .min(editor.parent_suggestions.len().saturating_sub(1))
+            {
+                Style::default()
+                    .fg(palette.text)
+                    .bg(palette.border)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            let value = ellipsize_end(suggestion, content_width);
+            let padding = " ".repeat(content_width.saturating_sub(value.width()));
+            Line::from(vec![Span::styled(format!("{value}{padding}"), style)])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        "Parent Task",
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            )
+            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+        area,
+    );
+}
+
 fn render_editor_calendar(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -3861,24 +3963,22 @@ fn render_editor_calendar(
 fn editor_shortcuts_line(symbols: Symbols, palette: ThemePalette) -> Line<'static> {
     if symbols.is_ascii() {
         return Line::from(vec![Span::styled(
-            "F1-F8 fields  F12 save  Ctrl+E ext editor  F8 recurrence  F9 cal  F10 clear",
+            "F1-F9 fields  F12 save  Ctrl+E ext editor  F10 cal  F11 clear",
             Style::default().fg(palette.subtle_text),
         )])
         .right_aligned();
     }
 
     Line::from(vec![
-        Span::styled("F1-F8", Style::default().fg(palette.subtle_text)),
+        Span::styled("F1-F9", Style::default().fg(palette.subtle_text)),
         Span::raw(" fields  "),
         Span::styled("F12", Style::default().fg(palette.subtle_text)),
         Span::raw(" save  "),
         Span::styled("Ctrl+e", Style::default().fg(palette.subtle_text)),
         Span::raw(" ext  "),
-        Span::styled("F8", Style::default().fg(palette.subtle_text)),
-        Span::raw(" recur  "),
-        Span::styled("F9", Style::default().fg(palette.subtle_text)),
-        Span::raw(" cal  "),
         Span::styled("F10", Style::default().fg(palette.subtle_text)),
+        Span::raw(" cal  "),
+        Span::styled("F11", Style::default().fg(palette.subtle_text)),
         Span::raw(" clear  "),
         Span::styled(symbols.save, Style::default().fg(palette.subtle_text)),
         Span::raw(" ↵  "),
