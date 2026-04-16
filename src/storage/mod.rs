@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS projects (
     is_inbox INTEGER NOT NULL DEFAULT 0,
     child_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    synced_at TEXT,
+    todoist_id TEXT,
     deleted_at TEXT,
     FOREIGN KEY(parent_project_id) REFERENCES projects(id)
 );
@@ -39,6 +42,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     status TEXT NOT NULL DEFAULT 'todo',
     priority INTEGER NOT NULL DEFAULT 4,
     created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    synced_at TEXT,
+    todoist_id TEXT,
     completed_at TEXT,
     deleted_at TEXT,
     due_date TEXT,
@@ -57,6 +63,9 @@ CREATE TABLE IF NOT EXISTS sections (
     name TEXT NOT NULL,
     section_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    synced_at TEXT,
+    todoist_id TEXT,
     deleted_at TEXT,
     FOREIGN KEY(project_id) REFERENCES projects(id)
 );
@@ -68,6 +77,9 @@ CREATE TABLE IF NOT EXISTS tags (
     is_favorite INTEGER NOT NULL DEFAULT 0,
     item_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    synced_at TEXT,
+    todoist_id TEXT,
     deleted_at TEXT
 );
 
@@ -83,6 +95,9 @@ CREATE TABLE IF NOT EXISTS filters (
     is_favorite INTEGER NOT NULL DEFAULT 0,
     item_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    synced_at TEXT,
+    todoist_id TEXT,
     deleted_at TEXT
 );
 
@@ -124,7 +139,53 @@ CREATE TABLE IF NOT EXISTS app_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sync_state (
+    provider TEXT PRIMARY KEY,
+    sync_token TEXT,
+    last_synced_at TEXT,
+    last_status TEXT,
+    last_error TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_local_id INTEGER NOT NULL,
+    op_kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    op_timestamp_utc TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL
+);
 "#;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncStateRecord {
+    pub provider: String,
+    pub sync_token: Option<String>,
+    pub last_synced_at: Option<String>,
+    pub last_status: Option<String>,
+    pub last_error: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncOutboxEntry {
+    pub id: i64,
+    pub provider: String,
+    pub entity_type: String,
+    pub entity_local_id: i64,
+    pub op_kind: String,
+    pub payload: String,
+    pub op_timestamp_utc: String,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub created_at: String,
+}
 
 // These traits define the storage-facing API the rest of the app relies on.
 // This separation matters because it keeps the higher layers talking in domain
@@ -254,6 +315,23 @@ pub trait PomodoroRepository {
     fn update_session_notes(&self, session_id: i64, notes: &str) -> Result<()>;
 }
 
+pub trait SyncRepository {
+    fn get_state(&self, provider: &str) -> Result<Option<SyncStateRecord>>;
+    fn upsert_state(&self, state: &SyncStateRecord) -> Result<()>;
+    fn list_outbox(&self, provider: &str, limit: i64) -> Result<Vec<SyncOutboxEntry>>;
+    fn enqueue_outbox(
+        &self,
+        provider: &str,
+        entity_type: &str,
+        entity_local_id: i64,
+        op_kind: &str,
+        payload: &str,
+        op_timestamp_utc: &str,
+    ) -> Result<i64>;
+    fn mark_outbox_delivered(&self, entry_id: i64) -> Result<()>;
+    fn mark_outbox_failed(&self, entry_id: i64, error: &str) -> Result<()>;
+}
+
 #[derive(Debug)]
 pub struct Database {
     connection: Connection,
@@ -324,8 +402,56 @@ impl Database {
             "section_id",
             "ALTER TABLE tasks ADD COLUMN section_id INTEGER",
         )?;
+        self.ensure_tasks_column(
+            "updated_at",
+            "ALTER TABLE tasks ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_tasks_column("synced_at", "ALTER TABLE tasks ADD COLUMN synced_at TEXT")?;
+        self.ensure_tasks_column("todoist_id", "ALTER TABLE tasks ADD COLUMN todoist_id TEXT")?;
+        self.ensure_projects_column(
+            "updated_at",
+            "ALTER TABLE projects ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_projects_column(
+            "synced_at",
+            "ALTER TABLE projects ADD COLUMN synced_at TEXT",
+        )?;
+        self.ensure_projects_column(
+            "todoist_id",
+            "ALTER TABLE projects ADD COLUMN todoist_id TEXT",
+        )?;
         self.ensure_sections_table()?;
+        self.ensure_sections_column(
+            "updated_at",
+            "ALTER TABLE sections ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_sections_column(
+            "synced_at",
+            "ALTER TABLE sections ADD COLUMN synced_at TEXT",
+        )?;
+        self.ensure_sections_column(
+            "todoist_id",
+            "ALTER TABLE sections ADD COLUMN todoist_id TEXT",
+        )?;
+        self.ensure_tags_column(
+            "updated_at",
+            "ALTER TABLE tags ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_tags_column("synced_at", "ALTER TABLE tags ADD COLUMN synced_at TEXT")?;
+        self.ensure_tags_column("todoist_id", "ALTER TABLE tags ADD COLUMN todoist_id TEXT")?;
+        self.ensure_filters_column(
+            "updated_at",
+            "ALTER TABLE filters ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_filters_column("synced_at", "ALTER TABLE filters ADD COLUMN synced_at TEXT")?;
+        self.ensure_filters_column(
+            "todoist_id",
+            "ALTER TABLE filters ADD COLUMN todoist_id TEXT",
+        )?;
+        self.ensure_sync_tables()?;
+        self.backfill_sync_timestamps()?;
         self.ensure_task_indexes()?;
+        self.ensure_sync_indexes()?;
         self.ensure_session_history_column(
             "notes",
             "ALTER TABLE session_history ADD COLUMN notes TEXT NOT NULL DEFAULT ''",
@@ -343,14 +469,39 @@ impl Database {
     }
 
     fn ensure_tasks_column(&self, column_name: &str, alter_sql: &str) -> Result<()> {
+        self.ensure_table_column("tasks", column_name, alter_sql)
+    }
+
+    fn ensure_projects_column(&self, column_name: &str, alter_sql: &str) -> Result<()> {
+        self.ensure_table_column("projects", column_name, alter_sql)
+    }
+
+    fn ensure_sections_column(&self, column_name: &str, alter_sql: &str) -> Result<()> {
+        self.ensure_table_column("sections", column_name, alter_sql)
+    }
+
+    fn ensure_tags_column(&self, column_name: &str, alter_sql: &str) -> Result<()> {
+        self.ensure_table_column("tags", column_name, alter_sql)
+    }
+
+    fn ensure_filters_column(&self, column_name: &str, alter_sql: &str) -> Result<()> {
+        self.ensure_table_column("filters", column_name, alter_sql)
+    }
+
+    fn ensure_table_column(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        alter_sql: &str,
+    ) -> Result<()> {
         let mut statement = self
             .connection
-            .prepare("PRAGMA table_info(tasks)")
-            .context("failed to inspect task schema")?;
+            .prepare(format!("PRAGMA table_info({table_name})").as_str())
+            .with_context(|| format!("failed to inspect {table_name} schema"))?;
         let columns = statement
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to read task schema")?;
+            .with_context(|| format!("failed to read {table_name} schema"))?;
 
         if columns.iter().any(|column| column == column_name) {
             return Ok(());
@@ -358,7 +509,7 @@ impl Database {
 
         self.connection
             .execute(alter_sql, [])
-            .with_context(|| format!("failed to add {} column to tasks", column_name))?;
+            .with_context(|| format!("failed to add {column_name} column to {table_name}"))?;
         Ok(())
     }
 
@@ -406,6 +557,99 @@ impl Database {
         Ok(())
     }
 
+    fn ensure_sync_indexes(&self) -> Result<()> {
+        self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_todoist_id_active
+             ON projects(todoist_id)
+             WHERE deleted_at IS NULL AND todoist_id IS NOT NULL",
+            [],
+        )?;
+        self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sections_todoist_id_active
+             ON sections(todoist_id)
+             WHERE deleted_at IS NULL AND todoist_id IS NOT NULL",
+            [],
+        )?;
+        self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_todoist_id_active
+             ON tasks(todoist_id)
+             WHERE deleted_at IS NULL AND todoist_id IS NOT NULL",
+            [],
+        )?;
+        self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_todoist_id_active
+             ON tags(todoist_id)
+             WHERE deleted_at IS NULL AND todoist_id IS NOT NULL",
+            [],
+        )?;
+        self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_filters_todoist_id_active
+             ON filters(todoist_id)
+             WHERE deleted_at IS NULL AND todoist_id IS NOT NULL",
+            [],
+        )?;
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sync_outbox_provider_id
+             ON sync_outbox(provider, id)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn ensure_sync_tables(&self) -> Result<()> {
+        self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS sync_state (
+                provider TEXT PRIMARY KEY,
+                sync_token TEXT,
+                last_synced_at TEXT,
+                last_status TEXT,
+                last_error TEXT,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS sync_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_local_id INTEGER NOT NULL,
+                op_kind TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                op_timestamp_utc TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn backfill_sync_timestamps(&self) -> Result<()> {
+        self.connection.execute(
+            "UPDATE tasks SET updated_at = created_at WHERE updated_at = ''",
+            [],
+        )?;
+        self.connection.execute(
+            "UPDATE projects SET updated_at = created_at WHERE updated_at = ''",
+            [],
+        )?;
+        self.connection.execute(
+            "UPDATE sections SET updated_at = created_at WHERE updated_at = ''",
+            [],
+        )?;
+        self.connection.execute(
+            "UPDATE tags SET updated_at = created_at WHERE updated_at = ''",
+            [],
+        )?;
+        self.connection.execute(
+            "UPDATE filters SET updated_at = created_at WHERE updated_at = ''",
+            [],
+        )?;
+        Ok(())
+    }
+
     fn ensure_sections_table(&self) -> Result<()> {
         self.connection.execute(
             "CREATE TABLE IF NOT EXISTS sections (
@@ -414,6 +658,9 @@ impl Database {
                 name TEXT NOT NULL,
                 section_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                synced_at TEXT,
+                todoist_id TEXT,
                 deleted_at TEXT,
                 FOREIGN KEY(project_id) REFERENCES projects(id)
             )",
@@ -500,6 +747,12 @@ impl Database {
         }
     }
 
+    pub fn sync_repository(&self) -> SqliteSyncRepository<'_> {
+        SqliteSyncRepository {
+            connection: &self.connection,
+        }
+    }
+
     fn ensure_inbox_project(&self) -> Result<ProjectId> {
         if let Some(project_id) = self
             .connection
@@ -516,9 +769,14 @@ impl Database {
 
         self.connection
             .execute(
-                "INSERT INTO projects(name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, deleted_at)
-                 VALUES (?1, NULL, ?2, 0, 1, 0, ?3, NULL)",
-                params!["Inbox", ProjectColor::Charcoal.as_str(), Local::now()],
+                "INSERT INTO projects(name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+                 VALUES (?1, NULL, ?2, 0, 1, 0, ?3, ?4, NULL, NULL, NULL)",
+                params![
+                    "Inbox",
+                    ProjectColor::Charcoal.as_str(),
+                    Local::now(),
+                    Local::now()
+                ],
             )
             .context("failed to create inbox project")?;
         Ok(ProjectId(self.connection.last_insert_rowid()))
@@ -531,6 +789,148 @@ impl Database {
                 params![inbox_project_id.0],
             )
             .context("failed to assign tasks to inbox project")?;
+        Ok(())
+    }
+}
+
+fn now_utc_rfc3339() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn enqueue_sync_outbox(
+    connection: &Connection,
+    provider: &str,
+    entity_type: &str,
+    entity_local_id: i64,
+    op_kind: &str,
+    payload: &str,
+    op_timestamp_utc: &str,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO sync_outbox(provider, entity_type, entity_local_id, op_kind, payload, op_timestamp_utc, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            provider,
+            entity_type,
+            entity_local_id,
+            op_kind,
+            payload,
+            op_timestamp_utc,
+            op_timestamp_utc
+        ],
+    )?;
+    Ok(())
+}
+
+pub struct SqliteSyncRepository<'a> {
+    connection: &'a Connection,
+}
+
+impl SyncRepository for SqliteSyncRepository<'_> {
+    fn get_state(&self, provider: &str) -> Result<Option<SyncStateRecord>> {
+        self.connection
+            .query_row(
+                "SELECT provider, sync_token, last_synced_at, last_status, last_error, updated_at
+                 FROM sync_state
+                 WHERE provider = ?1",
+                params![provider],
+                |row| {
+                    Ok(SyncStateRecord {
+                        provider: row.get(0)?,
+                        sync_token: row.get(1)?,
+                        last_synced_at: row.get(2)?,
+                        last_status: row.get(3)?,
+                        last_error: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load sync state")
+    }
+
+    fn upsert_state(&self, state: &SyncStateRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO sync_state(provider, sync_token, last_synced_at, last_status, last_error, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(provider) DO UPDATE SET
+               sync_token = excluded.sync_token,
+               last_synced_at = excluded.last_synced_at,
+               last_status = excluded.last_status,
+               last_error = excluded.last_error,
+               updated_at = excluded.updated_at",
+            params![
+                state.provider,
+                state.sync_token,
+                state.last_synced_at,
+                state.last_status,
+                state.last_error,
+                state.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn list_outbox(&self, provider: &str, limit: i64) -> Result<Vec<SyncOutboxEntry>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, provider, entity_type, entity_local_id, op_kind, payload, op_timestamp_utc, attempts, last_error, created_at
+             FROM sync_outbox
+             WHERE provider = ?1
+             ORDER BY id ASC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![provider, limit], |row| {
+            Ok(SyncOutboxEntry {
+                id: row.get(0)?,
+                provider: row.get(1)?,
+                entity_type: row.get(2)?,
+                entity_local_id: row.get(3)?,
+                op_kind: row.get(4)?,
+                payload: row.get(5)?,
+                op_timestamp_utc: row.get(6)?,
+                attempts: row.get(7)?,
+                last_error: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to list sync outbox entries")
+    }
+
+    fn enqueue_outbox(
+        &self,
+        provider: &str,
+        entity_type: &str,
+        entity_local_id: i64,
+        op_kind: &str,
+        payload: &str,
+        op_timestamp_utc: &str,
+    ) -> Result<i64> {
+        enqueue_sync_outbox(
+            self.connection,
+            provider,
+            entity_type,
+            entity_local_id,
+            op_kind,
+            payload,
+            op_timestamp_utc,
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    fn mark_outbox_delivered(&self, entry_id: i64) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM sync_outbox WHERE id = ?1", params![entry_id])?;
+        Ok(())
+    }
+
+    fn mark_outbox_failed(&self, entry_id: i64, error: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE sync_outbox
+             SET attempts = attempts + 1, last_error = ?1
+             WHERE id = ?2",
+            params![error, entry_id],
+        )?;
         Ok(())
     }
 }
@@ -581,16 +981,18 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         due: Option<&TaskDue>,
         now: DateTime<Local>,
     ) -> Result<Task> {
+        let now_utc = now_utc_rfc3339();
         self.connection
             .execute(
-                "INSERT INTO tasks(project_id, section_id, parent_task_id, child_order, title, status, priority, created_at, completed_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring)
-                 VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO tasks(project_id, section_id, parent_task_id, child_order, title, status, priority, created_at, updated_at, synced_at, todoist_id, completed_at, due_date, due_datetime_utc, due_timezone, due_string, due_is_recurring)
+                 VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     project_id.0,
                     self.next_child_order(None)?,
                     title,
                     TaskStatus::Todo.as_str(),
                     TaskPriority::P4.to_db(),
+                    now,
                     now,
                     due.map(|due| due.date),
                     due.and_then(|due| due.datetime).map(|dt| dt.to_rfc3339()),
@@ -603,6 +1005,15 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             .context("failed to create task")?;
 
         let task_id = TaskId(self.connection.last_insert_rowid());
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "task",
+            task_id.0,
+            "create",
+            "{}",
+            now_utc.as_str(),
+        )?;
         self.load_task(task_id)?
             .context("created task could not be reloaded")
     }
@@ -626,8 +1037,8 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         self.connection
             .execute(
                 "UPDATE tasks
-                 SET title = ?1, description = ?2, project_id = ?3, section_id = ?4, parent_task_id = ?5, child_order = ?6, priority = ?7, due_date = ?8, due_datetime_utc = ?9, due_timezone = ?10, due_string = ?11, due_is_recurring = ?12
-                 WHERE id = ?13",
+                 SET title = ?1, description = ?2, project_id = ?3, section_id = ?4, parent_task_id = ?5, child_order = ?6, priority = ?7, due_date = ?8, due_datetime_utc = ?9, due_timezone = ?10, due_string = ?11, due_is_recurring = ?12, updated_at = ?13
+                 WHERE id = ?14",
                 params![
                     update.title,
                     update.description,
@@ -649,10 +1060,20 @@ impl TaskRepository for SqliteTaskRepository<'_> {
                         .as_ref()
                         .map(|due| if due.is_recurring { 1_i64 } else { 0_i64 })
                         .unwrap_or(0_i64),
+                    Local::now(),
                     task_id.0,
                 ],
             )
             .with_context(|| format!("failed to update task {}", task_id.0))?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "task",
+            task_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
 
         self.normalize_sibling_order(current.parent_task_id)?;
         self.normalize_sibling_order(update.parent_task_id)?;
@@ -669,11 +1090,20 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         self.connection
             .execute(
                 "UPDATE tasks
-                 SET status = ?1, completed_at = ?2
-                 WHERE id = ?3",
-                params![status.as_str(), completed_at, task_id.0],
+                 SET status = ?1, completed_at = ?2, updated_at = ?3
+                 WHERE id = ?4",
+                params![status.as_str(), completed_at, Local::now(), task_id.0],
             )
             .with_context(|| format!("failed to update task status for {}", task_id.0))?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "task",
+            task_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
 
         self.load_task(task_id)?
             .context("updated task could not be reloaded")
@@ -710,6 +1140,19 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         for (index, sibling_id) in sibling_ids.iter().enumerate() {
             statement.execute(params![index as i64 + 1, sibling_id.0])?;
         }
+        self.connection.execute(
+            "UPDATE tasks SET updated_at = ?1 WHERE id = ?2",
+            params![Local::now(), task_id.0],
+        )?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "task",
+            task_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         Ok(())
     }
 
@@ -719,10 +1162,19 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             .and_then(|task| task.parent_task_id);
         self.connection
             .execute(
-                "UPDATE tasks SET deleted_at = ?1 WHERE id = ?2",
-                params![Local::now(), task_id.0],
+                "UPDATE tasks SET deleted_at = ?1, updated_at = ?2 WHERE id = ?3",
+                params![Local::now(), Local::now(), task_id.0],
             )
             .with_context(|| format!("failed to soft-delete task {}", task_id.0))?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "task",
+            task_id.0,
+            "delete",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         self.normalize_sibling_order(parent_task_id)?;
         Ok(())
     }
@@ -975,8 +1427,8 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
         let child_order = self.next_child_order(parent_project_id)?;
         self.connection
             .execute(
-                "INSERT INTO projects(name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, deleted_at)
-                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, NULL)",
+                "INSERT INTO projects(name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, NULL, NULL, NULL)",
                 params![
                     name,
                     parent_project_id.map(|id| id.0),
@@ -984,10 +1436,21 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
                     if is_favorite { 1_i64 } else { 0_i64 },
                     child_order,
                     now,
+                    now,
                 ],
             )
             .context("failed to create project")?;
-        self.load_project(ProjectId(self.connection.last_insert_rowid()))?
+        let project_id = ProjectId(self.connection.last_insert_rowid());
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "project",
+            project_id.0,
+            "create",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
+        self.load_project(project_id)?
             .context("created project could not be reloaded")
     }
 
@@ -1008,18 +1471,28 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
         self.connection
             .execute(
                 "UPDATE projects
-                 SET name = ?1, parent_project_id = ?2, color = ?3, is_favorite = ?4, child_order = ?5
-                 WHERE id = ?6",
+                 SET name = ?1, parent_project_id = ?2, color = ?3, is_favorite = ?4, child_order = ?5, updated_at = ?6
+                 WHERE id = ?7",
                 params![
                     update.name,
                     update.parent_project_id.map(|id| id.0),
                     update.color.as_str(),
                     if update.is_favorite { 1_i64 } else { 0_i64 },
                     child_order,
+                    Local::now(),
                     project_id.0,
                 ],
             )
             .with_context(|| format!("failed to update project {}", project_id.0))?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "project",
+            project_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
 
         self.load_project(project_id)?
             .context("updated project could not be reloaded")
@@ -1057,6 +1530,19 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
         for (index, sibling_id) in sibling_ids.iter().enumerate() {
             statement.execute(params![index as i64 + 1, sibling_id.0])?;
         }
+        self.connection.execute(
+            "UPDATE projects SET updated_at = ?1 WHERE id = ?2",
+            params![Local::now(), project_id.0],
+        )?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "project",
+            project_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         Ok(())
     }
 
@@ -1078,7 +1564,7 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
                      INNER JOIN project_tree ON projects.parent_project_id = project_tree.id
                  )
                  UPDATE projects
-                 SET deleted_at = ?2
+                 SET deleted_at = ?2, updated_at = ?2
                  WHERE id IN (SELECT id FROM project_tree)",
                 params![project_id.0, now],
             )
@@ -1093,7 +1579,8 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
                      INNER JOIN project_tree ON projects.parent_project_id = project_tree.id
                  )
                  UPDATE tasks
-                 SET deleted_at = COALESCE(deleted_at, ?2)
+                 SET deleted_at = COALESCE(deleted_at, ?2),
+                     updated_at = ?2
                  WHERE project_id IN (SELECT id FROM project_tree)",
                 params![project_id.0, now],
             )
@@ -1108,7 +1595,8 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
                      INNER JOIN project_tree ON projects.parent_project_id = project_tree.id
                  )
                  UPDATE sections
-                 SET deleted_at = COALESCE(deleted_at, ?2)
+                 SET deleted_at = COALESCE(deleted_at, ?2),
+                     updated_at = ?2
                  WHERE project_id IN (SELECT id FROM project_tree)",
                 params![project_id.0, now],
             )
@@ -1118,6 +1606,15 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
                     project_id.0
                 )
             })?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "project",
+            project_id.0,
+            "delete",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         Ok(())
     }
 }
@@ -1262,12 +1759,22 @@ impl SectionRepository for SqliteSectionRepository<'_> {
         let section_order = self.next_section_order(project_id)?;
         self.connection
             .execute(
-                "INSERT INTO sections(project_id, name, section_order, created_at, deleted_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL)",
-                params![project_id.0, name, section_order, now],
+                "INSERT INTO sections(project_id, name, section_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)",
+                params![project_id.0, name, section_order, now, now],
             )
             .context("failed to create section")?;
-        self.load_section(SectionId(self.connection.last_insert_rowid()))?
+        let section_id = SectionId(self.connection.last_insert_rowid());
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "section",
+            section_id.0,
+            "create",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
+        self.load_section(section_id)?
             .context("created section could not be reloaded")
     }
 
@@ -1280,10 +1787,19 @@ impl SectionRepository for SqliteSectionRepository<'_> {
         }
         self.connection
             .execute(
-                "UPDATE sections SET name = ?1 WHERE id = ?2",
-                params![update.name, section_id.0],
+                "UPDATE sections SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                params![update.name, Local::now(), section_id.0],
             )
             .with_context(|| format!("failed to update section {}", section_id.0))?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "section",
+            section_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         self.load_section(section_id)?
             .context("updated section could not be reloaded")
     }
@@ -1316,6 +1832,19 @@ impl SectionRepository for SqliteSectionRepository<'_> {
         for (index, sibling_id) in sibling_ids.iter().enumerate() {
             statement.execute(params![index as i64 + 1, sibling_id.0])?;
         }
+        self.connection.execute(
+            "UPDATE sections SET updated_at = ?1 WHERE id = ?2",
+            params![Local::now(), section_id.0],
+        )?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "section",
+            section_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         Ok(())
     }
 
@@ -1328,16 +1857,25 @@ impl SectionRepository for SqliteSectionRepository<'_> {
         }
         self.connection
             .execute(
-                "UPDATE sections SET deleted_at = ?1 WHERE id = ?2",
-                params![now, section_id.0],
+                "UPDATE sections SET deleted_at = ?1, updated_at = ?2 WHERE id = ?3",
+                params![now, now, section_id.0],
             )
             .with_context(|| format!("failed to soft-delete section {}", section_id.0))?;
         self.connection
             .execute(
-                "UPDATE tasks SET section_id = NULL WHERE section_id = ?1",
-                params![section_id.0],
+                "UPDATE tasks SET section_id = NULL, updated_at = ?2 WHERE section_id = ?1",
+                params![section_id.0, now],
             )
             .with_context(|| format!("failed to detach tasks from section {}", section_id.0))?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "section",
+            section_id.0,
+            "delete",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         Ok(())
     }
 }
@@ -1453,18 +1991,29 @@ impl TagRepository for SqliteTagRepository<'_> {
         let item_order = self.next_item_order()?;
         self.connection
             .execute(
-                "INSERT INTO tags(name, color, is_favorite, item_order, created_at, deleted_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+                "INSERT INTO tags(name, color, is_favorite, item_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL)",
                 params![
                     name,
                     color.as_str(),
                     if is_favorite { 1_i64 } else { 0_i64 },
                     item_order,
+                    now,
                     now
                 ],
             )
             .context("failed to create tag")?;
-        self.load_tag(TagId(self.connection.last_insert_rowid()))?
+        let tag_id = TagId(self.connection.last_insert_rowid());
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "tag",
+            tag_id.0,
+            "create",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
+        self.load_tag(tag_id)?
             .context("created tag could not be reloaded")
     }
 
@@ -1479,16 +2028,26 @@ impl TagRepository for SqliteTagRepository<'_> {
         self.connection
             .execute(
                 "UPDATE tags
-                 SET name = ?1, color = ?2, is_favorite = ?3
-                 WHERE id = ?4",
+                 SET name = ?1, color = ?2, is_favorite = ?3, updated_at = ?4
+                 WHERE id = ?5",
                 params![
                     update.name,
                     update.color.as_str(),
                     if update.is_favorite { 1_i64 } else { 0_i64 },
+                    Local::now(),
                     tag_id.0
                 ],
             )
             .with_context(|| format!("failed to update tag {}", tag_id.0))?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "tag",
+            tag_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
 
         self.load_tag(tag_id)?
             .context("updated tag could not be reloaded")
@@ -1523,6 +2082,19 @@ impl TagRepository for SqliteTagRepository<'_> {
         for (index, id) in ids.iter().enumerate() {
             statement.execute(params![index as i64 + 1, id.0])?;
         }
+        self.connection.execute(
+            "UPDATE tags SET updated_at = ?1 WHERE id = ?2",
+            params![Local::now(), tag_id.0],
+        )?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "tag",
+            tag_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         Ok(())
     }
 
@@ -1535,13 +2107,22 @@ impl TagRepository for SqliteTagRepository<'_> {
         }
         self.connection
             .execute(
-                "UPDATE tags SET deleted_at = ?1 WHERE id = ?2",
-                params![now, tag_id.0],
+                "UPDATE tags SET deleted_at = ?1, updated_at = ?2 WHERE id = ?3",
+                params![now, now, tag_id.0],
             )
             .with_context(|| format!("failed to soft-delete tag {}", tag_id.0))?;
         self.connection
             .execute("DELETE FROM task_tags WHERE tag_id = ?1", params![tag_id.0])
             .with_context(|| format!("failed to detach task-tag links for {}", tag_id.0))?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "tag",
+            tag_id.0,
+            "delete",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         Ok(())
     }
 
@@ -1571,6 +2152,19 @@ impl TagRepository for SqliteTagRepository<'_> {
             }
         }
         transaction.commit()?;
+        self.connection.execute(
+            "UPDATE tasks SET updated_at = ?1 WHERE id = ?2",
+            params![Local::now(), task_id.0],
+        )?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "task",
+            task_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         Ok(())
     }
 }
@@ -1664,19 +2258,30 @@ impl FilterRepository for SqliteFilterRepository<'_> {
         let item_order = self.next_item_order()?;
         self.connection
             .execute(
-                "INSERT INTO filters(name, query, color, is_favorite, item_order, created_at, deleted_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+                "INSERT INTO filters(name, query, color, is_favorite, item_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL)",
                 params![
                     name,
                     query,
                     color.as_str(),
                     if is_favorite { 1_i64 } else { 0_i64 },
                     item_order,
+                    now,
                     now
                 ],
             )
             .context("failed to create filter")?;
-        self.load_filter(FilterId(self.connection.last_insert_rowid()))?
+        let filter_id = FilterId(self.connection.last_insert_rowid());
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "filter",
+            filter_id.0,
+            "create",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
+        self.load_filter(filter_id)?
             .context("created filter could not be reloaded")
     }
 
@@ -1691,17 +2296,27 @@ impl FilterRepository for SqliteFilterRepository<'_> {
         self.connection
             .execute(
                 "UPDATE filters
-                 SET name = ?1, query = ?2, color = ?3, is_favorite = ?4
-                 WHERE id = ?5",
+                 SET name = ?1, query = ?2, color = ?3, is_favorite = ?4, updated_at = ?5
+                 WHERE id = ?6",
                 params![
                     update.name,
                     update.query,
                     update.color.as_str(),
                     if update.is_favorite { 1_i64 } else { 0_i64 },
+                    Local::now(),
                     filter_id.0
                 ],
             )
             .with_context(|| format!("failed to update filter {}", filter_id.0))?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "filter",
+            filter_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
 
         self.load_filter(filter_id)?
             .context("updated filter could not be reloaded")
@@ -1736,6 +2351,19 @@ impl FilterRepository for SqliteFilterRepository<'_> {
         for (index, id) in ids.iter().enumerate() {
             statement.execute(params![index as i64 + 1, id.0])?;
         }
+        self.connection.execute(
+            "UPDATE filters SET updated_at = ?1 WHERE id = ?2",
+            params![Local::now(), filter_id.0],
+        )?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "filter",
+            filter_id.0,
+            "update",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         Ok(())
     }
 
@@ -1748,10 +2376,19 @@ impl FilterRepository for SqliteFilterRepository<'_> {
         }
         self.connection
             .execute(
-                "UPDATE filters SET deleted_at = ?1 WHERE id = ?2",
-                params![now, filter_id.0],
+                "UPDATE filters SET deleted_at = ?1, updated_at = ?2 WHERE id = ?3",
+                params![now, now, filter_id.0],
             )
             .with_context(|| format!("failed to soft-delete filter {}", filter_id.0))?;
+        enqueue_sync_outbox(
+            self.connection,
+            "todoist",
+            "filter",
+            filter_id.0,
+            "delete",
+            "{}",
+            now_utc_rfc3339().as_str(),
+        )?;
         Ok(())
     }
 }
@@ -2091,8 +2728,8 @@ mod tests {
     use crate::domain::{SessionKind, SessionOutcome};
 
     use super::{
-        Database, FilterRepository, PomodoroRepository, ProjectRepository, TagRepository,
-        TaskRepository,
+        Database, FilterRepository, PomodoroRepository, ProjectRepository, SyncRepository,
+        SyncStateRecord, TagRepository, TaskRepository,
     };
 
     fn naive_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<Utc> {
@@ -2127,6 +2764,49 @@ mod tests {
         assert_eq!(stats.total_break_seconds, 0);
         assert_eq!(stats.completed_tasks, 0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn sync_repository_persists_state_and_outbox_lifecycle() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let now = Utc::now().to_rfc3339();
+        sync.upsert_state(&SyncStateRecord {
+            provider: "todoist".to_string(),
+            sync_token: Some("token-1".to_string()),
+            last_synced_at: Some(now.clone()),
+            last_status: Some("ok".to_string()),
+            last_error: None,
+            updated_at: now.clone(),
+        })?;
+
+        let state = sync
+            .get_state("todoist")?
+            .expect("todoist state should exist");
+        assert_eq!(state.sync_token.as_deref(), Some("token-1"));
+        assert_eq!(state.last_status.as_deref(), Some("ok"));
+
+        let entry_id = sync.enqueue_outbox(
+            "todoist",
+            "task",
+            42,
+            "update",
+            "{}",
+            Utc::now().to_rfc3339().as_str(),
+        )?;
+        let outbox = sync.list_outbox("todoist", 10)?;
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].id, entry_id);
+        assert_eq!(outbox[0].entity_type, "task");
+
+        sync.mark_outbox_failed(entry_id, "temporary failure")?;
+        let outbox = sync.list_outbox("todoist", 10)?;
+        assert_eq!(outbox[0].attempts, 1);
+        assert_eq!(outbox[0].last_error.as_deref(), Some("temporary failure"));
+
+        sync.mark_outbox_delivered(entry_id)?;
+        assert!(sync.list_outbox("todoist", 10)?.is_empty());
         Ok(())
     }
 

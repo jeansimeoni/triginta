@@ -10,7 +10,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, prelude::CrosstermBackend};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     config::{
@@ -24,7 +24,7 @@ use crate::{
         TagUpdate, Task, TaskId, TaskPriority, TaskStatus, TaskUpdate,
     },
     filters,
-    integrations::{DisabledTodoistProvider, TaskSyncProvider},
+    integrations::{TaskSyncProvider, TodoistSyncProvider},
     storage::{
         Database, FilterRepository, PomodoroRepository, ProjectRepository, SectionRepository,
         TagRepository, TaskRepository,
@@ -10292,12 +10292,32 @@ pub fn run(options: RunOptions) -> Result<()> {
             .summarize_completed_focus_hours(monthly_started_at, monthly_ended_at)?,
     };
 
-    let provider = DisabledTodoistProvider;
+    let provider = TodoistSyncProvider::new(config.integrations.todoist.clone());
     info!(
         provider = provider.provider_name(),
         configured = provider.is_configured(),
         "integration boundary initialized"
     );
+    if config.integrations.todoist.sync_on_startup {
+        match provider.sync(&database.sync_repository()) {
+            Ok(report) => {
+                info!(
+                    provider = report.provider,
+                    configured = report.configured,
+                    status = report.status,
+                    pending_outbox = report.pending_outbox,
+                    "startup sync finished"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    provider = provider.provider_name(),
+                    error = %error,
+                    "startup sync failed"
+                );
+            }
+        }
+    }
 
     let mut app = App::new(screen_data, config, Some(paths.clone()), theme, database);
     let mut terminal = setup_terminal()?;

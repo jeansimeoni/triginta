@@ -362,11 +362,40 @@ impl StatsSettings {
     }
 }
 
+impl IntegrationConfig {
+    fn validate(&self) -> Result<()> {
+        self.todoist.validate()
+    }
+}
+
+impl TodoistIntegrationConfig {
+    fn validate(&self) -> Result<()> {
+        if self.token_env_var.trim().is_empty() {
+            bail!("integrations.todoist.token-env-var cannot be empty");
+        }
+
+        if self.token_source == TodoistTokenSource::Command {
+            let command = self.token_command.as_ref().context(
+                "integrations.todoist.token-command is required when token-source is command",
+            )?;
+            if command.program.trim().is_empty() {
+                bail!("integrations.todoist.token-command.program cannot be empty");
+            }
+            if command.timeout_ms == 0 {
+                bail!("integrations.todoist.token-command.timeout-ms must be greater than zero");
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     pub ui: UiConfig,
     pub timer: TimerSettings,
     pub stats: StatsSettings,
+    pub integrations: IntegrationConfig,
 }
 
 impl Default for AppConfig {
@@ -375,6 +404,66 @@ impl Default for AppConfig {
             ui: UiConfig::default(),
             timer: TimerSettings::default(),
             stats: StatsSettings::default(),
+            integrations: IntegrationConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationConfig {
+    pub todoist: TodoistIntegrationConfig,
+}
+
+impl Default for IntegrationConfig {
+    fn default() -> Self {
+        Self {
+            todoist: TodoistIntegrationConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoistIntegrationConfig {
+    pub enabled: bool,
+    pub sync_on_startup: bool,
+    pub token_source: TodoistTokenSource,
+    pub token_env_var: String,
+    pub token_command: Option<TokenCommandConfig>,
+}
+
+impl Default for TodoistIntegrationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sync_on_startup: false,
+            token_source: TodoistTokenSource::Env,
+            token_env_var: "TRIGINTA_TODOIST_TOKEN".to_string(),
+            token_command: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TodoistTokenSource {
+    #[default]
+    Env,
+    Command,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenCommandConfig {
+    pub program: String,
+    pub args: Vec<String>,
+    pub timeout_ms: u64,
+}
+
+impl Default for TokenCommandConfig {
+    fn default() -> Self {
+        Self {
+            program: String::new(),
+            args: Vec::new(),
+            timeout_ms: 5_000,
         }
     }
 }
@@ -417,6 +506,7 @@ struct AppConfigFile {
     ui: UiConfig,
     timer: TimerConfigFile,
     stats: StatsConfigFile,
+    integrations: IntegrationConfigFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -448,6 +538,54 @@ struct StatsConfigFile {
         serialize_with = "serialize_duration"
     )]
     daily_target: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct IntegrationConfigFile {
+    todoist: TodoistIntegrationConfigFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+struct TodoistIntegrationConfigFile {
+    enabled: bool,
+    sync_on_startup: bool,
+    token_source: TodoistTokenSource,
+    token_env_var: String,
+    token_command: Option<TokenCommandConfigFile>,
+}
+
+impl Default for TodoistIntegrationConfigFile {
+    fn default() -> Self {
+        let defaults = TodoistIntegrationConfig::default();
+        Self {
+            enabled: defaults.enabled,
+            sync_on_startup: defaults.sync_on_startup,
+            token_source: defaults.token_source,
+            token_env_var: defaults.token_env_var,
+            token_command: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+struct TokenCommandConfigFile {
+    program: String,
+    args: Vec<String>,
+    timeout_ms: u64,
+}
+
+impl Default for TokenCommandConfigFile {
+    fn default() -> Self {
+        let defaults = TokenCommandConfig::default();
+        Self {
+            program: defaults.program,
+            args: defaults.args,
+            timeout_ms: defaults.timeout_ms,
+        }
+    }
 }
 
 impl Default for TimerConfigFile {
@@ -484,6 +622,21 @@ impl From<AppConfigFile> for AppConfig {
             stats: StatsSettings {
                 daily_target: value.stats.daily_target,
             },
+            integrations: IntegrationConfig {
+                todoist: TodoistIntegrationConfig {
+                    enabled: value.integrations.todoist.enabled,
+                    sync_on_startup: value.integrations.todoist.sync_on_startup,
+                    token_source: value.integrations.todoist.token_source,
+                    token_env_var: value.integrations.todoist.token_env_var,
+                    token_command: value.integrations.todoist.token_command.map(|command| {
+                        TokenCommandConfig {
+                            program: command.program,
+                            args: command.args,
+                            timeout_ms: command.timeout_ms,
+                        }
+                    }),
+                },
+            },
         }
     }
 }
@@ -500,6 +653,21 @@ impl From<&AppConfig> for AppConfigFile {
             },
             stats: StatsConfigFile {
                 daily_target: value.stats.daily_target,
+            },
+            integrations: IntegrationConfigFile {
+                todoist: TodoistIntegrationConfigFile {
+                    enabled: value.integrations.todoist.enabled,
+                    sync_on_startup: value.integrations.todoist.sync_on_startup,
+                    token_source: value.integrations.todoist.token_source,
+                    token_env_var: value.integrations.todoist.token_env_var.clone(),
+                    token_command: value.integrations.todoist.token_command.as_ref().map(
+                        |command| TokenCommandConfigFile {
+                            program: command.program.clone(),
+                            args: command.args.clone(),
+                            timeout_ms: command.timeout_ms,
+                        },
+                    ),
+                },
             },
         }
     }
@@ -559,12 +727,14 @@ pub fn load_app_config(paths: &AppPaths) -> Result<AppConfig> {
     let config = AppConfig::from(file_config);
     config.timer.validate()?;
     config.stats.validate()?;
+    config.integrations.validate()?;
     Ok(config)
 }
 
 pub fn save_app_config(paths: &AppPaths, config: &AppConfig) -> Result<()> {
     config.timer.validate()?;
     config.stats.validate()?;
+    config.integrations.validate()?;
     paths.ensure_dirs()?;
 
     let (path, format) = active_config_path(paths)?
@@ -713,7 +883,7 @@ mod tests {
 
     use super::{
         AppConfig, AppPaths, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings,
-        db_filename, load_app_config, parse_duration_string, save_app_config,
+        TodoistTokenSource, db_filename, load_app_config, parse_duration_string, save_app_config,
     };
 
     #[test]
@@ -795,6 +965,7 @@ daily_target = "2h"
         assert_eq!(config.timer.long_break_interval, 5);
         assert_eq!(config.timer.pomodoro_length, Duration::from_secs(30 * 60));
         assert_eq!(config.stats.daily_target, Duration::from_secs(2 * 60 * 60));
+        assert!(!config.integrations.todoist.enabled);
     }
 
     #[test]
@@ -932,6 +1103,66 @@ daily_target = "0m"
 
         let error = load_app_config(&paths).expect_err("zero target should fail validation");
         assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn load_app_config_supports_todoist_command_token_source() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+        paths.ensure_dirs().expect("dirs should exist");
+        fs::write(
+            &paths.config_toml_path,
+            r#"[integrations.todoist]
+enabled = true
+sync_on_startup = true
+token_source = "command"
+token_env_var = "TRIGINTA_TODOIST_TOKEN"
+
+[integrations.todoist.token_command]
+program = "/usr/bin/sops"
+args = ["-d", "/tmp/token.enc"]
+timeout_ms = 1500
+"#,
+        )
+        .expect("config should be written");
+
+        let config = load_app_config(&paths).expect("config should load");
+        assert!(config.integrations.todoist.enabled);
+        assert!(config.integrations.todoist.sync_on_startup);
+        assert_eq!(
+            config.integrations.todoist.token_source,
+            TodoistTokenSource::Command
+        );
+        let command = config
+            .integrations
+            .todoist
+            .token_command
+            .expect("token command should be present");
+        assert_eq!(command.program, "/usr/bin/sops");
+        assert_eq!(
+            command.args,
+            vec!["-d".to_string(), "/tmp/token.enc".to_string()]
+        );
+        assert_eq!(command.timeout_ms, 1500);
+    }
+
+    #[test]
+    fn load_app_config_rejects_command_source_without_command_settings() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+        paths.ensure_dirs().expect("dirs should exist");
+        fs::write(
+            &paths.config_toml_path,
+            r#"[integrations.todoist]
+token_source = "command"
+"#,
+        )
+        .expect("config should be written");
+
+        let error = load_app_config(&paths).expect_err("command source should require command");
+        assert!(error.to_string().contains("token-command"));
     }
 
     #[test]

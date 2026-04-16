@@ -45,6 +45,12 @@ long_break_interval = 4
 
 [stats]
 daily_target = "150m"
+
+[integrations.todoist]
+enabled = false
+sync_on_startup = false
+token_source = "env"
+token_env_var = "TRIGINTA_TODOIST_TOKEN"
 ```
 
 ### YAML example
@@ -70,6 +76,13 @@ timer:
 
 stats:
   daily_target: 150m
+
+integrations:
+  todoist:
+    enabled: false
+    sync_on_startup: false
+    token_source: env
+    token_env_var: TRIGINTA_TODOIST_TOKEN
 ```
 
 ## UI
@@ -230,6 +243,49 @@ Default:
 - `150m`
 
 If omitted, Triginta uses the default.
+
+## Integrations
+
+Todoist sync settings live under `integrations.todoist`.
+
+Fields:
+
+- `enabled` (default: `false`)
+- `sync_on_startup` (default: `false`)
+- `token_source` (`env` or `command`, default: `env`)
+- `token_env_var` (default: `TRIGINTA_TODOIST_TOKEN`)
+- `token_command` (required when `token_source = "command"`)
+
+`token_source = "env"` reads the token from `token_env_var`.
+
+`token_source = "command"` runs a strict command (no shell evaluation) and
+uses trimmed stdout as the token. Configure:
+
+- `token_command.program`
+- `token_command.args`
+- `token_command.timeout_ms`
+
+TOML command example (for SOPS-style workflows):
+
+```toml
+[integrations.todoist]
+enabled = true
+sync_on_startup = true
+token_source = "command"
+token_env_var = "TRIGINTA_TODOIST_TOKEN"
+
+[integrations.todoist.token_command]
+program = "/usr/bin/sops"
+args = ["-d", "/path/to/todoist-token.enc"]
+timeout_ms = 3000
+```
+
+Security notes:
+
+- Triginta does not execute token commands through `sh -c`; shell syntax,
+  pipes, and interpolation are not supported.
+- Your config file controls which local program runs. Keep config files
+  trusted and permissioned.
 
 ## Theme Files
 
