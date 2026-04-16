@@ -9,6 +9,7 @@ use crate::domain::ProjectColor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemePalette {
+    pub background: Color,
     pub text: Color,
     pub subtle_text: Color,
     pub border: Color,
@@ -121,6 +122,8 @@ impl ThemePalette {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ThemeFile {
+    #[serde(default)]
+    background: Option<String>,
     text: String,
     subtle_text: String,
     border: String,
@@ -189,6 +192,11 @@ impl ThemeFile {
             .project_colors
             .unwrap_or_else(default_project_color_file);
         let default_priority_colors = default_priority_color_file();
+        let background = if let Some(value) = self.background.as_deref() {
+            parse_hex_color(value).context("invalid theme color for background")?
+        } else {
+            Color::Reset
+        };
         let text = parse_hex_color(&self.text).context("invalid theme color for text")?;
         let subtle_text =
             parse_hex_color(&self.subtle_text).context("invalid theme color for subtle_text")?;
@@ -252,6 +260,7 @@ impl ThemeFile {
         };
 
         Ok(ThemePalette {
+            background,
             text,
             subtle_text,
             border,
@@ -319,6 +328,7 @@ impl ThemeFile {
 fn builtin_theme(name: &str) -> Option<ThemePalette> {
     match name {
         "catppuccin-latte" => Some(ThemePalette {
+            background: rgb(239, 241, 245),
             text: rgb(76, 79, 105),
             subtle_text: rgb(124, 127, 147),
             border: rgb(156, 160, 176),
@@ -340,6 +350,7 @@ fn builtin_theme(name: &str) -> Option<ThemePalette> {
             project_colors: default_project_colors(),
         }),
         "catppuccin-frappe" => Some(ThemePalette {
+            background: rgb(48, 52, 70),
             text: rgb(198, 208, 245),
             subtle_text: rgb(165, 173, 206),
             border: rgb(115, 121, 148),
@@ -361,6 +372,7 @@ fn builtin_theme(name: &str) -> Option<ThemePalette> {
             project_colors: default_project_colors(),
         }),
         "catppuccin-macchiato" => Some(ThemePalette {
+            background: rgb(36, 39, 58),
             text: rgb(202, 211, 245),
             subtle_text: rgb(165, 173, 203),
             border: rgb(110, 115, 141),
@@ -382,6 +394,7 @@ fn builtin_theme(name: &str) -> Option<ThemePalette> {
             project_colors: default_project_colors(),
         }),
         "catppuccin-mocha" => Some(ThemePalette {
+            background: rgb(30, 30, 46),
             text: rgb(205, 214, 244),
             subtle_text: rgb(166, 173, 200),
             border: rgb(108, 112, 134),
@@ -504,6 +517,7 @@ mod tests {
         let palette =
             ThemePalette::load(&paths, "catppuccin-mocha").expect("built-in theme should load");
         assert_eq!(palette.accent, Color::Rgb(203, 166, 247));
+        assert_eq!(palette.background, Color::Rgb(30, 30, 46));
     }
 
     #[test]
@@ -535,5 +549,6 @@ markdown_h2 = "#22aaee"
         assert_eq!(palette.error, Color::Rgb(221, 102, 119));
         assert_eq!(palette.markdown_h2, Color::Rgb(34, 170, 238));
         assert_eq!(palette.markdown_h1, palette.priority_1);
+        assert_eq!(palette.background, Color::Reset);
     }
 }

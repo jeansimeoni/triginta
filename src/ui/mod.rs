@@ -6,8 +6,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Axis, Bar, BarChart, BarGroup, Block, Borders, Chart, Clear, Dataset, GraphType,
-        Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+        Axis, Bar, BarChart, BarGroup, Block, Borders, Chart, Clear, Dataset, GraphType, Paragraph,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
         calendar::{CalendarEventStore, Monthly},
     },
 };
@@ -24,8 +24,8 @@ use crate::{
         ProjectDeleteConfirmationView, ProjectEditorView, ProjectSortPopupView, ProjectTreeRowView,
         RightPanelTab, ScreenData, SessionNoteEditorView, SessionNoteViewerView, ShortcutSection,
         ShortcutTip, SidebarTab, TagDeleteConfirmationView, TagEditorView, TagListRowView,
-        TagSortPopupView, TaskEditorView, TaskInputView, TaskSearchView, TaskSortPopupView,
-        TaskListRowView, TaskView, TimerPhase,
+        TagSortPopupView, TaskEditorView, TaskInputView, TaskListRowView, TaskSearchView,
+        TaskSortPopupView, TaskView, TimerPhase,
     },
     domain::{
         DayHistorySummary, FilterColor, SessionEntry, SessionKind, SessionOutcome, TagColor, Task,
@@ -39,6 +39,10 @@ use symbols::Symbols;
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let symbols = Symbols::new(app.glyph_mode());
     let palette = app.theme();
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette.background)),
+        frame.area(),
+    );
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(2)])
@@ -1415,7 +1419,12 @@ fn render_statistics_panel(
     let remaining_minutes = daily_target_minutes.saturating_sub(today_focus_minutes);
     let focus_30 = completed_focus_minutes_last_30_days(data);
     let (current_streak_days, best_streak_days) = goal_streak_days(&focus_30, daily_target_minutes);
-    let weekly_total_minutes = focus_30.iter().rev().take(7).map(|(_, minutes)| *minutes).sum::<u32>();
+    let weekly_total_minutes = focus_30
+        .iter()
+        .rev()
+        .take(7)
+        .map(|(_, minutes)| *minutes)
+        .sum::<u32>();
     let weekly_average_minutes = (weekly_total_minutes as f64 / 7.0).round() as u32;
 
     let is_focused = focused_panel == PanelFocus::RightPane;
@@ -1454,7 +1463,10 @@ fn render_statistics_panel(
                 current_streak_days,
                 best_streak_days
             )),
-            Line::from(format!("7d average {}", format_minutes_hm(weekly_average_minutes))),
+            Line::from(format!(
+                "7d average {}",
+                format_minutes_hm(weekly_average_minutes)
+            )),
         ];
         frame.render_widget(Paragraph::new(compact).wrap(Wrap { trim: true }), content);
         return;
@@ -1474,7 +1486,9 @@ fn render_statistics_panel(
                     format_minutes_hm(today_focus_minutes),
                     format_minutes_hm(daily_target_minutes),
                 ),
-                Style::default().fg(palette.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("  Remaining {}", format_minutes_hm(remaining_minutes)),
@@ -1513,13 +1527,7 @@ fn render_statistics_panel(
         palette,
     );
 
-    render_statistics_bars(
-        frame,
-        chart_sections[1],
-        focus_30.as_slice(),
-        data,
-        palette,
-    );
+    render_statistics_bars(frame, chart_sections[1], focus_30.as_slice(), data, palette);
 }
 
 fn today_completed_focus_minutes(data: &ScreenData) -> u32 {
@@ -3752,7 +3760,7 @@ fn render_editor_project_suggestions(
                             .add_modifier(Modifier::BOLD),
                     ),
             )
-            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+            .style(Style::default().bg(palette.background)),
         area,
     );
 }
@@ -3804,7 +3812,7 @@ fn render_editor_tag_suggestions(
                             .add_modifier(Modifier::BOLD),
                     ),
             )
-            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+            .style(Style::default().bg(palette.background)),
         area,
     );
 }
@@ -3856,7 +3864,7 @@ fn render_editor_priority_suggestions(
                             .add_modifier(Modifier::BOLD),
                     ),
             )
-            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+            .style(Style::default().bg(palette.background)),
         area,
     );
 }
@@ -3908,7 +3916,7 @@ fn render_editor_parent_suggestions(
                             .add_modifier(Modifier::BOLD),
                     ),
             )
-            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+            .style(Style::default().bg(palette.background)),
         area,
     );
 }
@@ -4630,7 +4638,7 @@ fn render_project_parent_suggestions(
                             .add_modifier(Modifier::BOLD),
                     ),
             )
-            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+            .style(Style::default().bg(palette.background)),
         area,
     );
 }
@@ -4682,7 +4690,7 @@ fn render_task_project_suggestions(
                             .add_modifier(Modifier::BOLD),
                     ),
             )
-            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+            .style(Style::default().bg(palette.background)),
         area,
     );
 }
@@ -4734,7 +4742,7 @@ fn render_task_tag_suggestions(
                             .add_modifier(Modifier::BOLD),
                     ),
             )
-            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+            .style(Style::default().bg(palette.background)),
         area,
     );
 }
@@ -4786,7 +4794,7 @@ fn render_task_priority_suggestions(
                             .add_modifier(Modifier::BOLD),
                     ),
             )
-            .style(Style::default().bg(Color::Rgb(4, 4, 8))),
+            .style(Style::default().bg(palette.background)),
         area,
     );
 }
@@ -5686,6 +5694,7 @@ fn panel_block(title: Line<'static>, focused: bool, palette: ThemePalette) -> Bl
     Block::default()
         .title(title)
         .borders(Borders::ALL)
+        .style(Style::default().bg(palette.background))
         .border_style(border_style)
 }
 
@@ -6034,6 +6043,7 @@ mod tests {
 
     fn test_palette() -> ThemePalette {
         ThemePalette {
+            background: Color::Reset,
             text: Color::White,
             subtle_text: Color::Gray,
             border: Color::DarkGray,

@@ -247,6 +247,7 @@ equivalent.
 
 Theme files support these keys:
 
+- `background`
 - `text`
 - `subtle_text`
 - `border`
@@ -267,6 +268,8 @@ Theme files support these keys:
 - `markdown_h6`
 
 Each value must be a 6-digit hex color like `"#cdd6f4"`.
+If `background` is omitted, Triginta leaves the terminal default background in
+place.
 If `priority_1..priority_3` are omitted, Triginta uses Catppuccin-compatible
 defaults that approximate Todoist's red/orange/blue priority colors.
 If `markdown_h1..markdown_h6` are omitted, Triginta derives them from the
@@ -276,6 +279,7 @@ current theme: `h1=priority_1`, `h2=priority_2`, `h3=priority_3`,
 Example:
 
 ```toml
+background = "#1e1e2e"
 text = "#ddeedd"
 subtle_text = "#99aa99"
 border = "#557755"
