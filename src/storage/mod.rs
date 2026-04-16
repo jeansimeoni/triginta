@@ -1596,15 +1596,15 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
     ) -> Result<Vec<DayHistorySummary>> {
         let mut statement = self.connection.prepare(
             "SELECT
-                DATE(started_at) AS day,
+                DATE(started_at, 'localtime') AS day,
                 COALESCE(SUM(CASE WHEN kind IN ('focus', 'work') AND outcome = 'completed' THEN 1 ELSE 0 END), 0) AS completed_sessions,
                 COALESCE(SUM(CASE WHEN kind IN ('focus', 'work') AND outcome = 'voided' THEN 1 ELSE 0 END), 0) AS voided_sessions,
                 COALESCE(SUM(CASE WHEN kind IN ('focus', 'work') THEN duration_seconds ELSE 0 END), 0) AS focus_seconds,
                 COALESCE(SUM(CASE WHEN kind IN ('short_break', 'long_break') THEN duration_seconds ELSE 0 END), 0) AS break_seconds
              FROM session_history
              WHERE started_at >= ?1 AND started_at < ?2
-             GROUP BY DATE(started_at)
-             ORDER BY DATE(started_at) DESC",
+             GROUP BY DATE(started_at, 'localtime')
+             ORDER BY DATE(started_at, 'localtime') DESC",
         )?;
 
         let rows = statement.query_map(params![started_at, ended_at], |row| {
@@ -1628,14 +1628,14 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
     ) -> Result<Vec<FocusDaySummary>> {
         let mut statement = self.connection.prepare(
             "SELECT
-                DATE(started_at) AS day,
+                DATE(started_at, 'localtime') AS day,
                 COALESCE(SUM(duration_seconds), 0) AS focus_seconds
              FROM session_history
              WHERE started_at >= ?1 AND started_at < ?2
                AND kind IN ('focus', 'work')
                AND outcome = 'completed'
-             GROUP BY DATE(started_at)
-             ORDER BY DATE(started_at) ASC",
+             GROUP BY DATE(started_at, 'localtime')
+             ORDER BY DATE(started_at, 'localtime') ASC",
         )?;
 
         let rows = statement.query_map(params![started_at, ended_at], |row| {
@@ -1656,14 +1656,14 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
     ) -> Result<Vec<FocusHourSummary>> {
         let mut statement = self.connection.prepare(
             "SELECT
-                CAST(strftime('%H', started_at) AS INTEGER) AS hour,
+                CAST(strftime('%H', started_at, 'localtime') AS INTEGER) AS hour,
                 COALESCE(SUM(duration_seconds), 0) AS focus_seconds
              FROM session_history
              WHERE started_at >= ?1 AND started_at < ?2
                AND kind IN ('focus', 'work')
                AND outcome = 'completed'
-             GROUP BY CAST(strftime('%H', started_at) AS INTEGER)
-             ORDER BY CAST(strftime('%H', started_at) AS INTEGER) ASC",
+             GROUP BY CAST(strftime('%H', started_at, 'localtime') AS INTEGER)
+             ORDER BY CAST(strftime('%H', started_at, 'localtime') AS INTEGER) ASC",
         )?;
 
         let rows = statement.query_map(params![started_at, ended_at], |row| {
@@ -1776,7 +1776,7 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use chrono::{Local, NaiveDate, Utc};
+    use chrono::{Local, NaiveDate, Timelike, Utc};
 
     use crate::domain::{
         FilterColor, FilterUpdate, ProjectColor, ProjectUpdate, TagColor, TagUpdate, TaskDue,
@@ -1920,6 +1920,53 @@ mod tests {
         let mut seconds = hourly.iter().map(|bucket| bucket.focus_seconds).collect::<Vec<_>>();
         seconds.sort_unstable();
         assert_eq!(seconds, vec![1200, 1500]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn pomodoro_summary_uses_local_calendar_day_and_hour() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let repository = database.pomodoro_repository();
+        let day = Local::now().date_naive();
+        let session_start = day
+            .and_hms_opt(0, 30, 0)
+            .expect("time should be valid")
+            .and_local_timezone(Local)
+            .single()
+            .expect("time should be representable");
+        let session_end = session_start + chrono::Duration::minutes(25);
+        let range_start = (day - chrono::Days::new(1))
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight should be valid")
+            .and_local_timezone(Local)
+            .single()
+            .expect("local midnight should be representable");
+        let range_end = (day + chrono::Days::new(1))
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight should be valid")
+            .and_local_timezone(Local)
+            .single()
+            .expect("local midnight should be representable");
+
+        repository.record_session_entry(
+            None,
+            "",
+            SessionKind::Focus,
+            SessionOutcome::Completed,
+            None,
+            session_start,
+            session_end,
+            1500,
+        )?;
+
+        let day_summary = repository.summarize_days(range_start, range_end)?;
+        assert_eq!(day_summary.len(), 1);
+        assert_eq!(day_summary[0].day, session_start.date_naive());
+
+        let hourly = repository.summarize_completed_focus_hours(range_start, range_end)?;
+        assert_eq!(hourly.len(), 1);
+        assert_eq!(hourly[0].hour, session_start.hour() as u8);
 
         Ok(())
     }
