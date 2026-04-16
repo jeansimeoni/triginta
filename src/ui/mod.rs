@@ -2901,17 +2901,62 @@ fn render_session_note_editor_popup(
         .border_style(Style::default().fg(palette.accent));
     frame.render_widget(block.clone(), area);
     let inner = block.inner(area);
-    render_editor_multiline_field(
-        frame,
-        inner,
-        "Notes (Markdown)",
-        &editor.value,
-        editor.cursor,
-        editor.scroll,
-        true,
-        Some("Add optional notes for focus sessions"),
-        palette,
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Notes (Markdown)",
+            Style::default().fg(palette.subtle_text),
+        ))),
+        sections[0],
     );
+
+    let lines = editor.value.split('\n').collect::<Vec<_>>();
+    let visible_lines = sections[1].height as usize;
+    let safe_cursor = editor.cursor.min(editor.value.len());
+    let cursor_line = editor.value[..safe_cursor]
+        .chars()
+        .filter(|character| *character == '\n')
+        .count();
+    let cursor_line_start = editor.value[..safe_cursor]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let cursor_col_chars = UnicodeWidthStr::width(&editor.value[cursor_line_start..safe_cursor]);
+    let effective_scroll = editor.scroll.min(cursor_line);
+    let end = (effective_scroll + visible_lines).min(lines.len().max(1));
+    let rendered = if editor.value.is_empty() {
+        vec![Line::from(Span::styled(
+            "Add optional notes for focus sessions",
+            Style::default()
+                .fg(palette.subtle_text)
+                .add_modifier(Modifier::DIM),
+        ))]
+    } else {
+        (effective_scroll..end)
+            .map(|index| {
+                Line::from(Span::styled(
+                    lines.get(index).copied().unwrap_or(""),
+                    Style::default().fg(palette.text),
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    frame.render_widget(
+        Paragraph::new(rendered).wrap(Wrap { trim: false }),
+        sections[1],
+    );
+
+    if sections[1].width > 0 && sections[1].height > 0 && cursor_line >= effective_scroll {
+        let row = (cursor_line - effective_scroll).min(visible_lines.saturating_sub(1)) as u16;
+        let x = sections[1]
+            .x
+            .saturating_add((cursor_col_chars as u16).min(sections[1].width.saturating_sub(1)));
+        let y = sections[1].y.saturating_add(row);
+        frame.set_cursor_position((x, y));
+    }
     let _ = symbols;
 }
 

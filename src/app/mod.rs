@@ -13252,7 +13252,13 @@ mod tests {
         let parent = app
             .database
             .project_repository()
-            .create("Test Project", None, ProjectColor::Blue, false, Local::now())
+            .create(
+                "Test Project",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
             .expect("parent should create");
         app.database
             .section_repository()
