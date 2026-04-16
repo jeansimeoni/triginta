@@ -4764,10 +4764,6 @@ impl App {
                     && self.selected_section_id.is_none(),
             });
             if self.selected_project_id == Some(project.id) {
-                let section_prefix_base = rows
-                    .last()
-                    .map(|row| row.tree_prefix.clone())
-                    .unwrap_or_default();
                 let sections = self
                     .screen_data
                     .sections
@@ -4777,10 +4773,14 @@ impl App {
                     })
                     .collect::<Vec<_>>();
                 let section_total = sections.len();
+                let has_child_projects = !self.project_children(Some(project.id)).is_empty();
                 for (section_index, section) in sections.into_iter().enumerate() {
                     let is_last_section = section_index + 1 == section_total;
+                    // Sections render before child projects in the tree. If child
+                    // projects exist, the final section is not the final branch item.
+                    let is_last_section_row = is_last_section && !has_child_projects;
                     let section_prefix = if depth == 0 {
-                        if is_last_section {
+                        if is_last_section_row {
                             "└ ".to_string()
                         } else {
                             "├ ".to_string()
@@ -4791,10 +4791,9 @@ impl App {
                             prefix.push_str(if *has_more { "│ " } else { "  " });
                         }
                         prefix.push_str(if is_last { "  " } else { "│ " });
-                        prefix.push_str(if is_last_section { "└ " } else { "├ " });
+                        prefix.push_str(if is_last_section_row { "└ " } else { "├ " });
                         prefix
                     };
-                    let _ = &section_prefix_base;
                     rows.push(ProjectTreeRowView {
                         project_id: Some(project.id),
                         section_id: Some(section.id),
@@ -10489,7 +10488,8 @@ mod tests {
         TaskUpdate,
     };
     use crate::storage::{
-        Database, FilterRepository, ProjectRepository, TagRepository, TaskRepository,
+        Database, FilterRepository, ProjectRepository, SectionRepository, TagRepository,
+        TaskRepository,
     };
     use crate::task_nlp::parse_task_input;
     use crate::theme::ThemePalette;
@@ -13244,6 +13244,55 @@ mod tests {
         assert_eq!(child_b_row.tree_prefix, "└ ");
         assert_eq!(grand_a_row.tree_prefix, "│ └ ");
         assert_eq!(great_a_row.tree_prefix, "│   └ ");
+    }
+
+    #[test]
+    fn project_tree_rows_keep_branch_continuity_between_sections_and_child_projects() {
+        let mut app = test_app();
+        let parent = app
+            .database
+            .project_repository()
+            .create("Test Project", None, ProjectColor::Blue, false, Local::now())
+            .expect("parent should create");
+        app.database
+            .section_repository()
+            .create(parent.id, "Section 1", Local::now())
+            .expect("section 1 should create");
+        app.database
+            .section_repository()
+            .create(parent.id, "Section 2", Local::now())
+            .expect("section 2 should create");
+        app.database
+            .project_repository()
+            .create(
+                "Child Project",
+                Some(parent.id),
+                ProjectColor::Teal,
+                false,
+                Local::now(),
+            )
+            .expect("child should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.selected_project_id = Some(parent.id);
+        app.selected_section_id = None;
+
+        let rows = app.project_tree_rows();
+        let section_one_row = rows
+            .iter()
+            .find(|row| row.name == "Section 1")
+            .expect("section 1 row should exist");
+        let section_two_row = rows
+            .iter()
+            .find(|row| row.name == "Section 2")
+            .expect("section 2 row should exist");
+        let child_row = rows
+            .iter()
+            .find(|row| row.name == "Child Project")
+            .expect("child row should exist");
+
+        assert_eq!(section_one_row.tree_prefix, "├ ");
+        assert_eq!(section_two_row.tree_prefix, "├ ");
+        assert_eq!(child_row.tree_prefix, "└ ");
     }
 
     #[test]
