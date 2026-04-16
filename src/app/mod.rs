@@ -1175,6 +1175,36 @@ pub struct ShortcutSection {
     pub tips: &'static [ShortcutTip],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncIndicatorStateView {
+    Connected,
+    Running,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncIndicatorView {
+    pub integration_name: &'static str,
+    pub state: SyncIndicatorStateView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncStatusPanelView {
+    pub integration_name: &'static str,
+    pub status: String,
+    pub trigger: String,
+    pub latest_summary: String,
+    pub pending_outbox: usize,
+    pub delivered_outbox: usize,
+    pub failed_outbox: usize,
+    pub last_sync_at: Option<String>,
+    pub next_poll_in: String,
+    pub pending_push_in: Option<String>,
+    pub poll_interval: String,
+    pub dry_run: bool,
+    pub last_error: Option<String>,
+}
+
 const GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "1-8",
@@ -1187,6 +1217,10 @@ const GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "?",
         description: "help",
+    },
+    ShortcutTip {
+        keys: "Shift+S",
+        description: "sync status",
     },
     ShortcutTip {
         keys: "q",
@@ -1791,7 +1825,15 @@ struct TodoistSyncUiState {
     poll_interval: Duration,
     last_seen_outbox_len: usize,
     latest_status_line: String,
-    banner_until: Option<DateTime<Local>>,
+    last_trigger: Option<SyncTrigger>,
+    last_status: String,
+    last_error: Option<String>,
+    last_sync_at: Option<DateTime<Local>>,
+    pending_outbox: usize,
+    delivered_outbox: usize,
+    failed_outbox: usize,
+    is_running: bool,
+    dry_run: bool,
 }
 
 // `App` owns the mutable runtime state for the TUI loop.
@@ -1844,6 +1886,7 @@ pub struct App {
     help_open: bool,
     help_scroll: usize,
     help_viewport_lines: usize,
+    sync_status_panel_open: bool,
     task_details_scroll: usize,
     task_details_anchor_task_id: Option<TaskId>,
     expanded_task_ids: HashSet<TaskId>,
@@ -1912,7 +1955,15 @@ impl App {
                 poll_interval: poll_min,
                 last_seen_outbox_len: 0,
                 latest_status_line: "sync idle".to_string(),
-                banner_until: None,
+                last_trigger: None,
+                last_status: "idle".to_string(),
+                last_error: None,
+                last_sync_at: None,
+                pending_outbox: 0,
+                delivered_outbox: 0,
+                failed_outbox: 0,
+                is_running: false,
+                dry_run: debug_dry_run_sync_enabled(),
             })
         } else {
             None
@@ -1962,6 +2013,7 @@ impl App {
             help_open: false,
             help_scroll: 0,
             help_viewport_lines: 0,
+            sync_status_panel_open: false,
             task_details_scroll: 0,
             task_details_anchor_task_id: None,
             expanded_task_ids: HashSet::new(),
@@ -3175,12 +3227,67 @@ impl App {
 
     pub fn sync_status_line(&self) -> Option<&str> {
         let state = self.todoist_sync.as_ref()?;
-        if let Some(until) = state.banner_until {
-            if Local::now() <= until {
-                return Some(state.latest_status_line.as_str());
-            }
-        }
         Some(state.latest_status_line.as_str())
+    }
+
+    pub fn sync_indicator_view(&self) -> Option<SyncIndicatorView> {
+        let state = self.todoist_sync.as_ref()?;
+        let status = if state.last_error.is_some() {
+            SyncIndicatorStateView::Error
+        } else if state.is_running
+            || state.pending_push_at.is_some()
+            || state.pending_outbox > 0
+            || state.last_seen_outbox_len > 0
+        {
+            SyncIndicatorStateView::Running
+        } else {
+            SyncIndicatorStateView::Connected
+        };
+        Some(SyncIndicatorView {
+            integration_name: "Todoist",
+            state: status,
+        })
+    }
+
+    pub fn sync_status_panel_view(&self) -> Option<SyncStatusPanelView> {
+        if !self.sync_status_panel_open {
+            return None;
+        }
+        let state = self.todoist_sync.as_ref()?;
+        let now = Local::now();
+        let trigger = state
+            .last_trigger
+            .map(SyncTrigger::as_str)
+            .unwrap_or("n/a")
+            .to_string();
+        let last_sync_at = state
+            .last_sync_at
+            .map(|at| at.format("%Y-%m-%d %H:%M:%S").to_string());
+        let next_poll_in_seconds = (state.next_poll_at - now).num_seconds().max(0);
+        let next_poll_in = format!("{next_poll_in_seconds}s");
+        let pending_push_in = state.pending_push_at.map(|at| {
+            let seconds = (at - now).num_seconds();
+            if seconds <= 0 {
+                "due now".to_string()
+            } else {
+                format!("{seconds}s")
+            }
+        });
+        Some(SyncStatusPanelView {
+            integration_name: "Todoist",
+            status: state.last_status.clone(),
+            trigger,
+            latest_summary: state.latest_status_line.clone(),
+            pending_outbox: state.pending_outbox,
+            delivered_outbox: state.delivered_outbox,
+            failed_outbox: state.failed_outbox,
+            last_sync_at,
+            next_poll_in,
+            pending_push_in,
+            poll_interval: format!("{}s", state.poll_interval.as_secs()),
+            dry_run: state.dry_run,
+            last_error: state.last_error.clone(),
+        })
     }
 
     pub fn focused_panel_search_status(&self) -> Option<PanelSearchStatusView> {
@@ -9619,6 +9726,16 @@ impl App {
             return Ok(());
         }
 
+        if self.sync_status_panel_open {
+            match code {
+                KeyCode::Esc | KeyCode::Char('S') => {
+                    self.sync_status_panel_open = false;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         if self.handle_panel_search_key(code) {
             return Ok(());
         }
@@ -9627,6 +9744,12 @@ impl App {
             KeyCode::Char('?') => {
                 self.help_open = true;
                 self.help_scroll = 0;
+                self.sync_status_panel_open = false;
+            }
+            KeyCode::Char('S') => {
+                if self.todoist_sync.is_some() {
+                    self.sync_status_panel_open = !self.sync_status_panel_open;
+                }
             }
             KeyCode::Char('3') => {
                 self.focused_panel = PanelFocus::Navigation;
@@ -10260,6 +10383,9 @@ impl App {
             return;
         };
         let provider = sync.provider.clone();
+        if let Some(sync) = self.todoist_sync.as_mut() {
+            sync.is_running = true;
+        }
         let sync_result = provider.sync(&self.database.sync_repository(), trigger);
 
         match sync_result {
@@ -10272,9 +10398,16 @@ impl App {
                     "todoist sync cycle failed"
                 );
                 if let Some(sync) = self.todoist_sync.as_mut() {
+                    sync.is_running = false;
                     sync.latest_status_line =
                         format!("sync error [{}]: {}", trigger.as_str(), error);
-                    sync.banner_until = Some(now + ChronoDuration::seconds(10));
+                    sync.last_status = "error".to_string();
+                    sync.last_trigger = Some(trigger);
+                    sync.last_error = Some(error.to_string());
+                    sync.last_sync_at = Some(now);
+                    sync.pending_outbox = sync.last_seen_outbox_len;
+                    sync.delivered_outbox = 0;
+                    sync.failed_outbox = 0;
                     let min_interval = Duration::from_secs(
                         self.config
                             .integrations
@@ -10335,15 +10468,21 @@ impl App {
                 report.delivered_outbox
             )
         };
+        sync.last_status = report.status.clone();
+        sync.last_trigger = Some(report.trigger);
+        sync.last_error = report.last_error.clone();
+        sync.last_sync_at = Some(now);
+        sync.pending_outbox = report.pending_outbox;
+        sync.delivered_outbox = report.delivered_outbox;
+        sync.failed_outbox = report.failed_outbox;
+        sync.is_running = false;
 
         if report.last_error.is_some() {
-            sync.banner_until = Some(now + ChronoDuration::seconds(8));
             sync.poll_interval =
                 (sync.poll_interval.saturating_mul(2)).clamp(min_interval, max_interval);
         } else if report.pending_outbox == 0 {
             sync.poll_interval =
                 (sync.poll_interval.saturating_mul(2)).clamp(min_interval, max_interval);
-            sync.banner_until = None;
         } else {
             sync.poll_interval = min_interval;
         }

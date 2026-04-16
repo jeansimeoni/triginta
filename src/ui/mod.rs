@@ -24,8 +24,9 @@ use crate::{
         ProjectDeleteConfirmationView, ProjectEditorView, ProjectSortPopupView, ProjectTreeRowView,
         RightPanelTab, ScreenData, SectionDeleteConfirmationView, SectionEditorView,
         SessionNoteEditorView, SessionNoteViewerView, ShortcutSection, ShortcutTip, SidebarTab,
-        TagDeleteConfirmationView, TagEditorView, TagListRowView, TagSortPopupView, TaskEditorView,
-        TaskInputView, TaskListRowView, TaskSearchView, TaskSortPopupView, TaskView, TimerPhase,
+        SyncIndicatorStateView, SyncStatusPanelView, TagDeleteConfirmationView, TagEditorView,
+        TagListRowView, TagSortPopupView, TaskEditorView, TaskInputView, TaskListRowView,
+        TaskSearchView, TaskSortPopupView, TaskView, TimerPhase,
     },
     domain::{
         DayHistorySummary, FilterColor, SessionEntry, SessionKind, SessionOutcome, TagColor, Task,
@@ -1901,11 +1902,25 @@ fn render_status_bar(
     )]);
     frame.render_widget(Paragraph::new(left), inner);
 
+    let sync_indicator = app.sync_indicator_view();
+    let sync_label = sync_indicator.as_ref().map(|status| {
+        format!(
+            "{} {}",
+            sync_indicator_glyph(status.state, symbols),
+            status.integration_name
+        )
+    });
     let right_width = app
         .donate_label()
         .width()
         .saturating_add(app.app_version().width())
-        .saturating_add(5) as u16;
+        .saturating_add(5)
+        .saturating_add(
+            sync_label
+                .as_ref()
+                .map(|label| label.width().saturating_add(2))
+                .unwrap_or(0),
+        ) as u16;
     let left_width = app.app_name().width() as u16;
     let gutter = 2u16;
 
@@ -1918,12 +1933,29 @@ fn render_status_bar(
         inner.width.saturating_sub(right_x - inner.x),
         1,
     );
-    let right = Line::from(vec![
-        Span::styled(app.donate_label(), Style::default().fg(palette.accent)),
-        Span::raw("  "),
-        Span::styled(app.app_version(), Style::default().fg(palette.subtle_text)),
-    ])
-    .right_aligned();
+    let mut right_spans = Vec::new();
+    if let Some(status) = sync_indicator {
+        right_spans.push(Span::styled(
+            sync_indicator_glyph(status.state, symbols),
+            sync_indicator_style(status.state, palette),
+        ));
+        right_spans.push(Span::raw(" "));
+        right_spans.push(Span::styled(
+            status.integration_name,
+            Style::default().fg(palette.subtle_text),
+        ));
+        right_spans.push(Span::raw("  "));
+    }
+    right_spans.push(Span::styled(
+        app.donate_label(),
+        Style::default().fg(palette.accent),
+    ));
+    right_spans.push(Span::raw("  "));
+    right_spans.push(Span::styled(
+        app.app_version(),
+        Style::default().fg(palette.subtle_text),
+    ));
+    let right = Line::from(right_spans).right_aligned();
     frame.render_widget(Paragraph::new(right), right_area);
 
     let center_x = inner.x.saturating_add(left_width.saturating_add(gutter));
@@ -1972,17 +2004,6 @@ fn render_status_bar(
         return;
     }
 
-    if let Some(sync_status) = app.sync_status_line() {
-        frame.render_widget(
-            Paragraph::new(
-                Line::from(ellipsize_end(sync_status, center_width as usize)).centered(),
-            )
-            .style(Style::default().fg(palette.subtle_text)),
-            center_area,
-        );
-        return;
-    }
-
     let center_text = footer_shortcuts_line(app, symbols, center_width as usize);
     if !center_text.is_empty() {
         frame.render_widget(
@@ -1990,6 +2011,30 @@ fn render_status_bar(
                 .style(Style::default().fg(palette.subtle_text)),
             center_area,
         );
+    }
+}
+
+fn sync_indicator_glyph(state: SyncIndicatorStateView, symbols: Symbols) -> &'static str {
+    if symbols.is_ascii() {
+        return match state {
+            SyncIndicatorStateView::Connected => "o",
+            SyncIndicatorStateView::Running => "~",
+            SyncIndicatorStateView::Error => "!",
+        };
+    }
+
+    match state {
+        SyncIndicatorStateView::Connected => symbols.done,
+        SyncIndicatorStateView::Running => symbols.in_progress,
+        SyncIndicatorStateView::Error => symbols.voided,
+    }
+}
+
+fn sync_indicator_style(state: SyncIndicatorStateView, palette: ThemePalette) -> Style {
+    match state {
+        SyncIndicatorStateView::Connected => Style::default().fg(palette.success),
+        SyncIndicatorStateView::Running => Style::default().fg(palette.accent),
+        SyncIndicatorStateView::Error => Style::default().fg(palette.error),
     }
 }
 
@@ -2704,6 +2749,11 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
         return;
     }
 
+    if let Some(sync_panel) = app.sync_status_panel_view() {
+        render_sync_status_panel(frame, &sync_panel, palette);
+        return;
+    }
+
     if let Some(sort_popup) = app.project_sort_popup_view() {
         let anchor = project_sort_popup_anchor(frame.area());
         render_project_sort_popup(frame, &sort_popup, anchor, symbols, palette);
@@ -2906,6 +2956,115 @@ fn render_help_dialog(frame: &mut Frame<'_>, app: &App, palette: ThemePalette) {
             .thumb_style(Style::default().fg(palette.subtle_text));
         frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
     }
+}
+
+fn render_sync_status_panel(
+    frame: &mut Frame<'_>,
+    panel: &SyncStatusPanelView,
+    palette: ThemePalette,
+) {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Integration: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                panel.integration_name,
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Status: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(panel.status.as_str(), Style::default().fg(palette.text)),
+        ]),
+        Line::from(vec![
+            Span::styled("Trigger: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(panel.trigger.as_str(), Style::default().fg(palette.text)),
+        ]),
+        Line::from(vec![
+            Span::styled("Outbox: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                format!(
+                    "pending={} delivered={} failed={}",
+                    panel.pending_outbox, panel.delivered_outbox, panel.failed_outbox
+                ),
+                Style::default().fg(palette.text),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Last Sync: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                panel.last_sync_at.as_deref().unwrap_or("n/a"),
+                Style::default().fg(palette.text),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Next Poll In: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                panel.next_poll_in.as_str(),
+                Style::default().fg(palette.text),
+            ),
+            Span::styled("  interval=", Style::default().fg(palette.subtle_text)),
+            Span::styled(
+                panel.poll_interval.as_str(),
+                Style::default().fg(palette.text),
+            ),
+        ]),
+    ];
+    if let Some(pending_push_in) = panel.pending_push_in.as_ref() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Pending Push In: ",
+                Style::default().fg(palette.subtle_text),
+            ),
+            Span::styled(pending_push_in.as_str(), Style::default().fg(palette.text)),
+        ]));
+    }
+    if panel.dry_run {
+        lines.push(Line::from(vec![
+            Span::styled("Mode: ", Style::default().fg(palette.subtle_text)),
+            Span::styled("dry-run", Style::default().fg(palette.accent)),
+        ]));
+    }
+    if let Some(last_error) = panel.last_error.as_ref() {
+        lines.push(Line::from(vec![
+            Span::styled("Last Error: ", Style::default().fg(palette.error)),
+            Span::styled(last_error.as_str(), Style::default().fg(palette.error)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Summary: ", Style::default().fg(palette.subtle_text)),
+        Span::styled(
+            panel.latest_summary.as_str(),
+            Style::default().fg(palette.text),
+        ),
+    ]));
+
+    let content_width = lines.iter().map(Line::width).max().unwrap_or(32) + 4;
+    let width = (content_width as u16)
+        .min(frame.area().width.saturating_sub(4))
+        .max(52);
+    let height = (lines.len() as u16)
+        .saturating_add(2)
+        .min(frame.area().height.saturating_sub(2));
+    let area = centered_rect(frame.area(), width, height);
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            "Sync Status",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from("Esc or Shift+S closes").right_aligned())
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent));
+    let popup = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(popup, area);
 }
 
 fn render_session_note_editor_popup(
@@ -3170,6 +3329,10 @@ const STATUS_BAR_GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "?",
         description: "help",
+    },
+    ShortcutTip {
+        keys: "Shift+S",
+        description: "sync",
     },
     ShortcutTip {
         keys: "q",
