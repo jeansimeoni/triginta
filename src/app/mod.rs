@@ -1529,7 +1529,7 @@ const TASKS_SHORTCUTS: &[ShortcutTip] = &[
     },
     ShortcutTip {
         keys: "o/f",
-        description: "sort/filter",
+        description: "sort/hide done",
     },
     ShortcutTip {
         keys: "=/-",
@@ -14582,6 +14582,19 @@ mod tests {
             .expect("help should close");
         assert!(!app.is_help_open());
         assert_eq!(app.help_scroll(), 0);
+    }
+
+    #[test]
+    fn tasks_shortcuts_describe_hide_completed_toggle() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+        let tasks_shortcuts = app.focused_panel_shortcuts();
+        let tip = tasks_shortcuts
+            .iter()
+            .find(|tip| tip.keys == "o/f")
+            .expect("tasks shortcuts should include o/f");
+        assert_eq!(tip.description, "sort/hide done");
     }
 
     #[test]

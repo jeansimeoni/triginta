@@ -2,25 +2,28 @@
 
 Triginta is a local-first Rust TUI for Pomodoro tracking and task management.
 
-The application is designed to stay fully usable offline. SQLite is the source of truth, and any future Todoist sync work is intended to sit behind an explicit integration boundary instead of driving core app behavior.
+The application is designed to stay fully usable offline. SQLite is the source
+of truth, and Todoist sync is being built behind an explicit integration
+boundary instead of driving core app behavior.
 
 ## Status
 
-The project is currently an early vertical slice. It already includes:
+Current implementation includes:
 
-- A `ratatui` + `crossterm` terminal shell
-- Screen navigation for timer, tasks, and history views
-- SQLite bootstrap and schema initialization
-- Empty-state handling for a first run with no data
-- A placeholder Todoist integration boundary
-- Unit and bootstrap tests around app state and storage initialization
+- `ratatui` + `crossterm` TUI with multi-panel navigation
+- Working Pomodoro timer with focus/break/session history flows
+- Local task management with projects, sections, tags, filters, and subtasks
+- SQLite bootstrap with first-run empty-state behavior
+- Todoist sync foundations:
+  - provider boundary and startup sync hook
+  - local sync state and outbox tables
+  - local mutation tracking for syncable entities
+  - Todoist token configuration via env var or strict command execution
+- Unit and bootstrap tests around app state, storage, and configuration
 
-What is not implemented yet:
+Still in progress:
 
-- The actual Pomodoro timer engine
-- Task creation and editing flows
-- History recording from real sessions
-- Live Todoist synchronization
+- Live Todoist pull/push with conflict resolution against the remote API
 
 ## Tech Stack
 
@@ -91,7 +94,7 @@ Launch the app with:
 mise exec -- cargo run
 ```
 
-Current key bindings:
+Core key bindings:
 
 - `Tab`, `l`, or `Right Arrow`: next right-side tab
 - `Shift+Tab`, `h`, or `Left Arrow`: previous right-side tab
@@ -142,7 +145,7 @@ This is useful for local development and for keeping test data isolated from you
 ## Configuration
 
 Triginta uses a single application configuration file with sectioned settings
-such as `ui`, `timer`, and `stats`.
+such as `ui`, `timer`, `stats`, and `integrations.todoist`.
 
 Supported formats:
 
@@ -201,7 +204,7 @@ mise exec -- cargo test
 - The repository is intentionally a single Cargo package for now.
 - SQLite remains the local source of truth.
 - Empty-state behavior is intentional and should continue to work on a fresh database.
-- Todoist integration is planned, but should remain decoupled from core app logic.
+- Todoist sync foundations are implemented, and remote sync should remain decoupled from core app logic.
 
 ## License
 

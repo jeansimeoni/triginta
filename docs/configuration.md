@@ -265,6 +265,12 @@ uses trimmed stdout as the token. Configure:
 - `token_command.args`
 - `token_command.timeout_ms`
 
+Current behavior note:
+
+- `sync_on_startup = true` currently runs provider bootstrap/diagnostic sync
+  work (including auth/token resolution and sync-state updates), but live remote
+  pull/push with Todoist is still under implementation.
+
 TOML command example (for SOPS-style workflows):
 
 ```toml
