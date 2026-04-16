@@ -9610,18 +9610,39 @@ impl App {
             KeyCode::Char(key) if PanelFocus::from_shortcut(key).is_some() => {
                 self.focused_panel =
                     PanelFocus::from_shortcut(key).expect("focus shortcut checked");
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks
+                {
+                    self.sync_task_selection();
+                }
             }
             KeyCode::Tab => {
                 self.focused_panel = self.focused_panel.next();
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks
+                {
+                    self.sync_task_selection();
+                }
             }
             KeyCode::BackTab => {
                 self.focused_panel = self.focused_panel.previous();
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks
+                {
+                    self.sync_task_selection();
+                }
             }
             KeyCode::Char('l') | KeyCode::Right if self.focused_panel == PanelFocus::RightPane => {
                 self.active_right_panel_tab = self.active_right_panel_tab.next();
+                if self.active_right_panel_tab == RightPanelTab::Tasks {
+                    self.sync_task_selection();
+                }
             }
             KeyCode::Char('h') | KeyCode::Left if self.focused_panel == PanelFocus::RightPane => {
                 self.active_right_panel_tab = self.active_right_panel_tab.previous();
+                if self.active_right_panel_tab == RightPanelTab::Tasks {
+                    self.sync_task_selection();
+                }
             }
             KeyCode::Char('l') | KeyCode::Right if self.focused_panel == PanelFocus::Navigation => {
                 self.active_sidebar_tab = self.active_sidebar_tab.next();
@@ -9768,6 +9789,7 @@ impl App {
                 }
                 self.focused_panel = PanelFocus::RightPane;
                 self.active_right_panel_tab = RightPanelTab::Tasks;
+                self.sync_task_selection();
             }
             KeyCode::Char('C')
                 if self.focused_panel == PanelFocus::Navigation
@@ -10962,6 +10984,58 @@ mod tests {
         assert_eq!(app.focused_panel(), PanelFocus::RightPane);
         assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
         assert_eq!(app.selected_project_id, Some(project.id));
+    }
+
+    #[test]
+    fn enter_to_task_list_restores_selection_when_missing() {
+        let mut app = test_app();
+        let inbox_id = app
+            .database
+            .project_repository()
+            .inbox_project_id()
+            .expect("inbox project should exist");
+        let task = app
+            .database
+            .task_repository()
+            .create("Selection recovery task", inbox_id, None, Local::now())
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.selected_task_id = None;
+        app.active_right_panel_tab = RightPanelTab::Statistics;
+
+        app.handle_key(crossterm::event::KeyCode::Char('3'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should open task list");
+
+        assert_eq!(app.focused_panel(), PanelFocus::RightPane);
+        assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
+        assert_eq!(app.selected_task_id, Some(task.id));
+    }
+
+    #[test]
+    fn switching_to_tasks_tab_syncs_selection_when_missing() {
+        let mut app = test_app();
+        let inbox_id = app
+            .database
+            .project_repository()
+            .inbox_project_id()
+            .expect("inbox project should exist");
+        let task = app
+            .database
+            .task_repository()
+            .create("Tab sync task", inbox_id, None, Local::now())
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.selected_task_id = None;
+        app.focused_panel = PanelFocus::RightPane;
+        app.active_right_panel_tab = RightPanelTab::Statistics;
+
+        app.handle_key(crossterm::event::KeyCode::Char('h'))
+            .expect("right pane tab should switch to tasks");
+
+        assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
+        assert_eq!(app.selected_task_id, Some(task.id));
     }
 
     #[test]
