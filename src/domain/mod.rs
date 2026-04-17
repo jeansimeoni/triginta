@@ -504,6 +504,7 @@ pub struct TaskDue {
     pub datetime: Option<DateTime<Utc>>,
     pub timezone: Option<String>,
     pub string: String,
+    pub due_lang: Option<String>,
     pub is_recurring: bool,
 }
 

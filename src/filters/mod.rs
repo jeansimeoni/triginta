@@ -669,6 +669,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "today".to_string(),
+                due_lang: None,
                 is_recurring: false,
             }),
         );

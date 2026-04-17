@@ -1,9 +1,12 @@
+mod locales;
+
 use chrono::{
     DateTime, Datelike, Days, Local, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
     Weekday,
 };
 
 use crate::domain::TaskDue;
+pub use locales::{NlpLocale, default_locale_priority, locale_priority_with_hint};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedTaskInput {
@@ -12,6 +15,10 @@ pub struct ParsedTaskInput {
 }
 
 pub fn parse_task_input(input: &str, reference_date: NaiveDate) -> ParsedTaskInput {
+    parse_task_input_internal(input, reference_date)
+}
+
+fn parse_task_input_internal(input: &str, reference_date: NaiveDate) -> ParsedTaskInput {
     let trimmed = input.trim();
     let Some((span, due)) = extract_due(trimmed, reference_date) else {
         return ParsedTaskInput {
@@ -28,7 +35,34 @@ pub fn parse_task_input(input: &str, reference_date: NaiveDate) -> ParsedTaskInp
 }
 
 pub fn parse_due_input(input: &str, reference_date: NaiveDate) -> Option<TaskDue> {
-    parse_task_input(format!("Placeholder {input}").as_str(), reference_date).due
+    parse_due_input_with_locales(input, reference_date, default_locale_priority().as_slice())
+}
+
+pub fn parse_due_input_with_locales(
+    input: &str,
+    reference_date: NaiveDate,
+    locales: &[NlpLocale],
+) -> Option<TaskDue> {
+    let requested = if locales.is_empty() {
+        default_locale_priority()
+    } else {
+        locales.to_vec()
+    };
+    let trimmed = input.trim();
+
+    for locale in requested {
+        let normalized = locales::normalize_due_input_for_locale(trimmed, locale);
+        if let Some(mut due) =
+            parse_task_input_internal(format!("Placeholder {normalized}").as_str(), reference_date)
+                .due
+        {
+            due.string = trimmed.to_string();
+            due.due_lang = Some(locale.code().to_string());
+            return Some(due);
+        }
+    }
+
+    None
 }
 
 pub fn parse_due_time_input(input: &str) -> Option<NaiveTime> {
@@ -36,6 +70,18 @@ pub fn parse_due_time_input(input: &str) -> Option<NaiveTime> {
 }
 
 pub fn next_recurring_due(current_due: &TaskDue, completed_at: DateTime<Local>) -> Option<TaskDue> {
+    next_recurring_due_with_locales(
+        current_due,
+        completed_at,
+        default_locale_priority().as_slice(),
+    )
+}
+
+pub fn next_recurring_due_with_locales(
+    current_due: &TaskDue,
+    completed_at: DateTime<Local>,
+    locales: &[NlpLocale],
+) -> Option<TaskDue> {
     if !current_due.is_recurring {
         return None;
     }
@@ -52,7 +98,8 @@ pub fn next_recurring_due(current_due: &TaskDue, completed_at: DateTime<Local>) 
     let mut reference_date = current_due.date.checked_add_days(Days::new(1))?;
 
     for _ in 0..366 {
-        let next_due = parse_due_input(current_due.string.as_str(), reference_date)?;
+        let next_due =
+            parse_due_input_with_locales(current_due.string.as_str(), reference_date, locales)?;
         if !next_due.is_recurring {
             return None;
         }
@@ -118,6 +165,7 @@ fn recurring_pattern_candidates(
     let mut matches = Vec::new();
     matches.extend(weekday_range_candidates(input, reference_date, lower));
     matches.extend(weekday_list_candidates(input, reference_date, lower));
+    matches.extend(monthly_day_of_month_candidates(input, reference_date, lower));
     matches.extend(monthly_ordinal_weekday_candidates(
         input,
         reference_date,
@@ -151,6 +199,7 @@ fn update_best_match(
                 datetime: None,
                 timezone: None,
                 string: input[start..end].trim().to_string(),
+                due_lang: None,
                 is_recurring: candidate.1.is_recurring,
             },
         );
@@ -275,6 +324,7 @@ fn relative_candidates(
                     datetime: None,
                     timezone: None,
                     string: input[words[index].1..words[index + 2].2].trim().to_string(),
+                    due_lang: None,
                     is_recurring: false,
                 },
             ));
@@ -297,6 +347,7 @@ fn relative_candidates(
                     datetime: None,
                     timezone: None,
                     string: input[words[index].1..words[index + 2].2].trim().to_string(),
+                    due_lang: None,
                     is_recurring: true,
                 },
             ));
@@ -318,6 +369,7 @@ fn relative_candidates(
                     datetime: None,
                     timezone: None,
                     string: input[words[index].1..words[index + 2].2].trim().to_string(),
+                    due_lang: None,
                     is_recurring: true,
                 },
             ));
@@ -348,6 +400,7 @@ fn iso_date_candidates(input: &str) -> Vec<((usize, usize), TaskDue)> {
                             datetime: None,
                             timezone: None,
                             string: candidate.to_string(),
+                            due_lang: None,
                             is_recurring: false,
                         },
                     ));
@@ -392,6 +445,7 @@ fn month_day_candidates(input: &str, reference_date: NaiveDate) -> Vec<((usize, 
                 datetime: None,
                 timezone: None,
                 string: input[start..end].trim().to_string(),
+                due_lang: None,
                 is_recurring: false,
             },
         ));
@@ -409,6 +463,7 @@ fn simple_due(phrase: impl Into<String>, date: NaiveDate, is_recurring: bool) ->
             datetime: None,
             timezone: None,
             string,
+            due_lang: None,
             is_recurring,
         },
     )
@@ -562,6 +617,7 @@ fn weekday_range_candidates(
                 datetime: None,
                 timezone: None,
                 string: input[start..end].trim().to_string(),
+                due_lang: None,
                 is_recurring: true,
             },
         ));
@@ -619,6 +675,7 @@ fn weekday_list_candidates(
                 datetime: None,
                 timezone: None,
                 string: input[words[index].1..end].trim().to_string(),
+                due_lang: None,
                 is_recurring: true,
             },
         ));
@@ -676,6 +733,48 @@ fn monthly_ordinal_weekday_candidates(
                 datetime: None,
                 timezone: None,
                 string: input[start..end].trim().to_string(),
+                due_lang: None,
+                is_recurring: true,
+            },
+        ));
+    }
+
+    matches
+}
+
+fn monthly_day_of_month_candidates(
+    input: &str,
+    reference_date: NaiveDate,
+    lower: &str,
+) -> Vec<((usize, usize), TaskDue)> {
+    let words = words_with_positions(lower);
+    let mut matches = Vec::new();
+
+    for index in 0..words.len().saturating_sub(2) {
+        if words[index].0 != "every" || words[index + 1].0 != "day" {
+            continue;
+        }
+        let Some(day) = words[index + 2].0.parse::<u32>().ok() else {
+            continue;
+        };
+        if day == 0 || day > 31 {
+            continue;
+        }
+        let Some(due_date) = next_month_day_for_recurrence(reference_date, day) else {
+            continue;
+        };
+        let start = words[index].1;
+        let end = words[index + 2].2;
+        matches.push(with_time_suffix(
+            input,
+            start,
+            end,
+            TaskDue {
+                date: due_date,
+                datetime: None,
+                timezone: None,
+                string: input[start..end].trim().to_string(),
+                due_lang: None,
                 is_recurring: true,
             },
         ));
@@ -729,7 +828,7 @@ fn words_with_positions(input: &str) -> Vec<(&str, usize, usize)> {
     let mut current_start = None;
 
     for (index, character) in input.char_indices() {
-        if character.is_ascii_alphanumeric() {
+        if character.is_alphanumeric() {
             if current_start.is_none() {
                 current_start = Some(index);
             }
@@ -802,6 +901,15 @@ fn month_day_date(reference_date: NaiveDate, month: u32, day: u32) -> Option<Nai
         return Some(this_year);
     }
     NaiveDate::from_ymd_opt(reference_date.year() + 1, month, day)
+}
+
+fn next_month_day_for_recurrence(reference_date: NaiveDate, day: u32) -> Option<NaiveDate> {
+    let this_month = NaiveDate::from_ymd_opt(reference_date.year(), reference_date.month(), day);
+    if let Some(date) = this_month && date >= reference_date {
+        return Some(date);
+    }
+    let next_month = reference_date.checked_add_months(Months::new(1))?;
+    NaiveDate::from_ymd_opt(next_month.year(), next_month.month(), day)
 }
 
 fn next_weekday(reference_date: NaiveDate, weekday: Weekday) -> NaiveDate {
@@ -1022,7 +1130,10 @@ mod tests {
 
     use crate::domain::TaskDue;
 
-    use super::{local_naive_to_utc, next_recurring_due, parse_task_input};
+    use super::{
+        NlpLocale, locale_priority_with_hint, local_naive_to_utc, next_recurring_due,
+        next_recurring_due_with_locales, parse_due_input_with_locales, parse_task_input,
+    };
 
     #[test]
     fn parses_tomorrow_due_phrase_and_cleans_title() {
@@ -1053,6 +1164,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "in 3 days".to_string(),
+                due_lang: None,
                 is_recurring: false,
             })
         );
@@ -1071,6 +1183,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "every monday".to_string(),
+                due_lang: None,
                 is_recurring: true,
             })
         );
@@ -1088,6 +1201,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "every monday".to_string(),
+                due_lang: None,
                 is_recurring: true,
             })
         );
@@ -1108,6 +1222,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "apr 10".to_string(),
+                due_lang: None,
                 is_recurring: false,
             })
         );
@@ -1162,6 +1277,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "every day".to_string(),
+                due_lang: None,
                 is_recurring: true,
             })
         );
@@ -1180,6 +1296,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "every other day".to_string(),
+                due_lang: None,
                 is_recurring: true,
             })
         );
@@ -1198,6 +1315,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "monday through thursday".to_string(),
+                due_lang: None,
                 is_recurring: true,
             })
         );
@@ -1219,6 +1337,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "every monday, tuesday and friday".to_string(),
+                due_lang: None,
                 is_recurring: true,
             })
         );
@@ -1237,6 +1356,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "every week day".to_string(),
+                due_lang: None,
                 is_recurring: true,
             })
         );
@@ -1258,6 +1378,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "the third friday of the month".to_string(),
+                due_lang: None,
                 is_recurring: true,
             })
         );
@@ -1287,6 +1408,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "tomorrow".to_string(),
+                due_lang: None,
                 is_recurring: false,
             })
         );
@@ -1317,6 +1439,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "next week".to_string(),
+                due_lang: None,
                 is_recurring: false,
             })
         );
@@ -1340,6 +1463,7 @@ mod tests {
                 )),
                 timezone: None,
                 string: "tomorrow at 3pm".to_string(),
+                due_lang: None,
                 is_recurring: false,
             })
         );
@@ -1363,6 +1487,7 @@ mod tests {
                 )),
                 timezone: None,
                 string: "fri 14:00".to_string(),
+                due_lang: None,
                 is_recurring: false,
             })
         );
@@ -1383,6 +1508,7 @@ mod tests {
                 )),
                 timezone: None,
                 string: "every day at 9am".to_string(),
+                due_lang: None,
                 is_recurring: true,
             })
         );
@@ -1406,6 +1532,7 @@ mod tests {
                 )),
                 timezone: None,
                 string: "tomorrow at noon".to_string(),
+                due_lang: None,
                 is_recurring: false,
             })
         );
@@ -1429,6 +1556,7 @@ mod tests {
                 )),
                 timezone: None,
                 string: "tomorrow at midnight".to_string(),
+                due_lang: None,
                 is_recurring: false,
             })
         );
@@ -1452,6 +1580,7 @@ mod tests {
             datetime: None,
             timezone: None,
             string: "every day".to_string(),
+            due_lang: None,
             is_recurring: true,
         };
 
@@ -1471,6 +1600,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "every day".to_string(),
+                due_lang: Some("en".to_string()),
                 is_recurring: true,
             }
         );
@@ -1488,6 +1618,7 @@ mod tests {
             )),
             timezone: None,
             string: "every friday at 9am".to_string(),
+            due_lang: None,
             is_recurring: true,
         };
 
@@ -1512,8 +1643,74 @@ mod tests {
                 )),
                 timezone: None,
                 string: "every friday at 9am".to_string(),
+                due_lang: Some("en".to_string()),
                 is_recurring: true,
             }
+        );
+    }
+
+    #[test]
+    fn parses_pt_br_recurring_phrase_with_locale_priority() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 9).expect("valid date");
+        let due = parse_due_input_with_locales("toda semana", reference_date, &[NlpLocale::PtBr])
+            .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.string, "toda semana");
+    }
+
+    #[test]
+    fn parses_es_relative_phrase_with_locale_priority() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 9).expect("valid date");
+        let due = parse_due_input_with_locales("cada 2 semanas", reference_date, &[NlpLocale::Es])
+            .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(
+            due.date,
+            NaiveDate::from_ymd_opt(2026, 4, 23).expect("valid date")
+        );
+    }
+
+    #[test]
+    fn parses_monthly_day_recurrence_normalized_from_pt_br() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales("todo dia 25", reference_date, &[NlpLocale::PtBr])
+            .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(
+            due.date,
+            NaiveDate::from_ymd_opt(2026, 4, 25).expect("valid date")
+        );
+    }
+
+    #[test]
+    fn locale_priority_places_hint_first_and_english_next() {
+        let locales = locale_priority_with_hint(Some("pt-BR"));
+        assert_eq!(locales[0], NlpLocale::PtBr);
+        assert_eq!(locales[1], NlpLocale::En);
+    }
+
+    #[test]
+    fn next_recurring_due_resolves_with_pt_br_phrase() {
+        let current_due = TaskDue {
+            date: NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date"),
+            datetime: None,
+            timezone: None,
+            string: "todo dia".to_string(),
+            due_lang: None,
+            is_recurring: true,
+        };
+        let next_due = next_recurring_due_with_locales(
+            &current_due,
+            Local
+                .with_ymd_and_hms(2026, 4, 17, 12, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            &[NlpLocale::PtBr, NlpLocale::En],
+        )
+        .expect("next due should resolve");
+        assert_eq!(
+            next_due.date,
+            NaiveDate::from_ymd_opt(2026, 4, 18).expect("valid date")
         );
     }
 }

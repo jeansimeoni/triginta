@@ -21,6 +21,7 @@ use crate::{
         SyncOutboxEntry, SyncProjectSnapshot, SyncRepository, SyncSectionSnapshot, SyncStateRecord,
         SyncTagSnapshot, SyncTaskSnapshot,
     },
+    task_nlp::{NlpLocale, parse_due_input_with_locales},
 };
 
 const TODOIST_API_BASE: &str = "https://api.todoist.com/api/v1";
@@ -52,6 +53,7 @@ pub struct SyncReport {
     pub delivered_outbox: usize,
     pub failed_outbox: usize,
     pub last_error: Option<String>,
+    pub preferred_language: Option<String>,
 }
 
 pub trait TaskSyncProvider {
@@ -98,6 +100,48 @@ impl TodoistSyncProvider {
             "task" => 4,
             _ => 5,
         }
+    }
+
+    fn detect_due_lang(due_string: &str) -> Option<&'static str> {
+        let reference_date = Utc::now().date_naive();
+        for locale in [NlpLocale::En, NlpLocale::PtBr, NlpLocale::Es] {
+            if parse_due_input_with_locales(due_string, reference_date, &[locale]).is_some() {
+                return Some(match locale {
+                    NlpLocale::En => "en",
+                    NlpLocale::PtBr => "pt",
+                    NlpLocale::Es => "es",
+                });
+            }
+        }
+        None
+    }
+
+    fn normalize_due_lang_for_todoist(raw: &str) -> Option<&'static str> {
+        let value = raw.trim().to_ascii_lowercase();
+        if value.is_empty() {
+            return None;
+        }
+        if value == "en" || value.starts_with("en-") || value == "english" {
+            return Some("en");
+        }
+        if value == "pt"
+            || value.starts_with("pt-")
+            || value.starts_with("pt_")
+            || value.contains("portuguese")
+            || value.contains("portugues")
+        {
+            return Some("pt");
+        }
+        if value == "es"
+            || value.starts_with("es-")
+            || value.starts_with("es_")
+            || value.contains("spanish")
+            || value.contains("espanol")
+            || value.contains("espanhol")
+        {
+            return Some("es");
+        }
+        None
     }
 
     pub fn new(config: TodoistIntegrationConfig, dry_run: bool) -> Self {
@@ -408,6 +452,14 @@ impl TodoistSyncProvider {
         }
         if let Some(due_string) = task.due_string.as_ref() {
             body.insert("due_string".to_string(), Value::String(due_string.clone()));
+            if let Some(due_lang) = task
+                .due_lang
+                .as_deref()
+                .and_then(Self::normalize_due_lang_for_todoist)
+                .or_else(|| Self::detect_due_lang(due_string.as_str()))
+            {
+                body.insert("due_lang".to_string(), Value::String(due_lang.to_string()));
+            }
         } else if let Some(due_datetime_utc) = task.due_datetime_utc.as_ref() {
             body.insert(
                 "due_datetime".to_string(),
@@ -597,6 +649,10 @@ impl TodoistSyncProvider {
         sync_token: &str,
     ) -> Result<DownstreamApplyStats> {
         let sync_response = client.sync_resources(sync_token)?;
+        let mut preferred_language = sync_response
+            .user
+            .as_ref()
+            .and_then(|user| user.lang.as_ref().cloned());
         let label_name_by_id = sync_response
             .labels
             .iter()
@@ -688,6 +744,7 @@ impl TodoistSyncProvider {
                     .and_then(|due| due.datetime.as_ref().cloned()),
                 due_timezone: task.due.as_ref().and_then(|due| due.timezone.clone()),
                 due_string: task.due.as_ref().and_then(|due| due.string.clone()),
+                due_lang: task.due.as_ref().and_then(|due| due.lang.clone()),
                 due_is_recurring: task
                     .due
                     .as_ref()
@@ -704,9 +761,13 @@ impl TodoistSyncProvider {
             let outcome =
                 sync_repository.apply_remote_task(&remote, synced_at_utc, self.dry_run)?;
             stats.record("task", remote.todoist_id.as_str(), outcome, self.dry_run);
+            if preferred_language.is_none() {
+                preferred_language = task.due.as_ref().and_then(|due| due.lang.clone());
+            }
         }
 
         stats.next_sync_token = Some(sync_response.sync_token);
+        stats.preferred_language = preferred_language;
         Ok(stats)
     }
 }
@@ -717,6 +778,7 @@ struct DownstreamApplyStats {
     updated: usize,
     skipped: usize,
     next_sync_token: Option<String>,
+    preferred_language: Option<String>,
 }
 
 impl DownstreamApplyStats {
@@ -817,6 +879,12 @@ struct TodoistDue {
     timezone: Option<String>,
     string: Option<String>,
     is_recurring: Option<bool>,
+    lang: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TodoistUser {
+    lang: Option<String>,
 }
 
 impl TaskSyncProvider for TodoistSyncProvider {
@@ -843,6 +911,7 @@ impl TaskSyncProvider for TodoistSyncProvider {
                 delivered_outbox: 0,
                 failed_outbox: 0,
                 last_error: None,
+                preferred_language: None,
             });
         }
 
@@ -911,7 +980,7 @@ impl TaskSyncProvider for TodoistSyncProvider {
             updated_at: now_rfc3339,
         })?;
 
-        if let Some(stats) = downstream_stats {
+        if let Some(ref stats) = downstream_stats {
             info!(
                 target: "integrations.todoist",
                 created = stats.created,
@@ -937,6 +1006,9 @@ impl TaskSyncProvider for TodoistSyncProvider {
             delivered_outbox: delivered,
             failed_outbox: failed,
             last_error: combined_error,
+            preferred_language: downstream_stats
+                .as_ref()
+                .and_then(|stats| stats.preferred_language.clone()),
         })
     }
 }
@@ -998,7 +1070,7 @@ impl TodoistRestClient {
                 ("sync_token", sync_token),
                 (
                     "resource_types",
-                    r#"["projects","sections","labels","filters","items"]"#,
+                    r#"["user","projects","sections","labels","filters","items"]"#,
                 ),
             ])
             .map_err(map_ureq_error)?;
@@ -1011,6 +1083,8 @@ impl TodoistRestClient {
 #[derive(Debug, Clone, serde::Deserialize)]
 struct TodoistSyncResponse {
     sync_token: String,
+    #[serde(default)]
+    user: Option<TodoistUser>,
     #[serde(default)]
     projects: Vec<TodoistProject>,
     #[serde(default)]
@@ -1141,5 +1215,22 @@ mod tests {
         assert_eq!(TodoistSyncProvider::local_priority_to_todoist(3), 2);
         assert_eq!(TodoistSyncProvider::local_priority_to_todoist(2), 3);
         assert_eq!(TodoistSyncProvider::local_priority_to_todoist(1), 4);
+    }
+
+    #[test]
+    fn detect_due_lang_prefers_english_for_local_mode_defaults() {
+        assert_eq!(
+            TodoistSyncProvider::detect_due_lang("every monday at 9am"),
+            Some("en")
+        );
+    }
+
+    #[test]
+    fn detect_due_lang_supports_pt_br_and_es_recurrence_strings() {
+        assert_eq!(TodoistSyncProvider::detect_due_lang("todo dia 25"), Some("pt"));
+        assert_eq!(
+            TodoistSyncProvider::detect_due_lang("todos los dias"),
+            Some("es")
+        );
     }
 }

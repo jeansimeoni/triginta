@@ -278,6 +278,10 @@ Current behavior note:
 
 - Startup/manual/poll cycles now run with adaptive scheduling, outbox retry
   metadata, and status reporting.
+- For tasks synced with `due_string`, Triginta now persists a companion
+  `due_lang` per task and sends both fields upstream, so Todoist recurrence
+  parsing is deterministic across localized inputs (for example `en`, `pt`,
+  `es`).
 - Outbound Todoist transport is wired through REST v2 for create/update/delete
   operations on projects, sections, tasks, tags (labels), and filters.
 - Downstream remote-to-local pull/merge is wired for projects, sections, tasks,

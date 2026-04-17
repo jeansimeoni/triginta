@@ -27,9 +27,12 @@ use crate::{
     integrations::{SyncReport, SyncTrigger, TaskSyncProvider, TodoistSyncProvider},
     storage::{
         Database, FilterRepository, PomodoroRepository, ProjectRepository, SectionRepository,
-        SyncRepository, TagRepository, TaskRepository,
+        SyncEntitySnapshot, SyncRepository, TagRepository, TaskRepository,
     },
-    task_nlp::{next_recurring_due, parse_due_input, parse_due_time_input, parse_task_input},
+    task_nlp::{
+        NlpLocale, locale_priority_with_hint, next_recurring_due_with_locales,
+        parse_due_input_with_locales, parse_due_time_input, parse_task_input,
+    },
     theme::ThemePalette,
     ui,
 };
@@ -1819,6 +1822,7 @@ const SORT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
 #[derive(Debug, Clone)]
 struct TodoistSyncUiState {
     provider: TodoistSyncProvider,
+    preferred_language: Option<String>,
     pending_push_at: Option<DateTime<Local>>,
     next_poll_at: DateTime<Local>,
     poll_interval: Duration,
@@ -1908,7 +1912,17 @@ impl App {
         let (without_project_tokens, project_id, section_id) =
             self.extract_task_project_reference(without_tag_tokens.as_str(), fallback_project_id);
         let (content, priority) = Self::extract_priority_reference(without_project_tokens.as_str());
-        let parsed = parse_task_input(content.as_str(), self.today());
+        let mut parsed = parse_task_input(content.as_str(), self.today());
+        if let Some(due) = parsed.due.as_mut()
+            && due.due_lang.is_none()
+        {
+            let locales = self.due_parse_locales();
+            if let Some(enriched) =
+                parse_due_input_with_locales(due.string.as_str(), self.today(), locales.as_slice())
+            {
+                due.due_lang = enriched.due_lang;
+            }
+        }
         ParsedTaskDraft {
             cleaned_title: parsed.cleaned_title,
             due: parsed.due,
@@ -1951,6 +1965,7 @@ impl App {
                     config.integrations.todoist.clone(),
                     debug_dry_run_sync_enabled(),
                 ),
+                preferred_language: None,
                 pending_push_at: None,
                 next_poll_at: Local::now(),
                 poll_interval: poll_min,
@@ -3785,8 +3800,31 @@ impl App {
         Local::now().date_naive()
     }
 
+    fn due_parse_locales(&self) -> Vec<NlpLocale> {
+        let todoist_language = self
+            .todoist_sync
+            .as_ref()
+            .and_then(|sync| sync.preferred_language.as_deref());
+        locale_priority_with_hint(todoist_language)
+    }
+
+    fn task_is_todoist_linked(&self, task_id: TaskId) -> bool {
+        self.database
+            .sync_repository()
+            .load_entity_snapshot("task", task_id.0)
+            .ok()
+            .flatten()
+            .is_some_and(|snapshot| {
+                matches!(
+                    snapshot,
+                    SyncEntitySnapshot::Task(ref task) if task.todoist_id.is_some()
+                )
+            })
+    }
+
     fn editor_due_preview(&self, editor: &TaskEditorState) -> Option<TaskDuePreviewView> {
-        Self::build_due_from_editor(editor, self.today())
+        let locales = self.due_parse_locales();
+        self.build_due_from_editor(editor, self.today(), locales.as_slice())
             .ok()
             .flatten()
             .map(|due| TaskDuePreviewView {
@@ -3798,8 +3836,10 @@ impl App {
     }
 
     fn build_due_from_editor(
+        &self,
         editor: &TaskEditorState,
         reference_date: NaiveDate,
+        locales: &[NlpLocale],
     ) -> Result<Option<crate::domain::TaskDue>> {
         let date_text = editor.due_date_input.trim();
         let time_text = editor.due_time_input.trim();
@@ -3809,30 +3849,48 @@ impl App {
             return Ok(None);
         }
 
+        let existing_due = editor.task_id.and_then(|task_id| {
+            self.screen_data
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .and_then(|task| task.due.clone())
+        });
+
         let recurring_due = if recurrence_text.is_empty() {
             None
         } else {
-            let due = parse_due_input(recurrence_text, reference_date)
+            parse_due_input_with_locales(recurrence_text, reference_date, locales)
                 .filter(|due| due.is_recurring)
-                .context("recurring pattern must use a Todoist-style recurring phrase")?;
-            Some(due)
+        };
+
+        let parsed_date_due = if date_text.is_empty() {
+            None
+        } else {
+            parse_due_input_with_locales(date_text, reference_date, locales)
         };
 
         let date = if date_text.is_empty() {
-            recurring_due
-                .as_ref()
-                .map(|due| due.date)
-                .context("due date is required when a due time is set")?
+            if let Some(due) = recurring_due.as_ref() {
+                due.date
+            } else if let Some(existing_due) = existing_due.as_ref().filter(|due| due.is_recurring) {
+                existing_due.date
+            } else {
+                anyhow::bail!("due date is required when a due time is set");
+            }
         } else {
             NaiveDate::parse_from_str(date_text, "%Y-%m-%d")
                 .ok()
-                .or_else(|| parse_due_input(date_text, reference_date).map(|due| due.date))
+                .or_else(|| parsed_date_due.as_ref().map(|due| due.date))
                 .with_context(|| format!("invalid due date: {date_text}"))?
         };
 
         let datetime = if time_text.is_empty() {
             if date_text.is_empty() {
-                recurring_due.as_ref().and_then(|due| due.datetime)
+                recurring_due
+                    .as_ref()
+                    .and_then(|due| due.datetime)
+                    .or_else(|| existing_due.as_ref().and_then(|due| due.datetime))
             } else {
                 None
             }
@@ -3845,7 +3903,10 @@ impl App {
         };
 
         let timezone = if time_text.is_empty() {
-            recurring_due.as_ref().and_then(|due| due.timezone.clone())
+            recurring_due
+                .as_ref()
+                .and_then(|due| due.timezone.clone())
+                .or_else(|| existing_due.as_ref().and_then(|due| due.timezone.clone()))
         } else {
             Self::local_timezone_name()
         };
@@ -3864,12 +3925,24 @@ impl App {
             date.format("%Y-%m-%d").to_string()
         };
 
+        let due_lang = if !recurrence_text.is_empty() {
+            recurring_due
+                .as_ref()
+                .and_then(|due| due.due_lang.clone())
+                .or_else(|| existing_due.as_ref().and_then(|due| due.due_lang.clone()))
+        } else if let Some(date_due) = parsed_date_due.as_ref() {
+            date_due.due_lang.clone()
+        } else {
+            existing_due.as_ref().and_then(|due| due.due_lang.clone())
+        };
+
         Ok(Some(crate::domain::TaskDue {
             date,
             datetime,
             timezone,
             string,
-            is_recurring: recurring_due.is_some(),
+            due_lang,
+            is_recurring: !recurrence_text.is_empty() || recurring_due.is_some(),
         }))
     }
 
@@ -3892,11 +3965,12 @@ impl App {
         editor.focused_field = field;
     }
 
-    fn open_editor_calendar(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+    fn open_editor_calendar(&self, editor: &mut TaskEditorState, reference_date: NaiveDate) {
+        let locales = self.due_parse_locales();
         let selected_date = NaiveDate::parse_from_str(editor.due_date_input.trim(), "%Y-%m-%d")
             .ok()
             .or_else(|| {
-                Self::build_due_from_editor(editor, reference_date)
+                self.build_due_from_editor(editor, reference_date, locales.as_slice())
                     .ok()
                     .flatten()
                     .map(|due| due.date)
@@ -5031,11 +5105,19 @@ impl App {
     }
 
     fn inbox_project_id(&self) -> ProjectId {
-        self.screen_data
+        if let Some(id) = self
+            .screen_data
             .projects
             .iter()
             .find(|project| project.is_inbox)
             .map(|project| project.id)
+        {
+            return id;
+        }
+
+        self.database
+            .project_repository()
+            .inbox_project_id()
             .expect("inbox project should exist")
     }
 
@@ -5461,7 +5543,7 @@ impl App {
         {
             editor.title_input.remove(editor.title_cursor);
         }
-        Self::after_editor_text_change(editor, reference_date);
+        self.after_editor_text_change(editor, reference_date);
         true
     }
 
@@ -5581,7 +5663,7 @@ impl App {
             .replace_range(start..end, format!("@{} ", tag_name).as_str());
         editor.title_cursor = (start + tag_name.len() + 2).min(editor.title_input.len());
         editor.suggestion_index = 0;
-        Self::after_editor_text_change(editor, now.date_naive());
+        self.after_editor_text_change(editor, now.date_naive());
         Ok(true)
     }
 
@@ -5617,7 +5699,7 @@ impl App {
             .replace_range(start..end, format!("{priority} ").as_str());
         editor.title_cursor = (start + priority.len() + 1).min(editor.title_input.len());
         editor.suggestion_index = 0;
-        Self::after_editor_text_change(editor, reference_date);
+        self.after_editor_text_change(editor, reference_date);
         true
     }
 
@@ -6457,6 +6539,7 @@ impl App {
     }
 
     fn insert_editor_char(
+        &self,
         editor: &mut TaskEditorState,
         character: char,
         reference_date: NaiveDate,
@@ -6464,17 +6547,21 @@ impl App {
         let (value, cursor) = Self::editor_value_mut(editor);
         value.insert(*cursor, character);
         *cursor += character.len_utf8();
-        Self::after_editor_text_change(editor, reference_date);
+        self.after_editor_text_change(editor, reference_date);
     }
 
-    fn insert_editor_newline(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+    fn insert_editor_newline(&self, editor: &mut TaskEditorState, reference_date: NaiveDate) {
         let (value, cursor) = Self::editor_value_mut(editor);
         value.insert(*cursor, '\n');
         *cursor += 1;
-        Self::after_editor_text_change(editor, reference_date);
+        self.after_editor_text_change(editor, reference_date);
     }
 
-    fn delete_editor_char_before_cursor(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+    fn delete_editor_char_before_cursor(
+        &self,
+        editor: &mut TaskEditorState,
+        reference_date: NaiveDate,
+    ) {
         let (value, cursor) = Self::editor_value_mut(editor);
         if *cursor == 0 {
             return;
@@ -6487,10 +6574,14 @@ impl App {
             .unwrap_or(0);
         value.drain(previous_index..*cursor);
         *cursor = previous_index;
-        Self::after_editor_text_change(editor, reference_date);
+        self.after_editor_text_change(editor, reference_date);
     }
 
-    fn delete_editor_char_at_cursor(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+    fn delete_editor_char_at_cursor(
+        &self,
+        editor: &mut TaskEditorState,
+        reference_date: NaiveDate,
+    ) {
         let (value, cursor) = Self::editor_value_mut(editor);
         if *cursor >= value.len() {
             return;
@@ -6502,10 +6593,10 @@ impl App {
             .map(|(offset, _)| *cursor + offset)
             .unwrap_or(value.len());
         value.drain(*cursor..next_index);
-        Self::after_editor_text_change(editor, reference_date);
+        self.after_editor_text_change(editor, reference_date);
     }
 
-    fn after_editor_text_change(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+    fn after_editor_text_change(&self, editor: &mut TaskEditorState, reference_date: NaiveDate) {
         match editor.focused_field {
             TaskEditorField::Title => {
                 Self::sync_editor_due_from_title(editor, reference_date);
@@ -6529,7 +6620,7 @@ impl App {
             }
             TaskEditorField::Recurrence => {
                 editor.due_from_title = false;
-                Self::sync_editor_due_from_recurrence(editor, reference_date);
+                self.sync_editor_due_from_recurrence(editor, reference_date);
             }
             TaskEditorField::Parent => {
                 editor.parent_task_id = None;
@@ -6803,15 +6894,17 @@ impl App {
         (cleaned, Some(query.to_string()))
     }
 
-    fn sync_editor_due_from_recurrence(editor: &mut TaskEditorState, reference_date: NaiveDate) {
+    fn sync_editor_due_from_recurrence(&self, editor: &mut TaskEditorState, reference_date: NaiveDate) {
         let recurrence = editor.recurrence_input.trim();
         if recurrence.is_empty() {
             editor.due_natural.clear();
             return;
         }
 
-        let parsed = parse_task_input(format!("Placeholder {recurrence}").as_str(), reference_date);
-        let Some(due) = parsed.due else {
+        let locales = self.due_parse_locales();
+        let Some(due) =
+            parse_due_input_with_locales(recurrence, reference_date, locales.as_slice())
+        else {
             return;
         };
         if !due.is_recurring {
@@ -6905,7 +6998,8 @@ impl App {
             return Ok(true);
         }
 
-        let due = match Self::build_due_from_editor(&editor, now.date_naive()) {
+        let locales = self.due_parse_locales();
+        let due = match self.build_due_from_editor(&editor, now.date_naive(), locales.as_slice()) {
             Ok(due) => due,
             Err(_) => {
                 self.task_editor = Some(editor);
@@ -7868,9 +7962,15 @@ impl App {
             .task_repository()
             .update_status(task.id, next_status, completed_at)?;
 
-        let next_recurring_task = if next_status == TaskStatus::Done {
+        let todoist_owns_recurrence =
+            self.config.integrations.todoist.enabled && self.task_is_todoist_linked(task.id);
+        let next_recurring_task = if next_status == TaskStatus::Done && !todoist_owns_recurrence {
             match task.due.as_ref() {
-                Some(due) if due.is_recurring => match next_recurring_due(due, now) {
+                Some(due) if due.is_recurring => match next_recurring_due_with_locales(
+                    due,
+                    now,
+                    locale_priority_with_hint(due.due_lang.as_deref()).as_slice(),
+                ) {
                     Some(next_due) => {
                         if self.has_existing_recurring_successor(
                             task.id,
@@ -9150,7 +9250,7 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if editor.focused_field == TaskEditorField::Description {
-                        Self::insert_editor_newline(&mut editor, now.date_naive());
+                        self.insert_editor_newline(&mut editor, now.date_naive());
                         self.task_editor = Some(editor);
                         return Ok(true);
                     }
@@ -9507,7 +9607,7 @@ impl App {
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(10) if editor.focused_field == TaskEditorField::DueDate => {
-                    Self::open_editor_calendar(&mut editor, now.date_naive());
+                    self.open_editor_calendar(&mut editor, now.date_naive());
                     self.task_editor = Some(editor);
                 }
                 KeyCode::F(11) => {
@@ -9531,17 +9631,17 @@ impl App {
                     self.task_editor = Some(editor);
                 }
                 KeyCode::Backspace => {
-                    Self::delete_editor_char_before_cursor(&mut editor, now.date_naive());
+                    self.delete_editor_char_before_cursor(&mut editor, now.date_naive());
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::Delete => {
-                    Self::delete_editor_char_at_cursor(&mut editor, now.date_naive());
+                    self.delete_editor_char_at_cursor(&mut editor, now.date_naive());
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
                 KeyCode::Char(character) => {
-                    Self::insert_editor_char(&mut editor, character, now.date_naive());
+                    self.insert_editor_char(&mut editor, character, now.date_naive());
                     editor.suggestion_index = 0;
                     self.task_editor = Some(editor);
                 }
@@ -10723,6 +10823,9 @@ impl App {
         sync.last_status = report.status.clone();
         sync.last_trigger = Some(report.trigger);
         sync.last_error = report.last_error.clone();
+        if report.preferred_language.is_some() {
+            sync.preferred_language = report.preferred_language.clone();
+        }
         sync.last_sync_at = Some(now);
         sync.pending_outbox = report.pending_outbox;
         sync.delivered_outbox = report.delivered_outbox;
@@ -11145,9 +11248,9 @@ mod tests {
     };
     use crate::storage::{
         Database, FilterRepository, ProjectRepository, SectionRepository, TagRepository,
-        TaskRepository,
+        SyncRepository, TaskRepository,
     };
-    use crate::task_nlp::parse_task_input;
+    use crate::task_nlp::{locale_priority_with_hint, parse_due_input_with_locales};
     use crate::theme::ThemePalette;
 
     use super::{
@@ -11188,6 +11291,34 @@ mod tests {
 
     fn test_app() -> App {
         let config = AppConfig::default();
+        let database = Database::open_in_memory().expect("in-memory database should open");
+        App::new(
+            ScreenData {
+                tasks: database
+                    .task_repository()
+                    .list_all()
+                    .expect("tasks should load"),
+                projects: database
+                    .project_repository()
+                    .list_all()
+                    .expect("projects should load"),
+                ..ScreenData::default()
+            },
+            config,
+            None,
+            ThemePalette::load(
+                &crate::config::AppPaths::from_data_dir(std::env::temp_dir())
+                    .expect("paths should resolve"),
+                "catppuccin-mocha",
+            )
+            .expect("built-in theme should load"),
+            database,
+        )
+    }
+
+    fn test_app_with_todoist_enabled() -> App {
+        let mut config = AppConfig::default();
+        config.integrations.todoist.enabled = true;
         let database = Database::open_in_memory().expect("in-memory database should open");
         App::new(
             ScreenData {
@@ -11792,6 +11923,7 @@ mod tests {
                 )),
                 timezone: None,
                 string: "tomorrow at 3pm".to_string(),
+                due_lang: Some("en".to_string()),
                 is_recurring: false,
             })
         );
@@ -11873,6 +12005,7 @@ mod tests {
                 string: (today + chrono::Days::new(1))
                     .format("%Y-%m-%d")
                     .to_string(),
+                due_lang: Some("en".to_string()),
                 is_recurring: false,
             })
         );
@@ -11881,9 +12014,12 @@ mod tests {
     #[test]
     fn task_editor_recurrence_field_updates_due_pattern() {
         let mut app = test_app();
-        let expected_due = parse_task_input("Placeholder every monday at 9am", app.today())
-            .due
-            .expect("recurrence should parse");
+        let expected_due = parse_due_input_with_locales(
+            "every monday at 9am",
+            app.today(),
+            locale_priority_with_hint(None).as_slice(),
+        )
+        .expect("recurrence should parse");
 
         app.handle_key(crossterm::event::KeyCode::Char('8'))
             .expect("focus should switch");
@@ -11946,7 +12082,8 @@ mod tests {
             calendar: None,
         };
 
-        App::sync_editor_due_from_recurrence(
+        let app = test_app();
+        app.sync_editor_due_from_recurrence(
             &mut editor,
             NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
         );
@@ -12001,6 +12138,7 @@ mod tests {
                 )),
                 timezone: None,
                 string: format!("{} at 15:00", expected_date.format("%Y-%m-%d")),
+                due_lang: Some("en".to_string()),
                 is_recurring: false,
             })
         );
@@ -12112,6 +12250,7 @@ mod tests {
                 datetime: None,
                 timezone: None,
                 string: "tomorrow".to_string(),
+                due_lang: Some("en".to_string()),
                 is_recurring: false,
             })
         );
@@ -12154,6 +12293,7 @@ mod tests {
                 )),
                 timezone: None,
                 string: "tomorrow at 3pm".to_string(),
+                due_lang: Some("en".to_string()),
                 is_recurring: false,
             })
         );
@@ -13113,6 +13253,7 @@ mod tests {
                     datetime: None,
                     timezone: None,
                     string: "today".to_string(),
+                    due_lang: None,
                     is_recurring: false,
                 }),
                 Local::now(),
@@ -13127,6 +13268,7 @@ mod tests {
                     datetime: None,
                     timezone: None,
                     string: "next week".to_string(),
+                    due_lang: None,
                     is_recurring: false,
                 }),
                 Local::now(),
@@ -14850,6 +14992,7 @@ mod tests {
                     datetime: None,
                     timezone: None,
                     string: "today".to_string(),
+                    due_lang: None,
                     is_recurring: false,
                 }),
                 now,
@@ -14864,6 +15007,7 @@ mod tests {
                     datetime: None,
                     timezone: None,
                     string: "today".to_string(),
+                    due_lang: None,
                     is_recurring: false,
                 }),
                 now,
@@ -15222,6 +15366,90 @@ mod tests {
                     && task.title == "Get this done"
                     && task.status == TaskStatus::Todo
                     && task.due.as_ref().is_some_and(|due| due.is_recurring))
+        );
+    }
+
+    #[test]
+    fn app_does_not_create_local_successor_for_todoist_linked_recurring_task() {
+        let mut app = test_app_with_todoist_enabled();
+        let now = Local::now();
+
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Send report every day".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+
+        let recurring_task_id = app.selected_task().expect("task should exist").id;
+        app.database
+            .sync_repository()
+            .set_entity_todoist_id(
+                "task",
+                recurring_task_id.0,
+                "todoist-task-1",
+                Utc::now().to_rfc3339().as_str(),
+            )
+            .expect("task should be linked to todoist");
+
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
+            .expect("status should toggle");
+
+        assert_eq!(app.screen_data.tasks.len(), 1);
+        assert_eq!(app.screen_data.tasks[0].status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn task_editor_submits_when_existing_recurrence_phrase_is_unparseable() {
+        let mut app = test_app();
+        let now = Local::now();
+        let due = TaskDue {
+            date: NaiveDate::from_ymd_opt(2026, 4, 25).expect("valid date"),
+            datetime: None,
+            timezone: None,
+            string: "cada quinzena".to_string(),
+            due_lang: None,
+            is_recurring: true,
+        };
+        let task = app
+            .database
+            .task_repository()
+            .create("Review invoice", app.inbox_project_id(), Some(&due), now)
+            .expect("task should be created");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.selected_task_id = Some(task.id);
+
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::Char('!'))
+            .expect("typing should succeed");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("edit should submit");
+
+        assert!(app.task_editor.is_none());
+        let updated = app
+            .screen_data
+            .tasks
+            .iter()
+            .find(|candidate| candidate.id == task.id)
+            .expect("updated task should exist");
+        assert_eq!(updated.title, "Review invoice!");
+        assert_eq!(
+            updated.due.as_ref().expect("due should exist").string,
+            "cada quinzena"
+        );
+        assert!(
+            updated
+                .due
+                .as_ref()
+                .expect("due should exist")
+                .is_recurring
         );
     }
 
