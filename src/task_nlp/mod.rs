@@ -2086,6 +2086,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_segunda_toda_a_semana_as_weekly_monday_recurrence_in_pt_br() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "segunda toda a semana",
+            reference_date,
+            &[NlpLocale::PtBr],
+        )
+        .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.string, "segunda toda a semana");
+        assert_eq!(
+            due.date,
+            NaiveDate::from_ymd_opt(2026, 4, 20).expect("valid date")
+        );
+    }
+
+    #[test]
     fn locale_priority_places_hint_first_and_english_next() {
         let locales = locale_priority_with_hint(Some("pt-BR"));
         assert_eq!(locales[0], NlpLocale::PtBr);

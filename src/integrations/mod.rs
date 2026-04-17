@@ -21,7 +21,7 @@ use crate::{
         SyncOutboxEntry, SyncProjectSnapshot, SyncRepository, SyncSectionSnapshot, SyncStateRecord,
         SyncTagSnapshot, SyncTaskSnapshot,
     },
-    task_nlp::{NlpLocale, parse_due_input_with_locales},
+    task_nlp::{NlpLocale, locale_priority_with_hint, parse_due_input_with_locales},
 };
 
 const TODOIST_API_BASE: &str = "https://api.todoist.com/api/v1";
@@ -175,6 +175,13 @@ impl TodoistSyncProvider {
             _ => return None,
         };
         Some((rewritten.to_string(), "en"))
+    }
+
+    fn due_string_is_recurring_for_todoist(due_string: &str, due_lang: Option<&str>) -> bool {
+        let reference_date = Utc::now().date_naive();
+        let locales = locale_priority_with_hint(due_lang);
+        parse_due_input_with_locales(due_string, reference_date, locales.as_slice())
+            .is_some_and(|due| due.is_recurring)
     }
 
     pub fn new(config: TodoistIntegrationConfig, dry_run: bool) -> Self {
@@ -484,23 +491,38 @@ impl TodoistSyncProvider {
             );
         }
         if let Some(due_string) = task.due_string.as_ref() {
-            let mut outgoing_due_string = due_string.clone();
-            let mut outgoing_due_lang = task
-                .due_lang
-                .as_deref()
-                .and_then(Self::normalize_due_lang_for_todoist)
-                .or_else(|| Self::detect_due_lang(due_string.as_str()));
+            if Self::due_string_is_recurring_for_todoist(
+                due_string.as_str(),
+                task.due_lang.as_deref(),
+            ) {
+                let mut outgoing_due_string = due_string.clone();
+                let mut outgoing_due_lang = task
+                    .due_lang
+                    .as_deref()
+                    .and_then(Self::normalize_due_lang_for_todoist)
+                    .or_else(|| Self::detect_due_lang(due_string.as_str()));
 
-            if let Some((rewritten_due_string, rewritten_due_lang)) =
-                Self::rewrite_due_string_for_todoist(due_string.as_str(), outgoing_due_lang)
-            {
-                outgoing_due_string = rewritten_due_string;
-                outgoing_due_lang = Some(rewritten_due_lang);
-            }
+                if let Some((rewritten_due_string, rewritten_due_lang)) =
+                    Self::rewrite_due_string_for_todoist(due_string.as_str(), outgoing_due_lang)
+                {
+                    outgoing_due_string = rewritten_due_string;
+                    outgoing_due_lang = Some(rewritten_due_lang);
+                }
 
-            body.insert("due_string".to_string(), Value::String(outgoing_due_string));
-            if let Some(due_lang) = outgoing_due_lang {
-                body.insert("due_lang".to_string(), Value::String(due_lang.to_string()));
+                body.insert("due_string".to_string(), Value::String(outgoing_due_string));
+                if let Some(due_lang) = outgoing_due_lang {
+                    body.insert("due_lang".to_string(), Value::String(due_lang.to_string()));
+                }
+            } else if let Some(due_datetime_utc) = task.due_datetime_utc.as_ref() {
+                body.insert(
+                    "due_datetime".to_string(),
+                    Value::String(due_datetime_utc.clone()),
+                );
+            } else if let Some(due_date) = task.due_date {
+                body.insert(
+                    "due_date".to_string(),
+                    Value::String(due_date.format("%Y-%m-%d").to_string()),
+                );
             }
         } else if let Some(due_datetime_utc) = task.due_datetime_utc.as_ref() {
             body.insert(
@@ -1314,5 +1336,17 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn due_string_is_recurring_for_todoist_supports_pt_br_weekly_variation() {
+        assert!(TodoistSyncProvider::due_string_is_recurring_for_todoist(
+            "segunda toda a semana",
+            Some("pt-BR")
+        ));
+        assert!(!TodoistSyncProvider::due_string_is_recurring_for_todoist(
+            "amanha",
+            Some("pt-BR")
+        ));
     }
 }

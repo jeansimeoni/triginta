@@ -193,6 +193,14 @@ fn normalize_pt_br_weekly_weekday_phrases(input: &str) -> String {
             text = replace_word_bounded(text.as_str(), needle.as_str(), replacement.as_str());
         }
     }
+    let weekly_suffixes = [" toda a semana", " toda semana", " semanalmente"];
+    for (pt_weekday, en_weekday) in weekday_aliases {
+        for suffix in weekly_suffixes {
+            let needle = format!("{pt_weekday}{suffix}");
+            let replacement = format!("every {en_weekday}");
+            text = replace_word_bounded(text.as_str(), needle.as_str(), replacement.as_str());
+        }
+    }
     text
 }
 
