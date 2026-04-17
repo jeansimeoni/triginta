@@ -1960,6 +1960,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_pt_br_todo_quinto_dia_util_as_monthly_recurring_phrase() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "todo quinto dia util",
+            reference_date,
+            &[NlpLocale::PtBr],
+        )
+        .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.string, "todo quinto dia util");
+        assert_eq!(
+            due.date,
+            NaiveDate::from_ymd_opt(2026, 5, 7).expect("valid date")
+        );
+    }
+
+    #[test]
     fn parses_pt_br_first_and_last_day_of_month_recurring_phrases() {
         let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
         let first =
@@ -2021,6 +2038,50 @@ mod tests {
         assert_eq!(
             due.date,
             NaiveDate::from_ymd_opt(2026, 4, 25).expect("valid date")
+        );
+    }
+
+    #[test]
+    fn parses_todo_o_dia_n_as_monthly_day_recurrence_in_pt_br() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales("todo o dia 25", reference_date, &[NlpLocale::PtBr])
+            .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.string, "todo o dia 25");
+        assert_eq!(
+            due.date,
+            NaiveDate::from_ymd_opt(2026, 4, 25).expect("valid date")
+        );
+    }
+
+    #[test]
+    fn parses_toda_a_segunda_as_weekly_monday_recurrence_in_pt_br() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due =
+            parse_due_input_with_locales("toda a segunda", reference_date, &[NlpLocale::PtBr])
+                .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.string, "toda a segunda");
+        assert_eq!(
+            due.date,
+            NaiveDate::from_ymd_opt(2026, 4, 20).expect("valid date")
+        );
+    }
+
+    #[test]
+    fn parses_semanalmente_na_segunda_as_weekly_monday_recurrence_in_pt_br() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "semanalmente na segunda",
+            reference_date,
+            &[NlpLocale::PtBr],
+        )
+        .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.string, "semanalmente na segunda");
+        assert_eq!(
+            due.date,
+            NaiveDate::from_ymd_opt(2026, 4, 20).expect("valid date")
         );
     }
 

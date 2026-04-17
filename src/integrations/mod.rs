@@ -144,6 +144,39 @@ impl TodoistSyncProvider {
         None
     }
 
+    fn rewrite_due_string_for_todoist(
+        due_string: &str,
+        due_lang: Option<&'static str>,
+    ) -> Option<(String, &'static str)> {
+        if due_lang != Some("pt") {
+            return None;
+        }
+
+        let lowered = due_string.trim().to_lowercase();
+        let folded = lowered
+            .chars()
+            .map(|character| match character {
+                'á' | 'à' | 'â' | 'ä' | 'ã' => 'a',
+                'é' | 'è' | 'ê' | 'ë' => 'e',
+                'í' | 'ì' | 'î' | 'ï' => 'i',
+                'ó' | 'ò' | 'ô' | 'ö' | 'õ' => 'o',
+                'ú' | 'ù' | 'û' | 'ü' => 'u',
+                'ç' => 'c',
+                _ => character,
+            })
+            .collect::<String>();
+        let normalized = folded.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        let rewritten = match normalized.as_str() {
+            "todo mes no quinto dia util"
+            | "no quinto dia util todo mes"
+            | "quinto dia util todo mes"
+            | "todo quinto dia util" => "every 5th workday",
+            _ => return None,
+        };
+        Some((rewritten.to_string(), "en"))
+    }
+
     pub fn new(config: TodoistIntegrationConfig, dry_run: bool) -> Self {
         Self { config, dry_run }
     }
@@ -451,13 +484,22 @@ impl TodoistSyncProvider {
             );
         }
         if let Some(due_string) = task.due_string.as_ref() {
-            body.insert("due_string".to_string(), Value::String(due_string.clone()));
-            if let Some(due_lang) = task
+            let mut outgoing_due_string = due_string.clone();
+            let mut outgoing_due_lang = task
                 .due_lang
                 .as_deref()
                 .and_then(Self::normalize_due_lang_for_todoist)
-                .or_else(|| Self::detect_due_lang(due_string.as_str()))
+                .or_else(|| Self::detect_due_lang(due_string.as_str()));
+
+            if let Some((rewritten_due_string, rewritten_due_lang)) =
+                Self::rewrite_due_string_for_todoist(due_string.as_str(), outgoing_due_lang)
             {
+                outgoing_due_string = rewritten_due_string;
+                outgoing_due_lang = Some(rewritten_due_lang);
+            }
+
+            body.insert("due_string".to_string(), Value::String(outgoing_due_string));
+            if let Some(due_lang) = outgoing_due_lang {
                 body.insert("due_lang".to_string(), Value::String(due_lang.to_string()));
             }
         } else if let Some(due_datetime_utc) = task.due_datetime_utc.as_ref() {
@@ -1234,6 +1276,43 @@ mod tests {
         assert_eq!(
             TodoistSyncProvider::detect_due_lang("todos los dias"),
             Some("es")
+        );
+    }
+
+    #[test]
+    fn rewrite_due_string_for_todoist_maps_pt_br_fifth_business_day_variants() {
+        let rewritten = TodoistSyncProvider::rewrite_due_string_for_todoist(
+            "todo mes no quinto dia util",
+            Some("pt"),
+        )
+        .expect("variant should be rewritten");
+        assert_eq!(rewritten, ("every 5th workday".to_string(), "en"));
+
+        let rewritten = TodoistSyncProvider::rewrite_due_string_for_todoist(
+            "quinto dia útil todo mês",
+            Some("pt"),
+        )
+        .expect("accented variant should be rewritten");
+        assert_eq!(rewritten, ("every 5th workday".to_string(), "en"));
+
+        let rewritten =
+            TodoistSyncProvider::rewrite_due_string_for_todoist("todo quinto dia útil", Some("pt"))
+                .expect("compact variant should be rewritten");
+        assert_eq!(rewritten, ("every 5th workday".to_string(), "en"));
+    }
+
+    #[test]
+    fn rewrite_due_string_for_todoist_keeps_other_due_strings_unchanged() {
+        assert!(
+            TodoistSyncProvider::rewrite_due_string_for_todoist("todo dia 25", Some("pt"))
+                .is_none()
+        );
+        assert!(
+            TodoistSyncProvider::rewrite_due_string_for_todoist(
+                "todo mes no quinto dia util",
+                Some("en")
+            )
+            .is_none()
         );
     }
 }

@@ -786,6 +786,22 @@ fn render_task_details_panel(
             })
             .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
         meta_lines.push(Line::from(format!("Due: {due_text}")));
+        meta_lines.push(Line::from(format!(
+            "Recurring: {}",
+            if due.is_recurring { "yes" } else { "no" }
+        )));
+        let normalized_due = due
+            .datetime
+            .map(|datetime| {
+                datetime
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
+        if due.string.trim().to_ascii_lowercase() != normalized_due.to_ascii_lowercase() {
+            meta_lines.push(Line::from(format!("From: {}", due.string.trim())));
+        }
     }
     if let Some((project_name, project_color)) = project_meta_for_task(app.screen_data(), task) {
         let section_name = section_name_for_task(app.screen_data(), task);

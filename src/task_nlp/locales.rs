@@ -82,6 +82,7 @@ pub fn normalize_due_input_for_locale(input: &str, locale: NlpLocale) -> String 
 
 fn normalize_pt_br(input: &str) -> String {
     let mut text = input.to_string();
+    text = normalize_pt_br_weekly_weekday_phrases(text.as_str());
     let replacements = [
         ("ultimo dia util do mes", "last weekday every month"),
         ("primeiro dia util do mes", "first weekday every month"),
@@ -98,6 +99,7 @@ fn normalize_pt_br(input: &str) -> String {
         ("todo mes no ultimo dia", "last day every month"),
         ("todo mes no primeiro dia", "first day every month"),
         ("todo mes no quinto dia util", "fifth weekday every month"),
+        ("todo quinto dia util", "fifth weekday every month"),
         ("todo mes no quarto dia util", "fourth weekday every month"),
         ("todo mes no terceiro dia util", "third weekday every month"),
         ("todo mes no segundo dia util", "second weekday every month"),
@@ -116,6 +118,7 @@ fn normalize_pt_br(input: &str) -> String {
         ("todos os dias uteis", "every weekday"),
         ("todo dia util", "every weekday"),
         ("dia util", "weekday"),
+        ("todo o dia", "every day"),
         ("fim de semana", "weekend"),
         ("todos os dias", "every day"),
         ("todo dia", "every day"),
@@ -163,6 +166,33 @@ fn normalize_pt_br(input: &str) -> String {
         text = replace_word_bounded(text.as_str(), needle, replacement);
     }
     text = replace_time_markers(text.as_str(), &["as", "a"]);
+    text
+}
+
+fn normalize_pt_br_weekly_weekday_phrases(input: &str) -> String {
+    let mut text = input.to_string();
+    let weekday_aliases = [
+        ("segunda-feira", "monday"),
+        ("terca-feira", "tuesday"),
+        ("quarta-feira", "wednesday"),
+        ("quinta-feira", "thursday"),
+        ("sexta-feira", "friday"),
+        ("sabado", "saturday"),
+        ("domingo", "sunday"),
+        ("segunda", "monday"),
+        ("terca", "tuesday"),
+        ("quarta", "wednesday"),
+        ("quinta", "thursday"),
+        ("sexta", "friday"),
+    ];
+    let weekly_prefixes = ["toda a ", "toda ", "semanalmente na ", "semanalmente no "];
+    for (pt_weekday, en_weekday) in weekday_aliases {
+        for prefix in weekly_prefixes {
+            let needle = format!("{prefix}{pt_weekday}");
+            let replacement = format!("every {en_weekday}");
+            text = replace_word_bounded(text.as_str(), needle.as_str(), replacement.as_str());
+        }
+    }
     text
 }
 
