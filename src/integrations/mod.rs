@@ -71,6 +71,24 @@ pub struct TodoistSyncProvider {
 }
 
 impl TodoistSyncProvider {
+    fn todoist_priority_to_local(priority: u8) -> i64 {
+        match priority {
+            4 => 1,
+            3 => 2,
+            2 => 3,
+            _ => 4,
+        }
+    }
+
+    fn local_priority_to_todoist(priority: i64) -> i64 {
+        match priority {
+            1 => 4,
+            2 => 3,
+            3 => 2,
+            _ => 1,
+        }
+    }
+
     fn outbox_entity_priority(entity_type: &str) -> u8 {
         match entity_type {
             "project" => 0,
@@ -360,7 +378,10 @@ impl TodoistSyncProvider {
             "description".to_string(),
             Value::String(task.description.clone()),
         );
-        body.insert("priority".to_string(), Value::Number(task.priority.into()));
+        body.insert(
+            "priority".to_string(),
+            Value::Number(Self::local_priority_to_todoist(task.priority).into()),
+        );
 
         if task.todoist_id.is_none() && task.project_todoist_id.is_none() && !task.project_is_inbox
         {
@@ -438,6 +459,12 @@ impl TodoistSyncProvider {
         body.insert("name".to_string(), Value::String(project.name.clone()));
         body.insert("color".to_string(), Value::String(project.color.clone()));
         body.insert("is_favorite".to_string(), Value::Bool(project.is_favorite));
+        if project.todoist_id.is_none()
+            && project.has_parent_project
+            && project.parent_todoist_id.is_none()
+        {
+            bail!("project parent mapping is not synced yet; retrying after parent project sync");
+        }
         if let Some(parent_id) = project.parent_todoist_id.as_deref() {
             body.insert(
                 "parent_id".to_string(),
@@ -471,6 +498,9 @@ impl TodoistSyncProvider {
 
         let mut body = serde_json::Map::new();
         body.insert("name".to_string(), Value::String(section.name.clone()));
+        if section.todoist_id.is_none() && section.project_todoist_id.is_none() {
+            bail!("section project mapping is not synced yet; retrying after project sync");
+        }
         if let Some(project_id) = section.project_todoist_id.as_deref() {
             body.insert(
                 "project_id".to_string(),
@@ -621,7 +651,7 @@ impl TodoistSyncProvider {
                 parent_todoist_id: task.parent_id,
                 content: task.content,
                 description: task.description.unwrap_or_default(),
-                priority: i64::from(task.priority.unwrap_or(4)),
+                priority: Self::todoist_priority_to_local(task.priority.unwrap_or(1)),
                 labels: task.labels.unwrap_or_default(),
                 due_date: task
                     .due
@@ -808,6 +838,8 @@ impl TaskSyncProvider for TodoistSyncProvider {
         } else {
             None
         };
+        let _bootstrap_enqueued =
+            sync_repository.enqueue_bootstrap_outbox(self.provider_name(), now_rfc3339.as_str())?;
         let (delivered, failed, cycle_error) =
             self.process_ready_outbox(sync_repository, now, &client)?;
 
@@ -1045,5 +1077,21 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].attempts, 0);
         Ok(())
+    }
+
+    #[test]
+    fn todoist_priority_maps_to_local_levels() {
+        assert_eq!(TodoistSyncProvider::todoist_priority_to_local(1), 4);
+        assert_eq!(TodoistSyncProvider::todoist_priority_to_local(2), 3);
+        assert_eq!(TodoistSyncProvider::todoist_priority_to_local(3), 2);
+        assert_eq!(TodoistSyncProvider::todoist_priority_to_local(4), 1);
+    }
+
+    #[test]
+    fn local_priority_maps_to_todoist_levels() {
+        assert_eq!(TodoistSyncProvider::local_priority_to_todoist(4), 1);
+        assert_eq!(TodoistSyncProvider::local_priority_to_todoist(3), 2);
+        assert_eq!(TodoistSyncProvider::local_priority_to_todoist(2), 3);
+        assert_eq!(TodoistSyncProvider::local_priority_to_todoist(1), 4);
     }
 }

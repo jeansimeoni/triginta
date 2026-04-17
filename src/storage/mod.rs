@@ -217,6 +217,7 @@ pub struct SyncProjectSnapshot {
     pub local_id: i64,
     pub todoist_id: Option<String>,
     pub parent_todoist_id: Option<String>,
+    pub has_parent_project: bool,
     pub name: String,
     pub color: String,
     pub is_favorite: bool,
@@ -468,6 +469,7 @@ pub trait SyncRepository {
         payload: &str,
         op_timestamp_utc: &str,
     ) -> Result<i64>;
+    fn enqueue_bootstrap_outbox(&self, provider: &str, op_timestamp_utc: &str) -> Result<usize>;
     fn mark_outbox_delivered(&self, entry_id: i64) -> Result<()>;
     fn mark_outbox_failed(
         &self,
@@ -1171,6 +1173,42 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         Ok(self.connection.last_insert_rowid())
     }
 
+    fn enqueue_bootstrap_outbox(&self, provider: &str, op_timestamp_utc: &str) -> Result<usize> {
+        let mut total = 0usize;
+        for (entity_type, table) in [
+            ("project", "projects"),
+            ("section", "sections"),
+            ("tag", "tags"),
+            ("filter", "filters"),
+            ("task", "tasks"),
+        ] {
+            let extra_where = if entity_type == "project" {
+                " AND COALESCE(t.is_inbox, 0) = 0"
+            } else {
+                ""
+            };
+            total += self.connection.execute(
+                format!(
+                    "INSERT INTO sync_outbox(provider, entity_type, entity_local_id, op_kind, payload, op_timestamp_utc, attempts, created_at)
+                     SELECT ?1, ?2, t.id, 'update', '{{}}', ?3, 0, ?3
+                     FROM {table} t
+                     WHERE t.todoist_id IS NULL
+                       AND t.deleted_at IS NULL
+                       {extra_where}
+                       AND NOT EXISTS (
+                           SELECT 1 FROM sync_outbox o
+                           WHERE o.provider = ?1
+                             AND o.entity_type = ?2
+                             AND o.entity_local_id = t.id
+                       )"
+                )
+                .as_str(),
+                params![provider, entity_type, op_timestamp_utc],
+            )?;
+        }
+        Ok(total)
+    }
+
     fn mark_outbox_delivered(&self, entry_id: i64) -> Result<()> {
         self.connection
             .execute("DELETE FROM sync_outbox WHERE id = ?1", params![entry_id])?;
@@ -1261,7 +1299,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             "project" => self
                 .connection
                 .query_row(
-                    "SELECT p.id, p.todoist_id, parent.todoist_id, p.name, p.color, p.is_favorite, p.deleted_at
+                    "SELECT p.id, p.todoist_id, parent.todoist_id, p.parent_project_id, p.name, p.color, p.is_favorite, p.deleted_at
                      FROM projects p
                      LEFT JOIN projects parent ON parent.id = p.parent_project_id
                      WHERE p.id = ?1",
@@ -1271,10 +1309,11 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                             local_id: row.get(0)?,
                             todoist_id: row.get(1)?,
                             parent_todoist_id: row.get(2)?,
-                            name: row.get(3)?,
-                            color: row.get(4)?,
-                            is_favorite: row.get::<_, i64>(5)? != 0,
-                            deleted_at: row.get(6)?,
+                            has_parent_project: row.get::<_, Option<i64>>(3)?.is_some(),
+                            name: row.get(4)?,
+                            color: row.get(5)?,
+                            is_favorite: row.get::<_, i64>(6)? != 0,
+                            deleted_at: row.get(7)?,
                         }))
                     },
                 )
