@@ -1,9 +1,11 @@
-#[cfg(debug_assertions)]
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::{collections::HashMap, collections::HashSet, env, fs, process::Command, time::Duration};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone, Utc};
+use chrono::{
+    DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone, Utc, Weekday,
+};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -621,6 +623,66 @@ struct TaskSortPopupState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TaskReschedulePopupState {
+    selected_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskRescheduleOption {
+    Today,
+    Tomorrow,
+    NextWeek,
+    NextWeekend,
+    InTwoWeeks,
+    NoDueDate,
+}
+
+impl TaskRescheduleOption {
+    const ALL: [Self; 6] = [
+        Self::Today,
+        Self::Tomorrow,
+        Self::NextWeek,
+        Self::NextWeekend,
+        Self::InTwoWeeks,
+        Self::NoDueDate,
+    ];
+
+    fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Today => "Today",
+            Self::Tomorrow => "Tomorrow",
+            Self::NextWeek => "Next Week",
+            Self::NextWeekend => "Next Weekend",
+            Self::InTwoWeeks => "In Two-Weeks",
+            Self::NoDueDate => "No Due Date",
+        }
+    }
+
+    fn resolve_date(self, reference_date: NaiveDate) -> Option<NaiveDate> {
+        match self {
+            Self::Today => Some(reference_date),
+            Self::Tomorrow => Some(
+                reference_date
+                    .checked_add_signed(ChronoDuration::days(1))
+                    .unwrap_or(reference_date),
+            ),
+            Self::NextWeek => Some(next_weekday(reference_date, Weekday::Mon)),
+            Self::NextWeekend => Some(next_weekday(reference_date, Weekday::Sat)),
+            Self::InTwoWeeks => Some(
+                reference_date
+                    .checked_add_signed(ChronoDuration::days(14))
+                    .unwrap_or(reference_date),
+            ),
+            Self::NoDueDate => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProjectSortPopupState {
     selected_index: usize,
 }
@@ -938,6 +1000,18 @@ pub struct TaskSortPopupView {
     pub title: &'static str,
     pub selected_index: usize,
     pub options: Vec<TaskSortOptionView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRescheduleOptionView {
+    pub label: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskReschedulePopupView {
+    pub title: &'static str,
+    pub selected_index: usize,
+    pub options: Vec<TaskRescheduleOptionView>,
 }
 
 const DESCRIPTION_VIEWPORT_LINES: usize = 3;
@@ -1566,6 +1640,10 @@ const TASKS_SHORTCUTS: &[ShortcutTip] = &[
         description: "toggle done",
     },
     ShortcutTip {
+        keys: "r",
+        description: "reschedule due",
+    },
+    ShortcutTip {
         keys: "o/f",
         description: "sort/hide done",
     },
@@ -1820,11 +1898,27 @@ const SORT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     },
 ];
 
+const RESCHEDULE_POPUP_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "Enter",
+        description: "apply date",
+    },
+    ShortcutTip {
+        keys: "Esc/r",
+        description: "cancel",
+    },
+    ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "move option",
+    },
+];
+
 #[derive(Debug, Clone)]
 struct TodoistSyncUiState {
     provider: TodoistSyncProvider,
     preferred_language: Option<String>,
     pending_push_at: Option<DateTime<Local>>,
+    queued_trigger: Option<SyncTrigger>,
     next_poll_at: DateTime<Local>,
     poll_interval: Duration,
     last_seen_outbox_len: usize,
@@ -1839,6 +1933,24 @@ struct TodoistSyncUiState {
     is_running: bool,
     dry_run: bool,
     activity_until: Option<DateTime<Local>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TodoistSyncWorkerRequest {
+    trigger: SyncTrigger,
+}
+
+#[derive(Debug, Clone)]
+struct TodoistSyncWorkerResponse {
+    trigger: SyncTrigger,
+    finished_at: DateTime<Local>,
+    report: std::result::Result<SyncReport, String>,
+}
+
+#[derive(Debug)]
+struct TodoistSyncWorker {
+    request_tx: Sender<TodoistSyncWorkerRequest>,
+    response_rx: Receiver<TodoistSyncWorkerResponse>,
 }
 
 // `App` owns the mutable runtime state for the TUI loop.
@@ -1880,6 +1992,7 @@ pub struct App {
     task_search: Option<TaskSearchState>,
     panel_search_states: PanelSearchStates,
     task_sort_popup: Option<TaskSortPopupState>,
+    task_reschedule_popup: Option<TaskReschedulePopupState>,
     project_sort_popup: Option<ProjectSortPopupState>,
     tag_sort_popup: Option<TagSortPopupState>,
     filter_sort_popup: Option<FilterSortPopupState>,
@@ -1897,6 +2010,7 @@ pub struct App {
     expanded_task_ids: HashSet<TaskId>,
     collapsed_task_ids: HashSet<TaskId>,
     todoist_sync: Option<TodoistSyncUiState>,
+    todoist_sync_worker: Option<TodoistSyncWorker>,
     needs_full_redraw: bool,
     should_quit: bool,
     screen_data: ScreenData,
@@ -2065,6 +2179,7 @@ impl App {
                 ),
                 preferred_language: None,
                 pending_push_at: None,
+                queued_trigger: None,
                 next_poll_at: Local::now(),
                 poll_interval: poll_min,
                 last_seen_outbox_len: 0,
@@ -2079,6 +2194,17 @@ impl App {
                 is_running: false,
                 dry_run: debug_dry_run_sync_enabled(),
                 activity_until: None,
+            })
+        } else {
+            None
+        };
+        let todoist_sync_worker = if config.integrations.todoist.enabled {
+            config_paths.as_ref().map(|paths| {
+                Self::spawn_todoist_sync_worker(
+                    paths.db_path.clone(),
+                    config.integrations.todoist.clone(),
+                    debug_dry_run_sync_enabled(),
+                )
             })
         } else {
             None
@@ -2117,6 +2243,7 @@ impl App {
             task_search: None,
             panel_search_states: PanelSearchStates::default(),
             task_sort_popup: None,
+            task_reschedule_popup: None,
             project_sort_popup: None,
             tag_sort_popup: None,
             filter_sort_popup: None,
@@ -2134,6 +2261,7 @@ impl App {
             expanded_task_ids: HashSet::new(),
             collapsed_task_ids: HashSet::new(),
             todoist_sync,
+            todoist_sync_worker,
             needs_full_redraw: false,
             should_quit: false,
             screen_data,
@@ -3280,6 +3408,20 @@ impl App {
         })
     }
 
+    pub fn task_reschedule_popup_view(&self) -> Option<TaskReschedulePopupView> {
+        let popup = self.task_reschedule_popup?;
+        Some(TaskReschedulePopupView {
+            title: "Reschedule Task",
+            selected_index: popup.selected_index,
+            options: TaskRescheduleOption::all()
+                .iter()
+                .map(|option| TaskRescheduleOptionView {
+                    label: option.label(),
+                })
+                .collect(),
+        })
+    }
+
     pub fn project_sort_popup_view(&self) -> Option<ProjectSortPopupView> {
         let popup = self.project_sort_popup?;
         Some(ProjectSortPopupView {
@@ -3632,6 +3774,9 @@ impl App {
         {
             return SORT_POPUP_SHORTCUTS;
         }
+        if self.task_reschedule_popup.is_some() {
+            return RESCHEDULE_POPUP_SHORTCUTS;
+        }
         if self.task_editor.is_some() {
             return EDITOR_POPUP_SHORTCUTS;
         }
@@ -3800,6 +3945,12 @@ impl App {
             sections.push(ShortcutSection {
                 title: "Task Sort Popup",
                 tips: SORT_POPUP_SHORTCUTS,
+            });
+        }
+        if self.task_reschedule_popup.is_some() {
+            sections.push(ShortcutSection {
+                title: "Task Reschedule Popup",
+                tips: RESCHEDULE_POPUP_SHORTCUTS,
             });
         }
         if self.project_sort_popup.is_some() {
@@ -6106,6 +6257,88 @@ impl App {
             .position(|sort_order| *sort_order == self.config.ui.task_list_sort)
             .unwrap_or(0);
         self.task_sort_popup = Some(TaskSortPopupState { selected_index });
+    }
+
+    fn open_task_reschedule_popup(&mut self) {
+        if self.selected_task().is_none() {
+            return;
+        }
+        self.task_reschedule_popup = Some(TaskReschedulePopupState { selected_index: 0 });
+    }
+
+    fn build_rescheduled_due(
+        existing_due: Option<&crate::domain::TaskDue>,
+        option: TaskRescheduleOption,
+        reference_date: NaiveDate,
+    ) -> Option<crate::domain::TaskDue> {
+        let target_date = option.resolve_date(reference_date)?;
+        let existing_datetime = existing_due.and_then(|due| due.datetime);
+        let datetime = existing_datetime.and_then(|current| {
+            let local_time = current.with_timezone(&Local).time();
+            let next_naive = target_date.and_time(local_time);
+            Some(Self::local_naive_to_utc(next_naive))
+        });
+        let timezone = existing_due.and_then(|due| due.timezone.clone());
+
+        match existing_due {
+            Some(due) if due.is_recurring => Some(crate::domain::TaskDue {
+                date: target_date,
+                datetime,
+                timezone,
+                string: due.string.clone(),
+                due_lang: due.due_lang.clone(),
+                is_recurring: true,
+            }),
+            Some(due) => Some(crate::domain::TaskDue {
+                date: target_date,
+                datetime,
+                timezone,
+                string: due_string_for_datetime(target_date, datetime),
+                due_lang: due.due_lang.clone(),
+                is_recurring: false,
+            }),
+            None => Some(crate::domain::TaskDue {
+                date: target_date,
+                datetime: None,
+                timezone: None,
+                string: due_string_for_datetime(target_date, None),
+                due_lang: None,
+                is_recurring: false,
+            }),
+        }
+    }
+
+    fn apply_task_reschedule_option(
+        &mut self,
+        option: TaskRescheduleOption,
+        now: DateTime<Local>,
+    ) -> Result<()> {
+        let Some(task) = self.selected_task().cloned() else {
+            return Ok(());
+        };
+
+        let due = if option == TaskRescheduleOption::NoDueDate {
+            None
+        } else {
+            Self::build_rescheduled_due(task.due.as_ref(), option, now.date_naive())
+        };
+
+        self.database.task_repository().update(
+            task.id,
+            &TaskUpdate {
+                title: task.title.clone(),
+                description: task.description.clone(),
+                project_id: task.project_id,
+                section_id: task.section_id,
+                parent_task_id: task.parent_task_id,
+                priority: task.priority,
+                due,
+            },
+        )?;
+
+        self.refresh_tasks()?;
+        self.selected_task_id = Some(task.id);
+        Ok(())
     }
 
     fn open_project_sort_popup(&mut self) {
@@ -8428,6 +8661,33 @@ impl App {
             return Ok(true);
         }
 
+        if let Some(mut popup) = self.task_reschedule_popup.take() {
+            match code {
+                KeyCode::Esc | KeyCode::Char('r') => {}
+                KeyCode::Enter => {
+                    if let Some(option) = TaskRescheduleOption::all()
+                        .get(popup.selected_index)
+                        .copied()
+                    {
+                        self.apply_task_reschedule_option(option, now)?;
+                    }
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let last_index = TaskRescheduleOption::all().len().saturating_sub(1);
+                    popup.selected_index = (popup.selected_index + 1).min(last_index);
+                    self.task_reschedule_popup = Some(popup);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    popup.selected_index = popup.selected_index.saturating_sub(1);
+                    self.task_reschedule_popup = Some(popup);
+                }
+                _ => {
+                    self.task_reschedule_popup = Some(popup);
+                }
+            }
+            return Ok(true);
+        }
+
         if let Some(mut popup) = self.project_sort_popup.take() {
             match code {
                 KeyCode::Esc | KeyCode::Char('o') => {}
@@ -10608,6 +10868,12 @@ impl App {
             {
                 self.open_task_sort_popup();
             }
+            KeyCode::Char('r')
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Tasks =>
+            {
+                self.open_task_reschedule_popup();
+            }
             KeyCode::Char('=')
                 if self.focused_panel == PanelFocus::RightPane
                     && self.active_right_panel_tab == RightPanelTab::Tasks =>
@@ -10788,6 +11054,7 @@ impl App {
         if self.todoist_sync.is_none() {
             return Ok(());
         }
+        self.drain_todoist_sync_worker()?;
 
         let pending_outbox_len = self
             .database
@@ -10822,69 +11089,204 @@ impl App {
         }
 
         if let Some(trigger) = trigger {
-            self.run_todoist_sync(trigger, now);
+            self.dispatch_todoist_sync(trigger, now);
         }
 
         Ok(())
     }
 
-    fn run_todoist_sync(&mut self, trigger: SyncTrigger, now: DateTime<Local>) {
+    fn merge_sync_trigger(current: SyncTrigger, incoming: SyncTrigger) -> SyncTrigger {
+        match (current, incoming) {
+            (SyncTrigger::MutationDebounced, _) | (_, SyncTrigger::MutationDebounced) => {
+                SyncTrigger::MutationDebounced
+            }
+            (SyncTrigger::Startup, _) | (_, SyncTrigger::Startup) => SyncTrigger::Startup,
+            _ => SyncTrigger::Poll,
+        }
+    }
+
+    fn spawn_todoist_sync_worker(
+        db_path: PathBuf,
+        config: crate::config::TodoistIntegrationConfig,
+        dry_run: bool,
+    ) -> TodoistSyncWorker {
+        let (request_tx, request_rx) = mpsc::channel::<TodoistSyncWorkerRequest>();
+        let (response_tx, response_rx) = mpsc::channel::<TodoistSyncWorkerResponse>();
+
+        std::thread::spawn(move || {
+            let provider = TodoistSyncProvider::new(config, dry_run);
+            while let Ok(request) = request_rx.recv() {
+                let finished_at = Local::now();
+                let report = match Database::open(db_path.as_path()) {
+                    Ok(database) => provider
+                        .sync(&database.sync_repository(), request.trigger)
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                if response_tx
+                    .send(TodoistSyncWorkerResponse {
+                        trigger: request.trigger,
+                        finished_at,
+                        report,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        TodoistSyncWorker {
+            request_tx,
+            response_rx,
+        }
+    }
+
+    fn dispatch_todoist_sync(&mut self, trigger: SyncTrigger, now: DateTime<Local>) {
+        if let Some(sync) = self.todoist_sync.as_mut() {
+            if sync.is_running {
+                sync.queued_trigger = Some(
+                    sync.queued_trigger
+                        .map(|current| Self::merge_sync_trigger(current, trigger))
+                        .unwrap_or(trigger),
+                );
+                return;
+            }
+            sync.is_running = true;
+            sync.activity_until = Some(now + ChronoDuration::seconds(3));
+        }
+
+        let Some(worker) = self.todoist_sync_worker.as_ref() else {
+            self.run_todoist_sync_inline(trigger, now);
+            return;
+        };
+
+        if worker
+            .request_tx
+            .send(TodoistSyncWorkerRequest { trigger })
+            .is_err()
+        {
+            self.todoist_sync_worker = None;
+            self.run_todoist_sync_inline(trigger, now);
+        }
+    }
+
+    fn drain_todoist_sync_worker(&mut self) -> Result<()> {
+        loop {
+            let next = {
+                let Some(worker) = self.todoist_sync_worker.as_ref() else {
+                    return Ok(());
+                };
+                worker.response_rx.try_recv()
+            };
+
+            match next {
+                Ok(response) => {
+                    self.finish_todoist_sync_cycle(
+                        response.trigger,
+                        response.report,
+                        response.finished_at,
+                    )?;
+                }
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => {
+                    self.todoist_sync_worker = None;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    fn run_todoist_sync_inline(&mut self, trigger: SyncTrigger, now: DateTime<Local>) {
         let Some(sync) = self.todoist_sync.as_ref() else {
             return;
         };
         let provider = sync.provider.clone();
-        if let Some(sync) = self.todoist_sync.as_mut() {
-            sync.is_running = true;
-            sync.activity_until = Some(now + ChronoDuration::seconds(3));
-        }
         let sync_result = provider.sync(&self.database.sync_repository(), trigger);
+
+        self.finish_todoist_sync_cycle(
+            trigger,
+            sync_result.map_err(|error| error.to_string()),
+            now,
+        )
+        .ok();
+    }
+
+    fn finish_todoist_sync_cycle(
+        &mut self,
+        trigger: SyncTrigger,
+        sync_result: std::result::Result<SyncReport, String>,
+        now: DateTime<Local>,
+    ) -> Result<()> {
+        if self.todoist_sync.is_none() {
+            return Ok(());
+        }
 
         match sync_result {
             Ok(report) => {
                 self.apply_todoist_sync_report(report, now);
-                if let Err(error) = self.refresh_tasks() {
-                    warn!(error = %error, "failed to refresh UI data after todoist sync");
-                }
+                self.refresh_tasks()
+                    .inspect_err(|error| {
+                        warn!(error = %error, "failed to refresh UI data after todoist sync");
+                    })
+                    .ok();
             }
-            Err(error) => {
-                warn!(
-                    provider = provider.provider_name(),
-                    trigger = trigger.as_str(),
-                    error = %error,
-                    "todoist sync cycle failed"
-                );
-                if let Some(sync) = self.todoist_sync.as_mut() {
-                    sync.is_running = false;
-                    sync.latest_status_line =
-                        format!("sync error [{}]: {}", trigger.as_str(), error);
-                    sync.last_status = "error".to_string();
-                    sync.last_trigger = Some(trigger);
-                    sync.last_error = Some(error.to_string());
-                    sync.last_sync_at = Some(now);
-                    sync.pending_outbox = sync.last_seen_outbox_len;
-                    sync.delivered_outbox = 0;
-                    sync.failed_outbox = 0;
-                    sync.activity_until = Some(now + ChronoDuration::seconds(3));
-                    let min_interval = Duration::from_secs(
-                        self.config
-                            .integrations
-                            .todoist
-                            .sync_runtime
-                            .poll_min_interval_seconds,
-                    );
-                    let max_interval = Duration::from_secs(
-                        self.config
-                            .integrations
-                            .todoist
-                            .sync_runtime
-                            .poll_max_interval_seconds,
-                    );
-                    sync.poll_interval =
-                        (sync.poll_interval.saturating_mul(2)).clamp(min_interval, max_interval);
-                    sync.next_poll_at = now + chrono_duration(sync.poll_interval);
-                }
-            }
+            Err(error) => self.apply_todoist_sync_error(trigger, now, error.as_str()),
         }
+
+        let queued = self
+            .todoist_sync
+            .as_mut()
+            .and_then(|sync| sync.queued_trigger.take());
+        if let Some(next_trigger) = queued {
+            self.dispatch_todoist_sync(next_trigger, now);
+        }
+
+        Ok(())
+    }
+
+    fn apply_todoist_sync_error(
+        &mut self,
+        trigger: SyncTrigger,
+        now: DateTime<Local>,
+        error: &str,
+    ) {
+        let Some(sync) = self.todoist_sync.as_mut() else {
+            return;
+        };
+        warn!(
+            provider = sync.provider.provider_name(),
+            trigger = trigger.as_str(),
+            error = error,
+            "todoist sync cycle failed"
+        );
+        sync.is_running = false;
+        sync.latest_status_line = format!("sync error [{}]: {}", trigger.as_str(), error);
+        sync.last_status = "error".to_string();
+        sync.last_trigger = Some(trigger);
+        sync.last_error = Some(error.to_string());
+        sync.last_sync_at = Some(now);
+        sync.pending_outbox = sync.last_seen_outbox_len;
+        sync.delivered_outbox = 0;
+        sync.failed_outbox = 0;
+        sync.activity_until = Some(now + ChronoDuration::seconds(3));
+        let min_interval = Duration::from_secs(
+            self.config
+                .integrations
+                .todoist
+                .sync_runtime
+                .poll_min_interval_seconds,
+        );
+        let max_interval = Duration::from_secs(
+            self.config
+                .integrations
+                .todoist
+                .sync_runtime
+                .poll_max_interval_seconds,
+        );
+        sync.poll_interval =
+            (sync.poll_interval.saturating_mul(2)).clamp(min_interval, max_interval);
+        sync.next_poll_at = now + chrono_duration(sync.poll_interval);
     }
 
     fn apply_todoist_sync_report(&mut self, report: SyncReport, now: DateTime<Local>) {
@@ -11063,6 +11465,30 @@ impl App {
     fn scroll_history_page_up(&mut self) {
         self.history_scroll = self.history_scroll.saturating_sub(5);
     }
+}
+
+fn due_string_for_datetime(date: NaiveDate, datetime: Option<DateTime<Utc>>) -> String {
+    if let Some(datetime) = datetime {
+        return format!(
+            "{} at {}",
+            date.format("%Y-%m-%d"),
+            datetime.with_timezone(&Local).format("%H:%M")
+        );
+    }
+
+    date.format("%Y-%m-%d").to_string()
+}
+
+fn next_weekday(reference_date: NaiveDate, target_weekday: Weekday) -> NaiveDate {
+    let current = reference_date.weekday().num_days_from_monday() as i64;
+    let target = target_weekday.num_days_from_monday() as i64;
+    let mut delta = (target - current).rem_euclid(7);
+    if delta == 0 {
+        delta = 7;
+    }
+    reference_date
+        .checked_add_signed(ChronoDuration::days(delta))
+        .unwrap_or(reference_date)
 }
 
 pub fn run(options: RunOptions) -> Result<()> {
@@ -11344,7 +11770,7 @@ fn fuzzy_matches(query: &str, candidate: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration as ChronoDuration, Local, NaiveDate, Utc};
+    use chrono::{Duration as ChronoDuration, Local, NaiveDate, TimeZone, Utc};
 
     use crate::config::{AppConfig, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings};
     use crate::domain::{
@@ -11381,6 +11807,13 @@ mod tests {
 
     fn naive_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<Utc> {
         super::App::local_naive_to_utc(naive)
+    }
+
+    fn fixed_now() -> chrono::DateTime<Local> {
+        Local
+            .with_ymd_and_hms(2026, 4, 17, 9, 0, 0)
+            .single()
+            .expect("fixed local datetime should resolve")
     }
 
     fn preview_value_for_label<'a>(lines: &'a [PreviewLineView], label: &str) -> Option<&'a str> {
@@ -15319,6 +15752,144 @@ mod tests {
     }
 
     #[test]
+    fn task_reschedule_popup_applies_next_week_as_next_monday() {
+        let mut app = test_app();
+        let repository = app.database.task_repository();
+        let inbox_project_id = app.inbox_project_id();
+        let now = fixed_now();
+
+        repository
+            .create("Schedule planning", inbox_project_id, None, now)
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('r'), now)
+            .expect("reschedule popup should open");
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("popup selection should move");
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("popup selection should move");
+        app.handle_key_at(crossterm::event::KeyCode::Enter, now)
+            .expect("reschedule should apply");
+
+        let due = app
+            .selected_task()
+            .expect("task should stay selected")
+            .due
+            .clone()
+            .expect("due should exist after reschedule");
+        assert_eq!(
+            due.date,
+            NaiveDate::from_ymd_opt(2026, 4, 20).expect("valid date")
+        );
+        assert!(!due.is_recurring);
+        assert_eq!(due.string, "2026-04-20");
+    }
+
+    #[test]
+    fn task_reschedule_popup_preserves_due_time_on_new_date() {
+        let mut app = test_app();
+        let repository = app.database.task_repository();
+        let inbox_project_id = app.inbox_project_id();
+        let now = fixed_now();
+        let original_date = NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date");
+        let due_datetime = original_date.and_hms_opt(15, 0, 0).expect("valid due time");
+
+        repository
+            .create(
+                "Timed task",
+                inbox_project_id,
+                Some(&TaskDue {
+                    date: original_date,
+                    datetime: Some(naive_to_utc(due_datetime)),
+                    timezone: Some("America/Sao_Paulo".to_string()),
+                    string: "2026-04-10 at 15:00".to_string(),
+                    due_lang: None,
+                    is_recurring: false,
+                }),
+                now,
+            )
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('r'), now)
+            .expect("reschedule popup should open");
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("popup selection should move");
+        app.handle_key_at(crossterm::event::KeyCode::Enter, now)
+            .expect("reschedule should apply");
+
+        let due = app
+            .selected_task()
+            .expect("task should stay selected")
+            .due
+            .clone()
+            .expect("due should exist after reschedule");
+        assert_eq!(
+            due.date,
+            NaiveDate::from_ymd_opt(2026, 4, 18).expect("valid date")
+        );
+        assert_eq!(due.timezone.as_deref(), Some("America/Sao_Paulo"));
+        let local_due = due
+            .datetime
+            .expect("datetime should be preserved")
+            .with_timezone(&Local);
+        assert_eq!(
+            local_due.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-04-18 15:00"
+        );
+        assert_eq!(due.string, "2026-04-18 at 15:00");
+    }
+
+    #[test]
+    fn task_reschedule_popup_no_due_date_clears_recurring_due() {
+        let mut app = test_app();
+        let repository = app.database.task_repository();
+        let inbox_project_id = app.inbox_project_id();
+        let now = fixed_now();
+        let original_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+
+        repository
+            .create(
+                "Recurring task",
+                inbox_project_id,
+                Some(&TaskDue {
+                    date: original_date,
+                    datetime: None,
+                    timezone: None,
+                    string: "every day".to_string(),
+                    due_lang: Some("en".to_string()),
+                    is_recurring: true,
+                }),
+                now,
+            )
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('r'), now)
+            .expect("reschedule popup should open");
+        for _ in 0..5 {
+            app.handle_key(crossterm::event::KeyCode::Down)
+                .expect("popup selection should move");
+        }
+        app.handle_key_at(crossterm::event::KeyCode::Enter, now)
+            .expect("reschedule should apply");
+
+        assert!(
+            app.selected_task()
+                .expect("task should stay selected")
+                .due
+                .is_none()
+        );
+    }
+
+    #[test]
     fn app_requires_delete_confirmation() {
         let mut app = test_app();
         app.handle_key(crossterm::event::KeyCode::Char('8'))
@@ -16021,6 +16592,11 @@ mod tests {
             .find(|tip| tip.keys == "o/f")
             .expect("tasks shortcuts should include o/f");
         assert_eq!(tip.description, "sort/hide done");
+        let reschedule_tip = tasks_shortcuts
+            .iter()
+            .find(|tip| tip.keys == "r")
+            .expect("tasks shortcuts should include r");
+        assert_eq!(reschedule_tip.description, "reschedule due");
     }
 
     #[test]

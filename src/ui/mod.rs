@@ -26,7 +26,7 @@ use crate::{
         SessionNoteEditorView, SessionNoteViewerView, ShortcutSection, ShortcutTip, SidebarTab,
         SyncIndicatorStateView, SyncStatusPanelView, TagDeleteConfirmationView, TagEditorView,
         TagListRowView, TagSortPopupView, TaskEditorView, TaskInputView, TaskListRowView,
-        TaskSearchView, TaskSortPopupView, TaskView, TimerPhase,
+        TaskReschedulePopupView, TaskSearchView, TaskSortPopupView, TaskView, TimerPhase,
     },
     domain::{
         DayHistorySummary, FilterColor, SessionEntry, SessionKind, SessionOutcome, TagColor, Task,
@@ -2801,6 +2801,12 @@ fn render_task_overlay(frame: &mut Frame<'_>, app: &App, symbols: Symbols, palet
         return;
     }
 
+    if let Some(reschedule_popup) = app.task_reschedule_popup_view() {
+        let anchor = task_sort_popup_anchor(frame.area());
+        render_task_reschedule_popup(frame, &reschedule_popup, anchor, palette);
+        return;
+    }
+
     if let Some(search) = app.task_search_view() {
         render_task_search_popup(frame, &search, symbols, palette);
         return;
@@ -5292,6 +5298,47 @@ fn render_task_sort_popup(
             };
             selectable_line(
                 &format!("{marker}{}", option.label),
+                selected,
+                area.width.saturating_sub(2),
+                palette,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(
+                popup.title,
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.accent)),
+    );
+
+    frame.render_widget(widget, area);
+}
+
+fn render_task_reschedule_popup(
+    frame: &mut Frame<'_>,
+    popup: &TaskReschedulePopupView,
+    anchor: Rect,
+    palette: ThemePalette,
+) {
+    let width = 24;
+    let height = popup.options.len() as u16 + 2;
+    let area = anchored_dropdown_rect(frame.area(), anchor, width, height);
+    frame.render_widget(Clear, area);
+
+    let lines = popup
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let selected = popup.selected_index == index;
+            selectable_line(
+                option.label,
                 selected,
                 area.width.saturating_sub(2),
                 palette,
