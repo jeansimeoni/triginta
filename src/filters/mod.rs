@@ -14,10 +14,12 @@ pub enum FilterExpr {
 pub enum FilterTerm {
     Tag(String),
     Project(String),
+    Section(String),
     Priority(TaskPriority),
     DueToday,
     Overdue,
     NoDue,
+    Subtask,
     StatusDone,
     StatusTodo,
     Search(String),
@@ -66,18 +68,23 @@ pub fn evaluate(
     task: &Task,
     today: NaiveDate,
     project_name: Option<&str>,
+    section_name: Option<&str>,
     tag_names: &[&str],
 ) -> bool {
     match expr {
-        FilterExpr::Term(term) => evaluate_term(term, task, today, project_name, tag_names),
-        FilterExpr::Not(inner) => !evaluate(inner, task, today, project_name, tag_names),
+        FilterExpr::Term(term) => {
+            evaluate_term(term, task, today, project_name, section_name, tag_names)
+        }
+        FilterExpr::Not(inner) => {
+            !evaluate(inner, task, today, project_name, section_name, tag_names)
+        }
         FilterExpr::And(left, right) => {
-            evaluate(left, task, today, project_name, tag_names)
-                && evaluate(right, task, today, project_name, tag_names)
+            evaluate(left, task, today, project_name, section_name, tag_names)
+                && evaluate(right, task, today, project_name, section_name, tag_names)
         }
         FilterExpr::Or(left, right) => {
-            evaluate(left, task, today, project_name, tag_names)
-                || evaluate(right, task, today, project_name, tag_names)
+            evaluate(left, task, today, project_name, section_name, tag_names)
+                || evaluate(right, task, today, project_name, section_name, tag_names)
         }
     }
 }
@@ -87,6 +94,7 @@ fn evaluate_term(
     task: &Task,
     today: NaiveDate,
     project_name: Option<&str>,
+    section_name: Option<&str>,
     tag_names: &[&str],
 ) -> bool {
     match term {
@@ -94,10 +102,15 @@ fn evaluate_term(
         FilterTerm::Project(name) => {
             project_name.is_some_and(|project| project.eq_ignore_ascii_case(name))
         }
+        FilterTerm::Section(name) => {
+            section_name.is_some_and(|section| section.eq_ignore_ascii_case(name))
+                || project_name.is_some_and(|project| project.eq_ignore_ascii_case(name))
+        }
         FilterTerm::Priority(priority) => task.priority == *priority,
         FilterTerm::DueToday => task.due.as_ref().is_some_and(|due| due.date == today),
         FilterTerm::Overdue => task.due.as_ref().is_some_and(|due| due.date < today),
         FilterTerm::NoDue => task.due.is_none(),
+        FilterTerm::Subtask => task.parent_task_id.is_some(),
         FilterTerm::StatusDone => task.status == TaskStatus::Done,
         FilterTerm::StatusTodo => task.status == TaskStatus::Todo,
         FilterTerm::Search(query) => task
@@ -150,6 +163,35 @@ fn tokenize(query: &str) -> Result<Vec<Token>, FilterValidationError> {
                 tokens.push(token_from_term(value)?);
                 i += 1;
             }
+            '@' | '#' => {
+                let start = i;
+                i += 1;
+                if chars[start] == '#' && i < chars.len() && chars[i] == '#' {
+                    i += 1;
+                }
+                while i < chars.len() {
+                    if matches!(chars[i], '&' | ',' | '|' | '!' | '(' | ')') {
+                        break;
+                    }
+                    if chars[i].is_whitespace() {
+                        let mut j = i;
+                        while j < chars.len() && chars[j].is_whitespace() {
+                            j += 1;
+                        }
+                        if j >= chars.len()
+                            || matches!(chars[j], '&' | ',' | '|' | '!' | '(' | ')')
+                            || chars[j] == '@'
+                            || chars[j] == '#'
+                            || chars[j] == '"'
+                        {
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                let value = chars[start..i].iter().collect::<String>();
+                tokens.push(token_from_term(value.trim().to_string())?);
+            }
             _ => {
                 let start = i;
                 while i < chars.len()
@@ -191,6 +233,12 @@ fn parse_term(raw: &str) -> Result<FilterTerm, FilterValidationError> {
         }
         return Ok(FilterTerm::Tag(tag.trim().to_string()));
     }
+    if let Some(section) = normalized.strip_prefix("##") {
+        if section.trim().is_empty() {
+            return Err(FilterValidationError::new("section term cannot be empty"));
+        }
+        return Ok(FilterTerm::Section(section.trim().to_string()));
+    }
     if let Some(project) = normalized.strip_prefix('#') {
         if project.trim().is_empty() {
             return Err(FilterValidationError::new("project term cannot be empty"));
@@ -215,6 +263,9 @@ fn parse_term(raw: &str) -> Result<FilterTerm, FilterValidationError> {
     }
     if normalized.eq_ignore_ascii_case("active") {
         return Ok(FilterTerm::StatusTodo);
+    }
+    if normalized.eq_ignore_ascii_case("subtask") {
+        return Ok(FilterTerm::Subtask);
     }
 
     if let Some(priority) = normalized
@@ -251,6 +302,7 @@ fn parse_term(raw: &str) -> Result<FilterTerm, FilterValidationError> {
         return match key.as_str() {
             "tag" => Ok(FilterTerm::Tag(value.to_string())),
             "project" => Ok(FilterTerm::Project(value.to_string())),
+            "section" => Ok(FilterTerm::Section(value.to_string())),
             "status" => {
                 if value.eq_ignore_ascii_case("done") || value.eq_ignore_ascii_case("completed") {
                     Ok(FilterTerm::StatusDone)
@@ -362,6 +414,7 @@ mod tests {
             &task,
             today,
             Some("Inbox"),
+            None,
             &["Work", "Focus"],
         ));
     }
@@ -371,7 +424,46 @@ mod tests {
         let expr = parse_and_validate("!completed & @Work").expect("query should parse");
         let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
         let task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
-        assert!(evaluate(&expr, &task, today, Some("Inbox"), &["Work"]));
+        assert!(evaluate(
+            &expr,
+            &task,
+            today,
+            Some("Inbox"),
+            None,
+            &["Work"]
+        ));
+    }
+
+    #[test]
+    fn evaluator_supports_section_and_subtask_terms() {
+        let expr = parse_and_validate("##Roadmap & subtask").expect("query should parse");
+        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
+        let mut task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
+        task.parent_task_id = Some(TaskId(99));
+        assert!(evaluate(
+            &expr,
+            &task,
+            today,
+            Some("GTD"),
+            Some("Roadmap"),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn parser_accepts_project_and_tag_with_spaces_without_quotes() {
+        let expr =
+            parse_and_validate("#Um Dia / Talvez & @Waiting For...").expect("query should parse");
+        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
+        let task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
+        assert!(evaluate(
+            &expr,
+            &task,
+            today,
+            Some("Um Dia / Talvez"),
+            None,
+            &["Waiting For..."],
+        ));
     }
 }
 

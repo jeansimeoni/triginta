@@ -1,6 +1,6 @@
 #[cfg(debug_assertions)]
 use std::path::PathBuf;
-use std::{collections::HashSet, env, fs, process::Command, time::Duration};
+use std::{collections::HashMap, collections::HashSet, env, fs, process::Command, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone, Utc};
@@ -2088,19 +2088,96 @@ impl App {
         let query = self
             .panel_search_query(PanelSearchTarget::TaskList)
             .unwrap_or("");
-        let mut visible_roots = self
+        let matching_ids = self
             .screen_data
             .tasks
             .iter()
             .filter(|task| self.task_is_visible(task))
-            .filter(|task| task.parent_task_id.is_none())
             .filter(|task| fuzzy_matches(query, task.title.as_str()))
-            .collect::<Vec<_>>();
-        visible_roots.sort_by(|left, right| self.compare_tasks(left, right));
+            .map(|task| task.id)
+            .collect::<HashSet<_>>();
+        if matching_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let mut children_by_parent: HashMap<Option<TaskId>, Vec<&Task>> = HashMap::new();
+        for task in self
+            .screen_data
+            .tasks
+            .iter()
+            .filter(|task| self.task_is_active(task))
+        {
+            children_by_parent
+                .entry(task.parent_task_id)
+                .or_default()
+                .push(task);
+        }
+
+        if let Some(roots) = children_by_parent.get_mut(&None) {
+            roots.sort_by(|left, right| self.compare_tasks(left, right));
+        }
+        for (parent, children) in children_by_parent.iter_mut() {
+            if parent.is_none() {
+                continue;
+            }
+            children.sort_by(|left, right| {
+                left.child_order
+                    .cmp(&right.child_order)
+                    .then_with(|| left.created_at.cmp(&right.created_at))
+                    .then_with(|| left.id.0.cmp(&right.id.0))
+            });
+        }
+
+        fn branch_has_match(
+            task: &Task,
+            matching_ids: &HashSet<TaskId>,
+            children_by_parent: &HashMap<Option<TaskId>, Vec<&Task>>,
+            cache: &mut HashMap<TaskId, bool>,
+        ) -> bool {
+            if let Some(cached) = cache.get(&task.id).copied() {
+                return cached;
+            }
+            let has = matching_ids.contains(&task.id)
+                || children_by_parent
+                    .get(&Some(task.id))
+                    .is_some_and(|children| {
+                        children.iter().copied().any(|child| {
+                            branch_has_match(child, matching_ids, children_by_parent, cache)
+                        })
+                    });
+            cache.insert(task.id, has);
+            has
+        }
+
+        let mut branch_cache = HashMap::new();
+        let visible_roots = children_by_parent
+            .get(&None)
+            .map(|roots| {
+                roots
+                    .iter()
+                    .copied()
+                    .filter(|task| {
+                        branch_has_match(
+                            task,
+                            &matching_ids,
+                            &children_by_parent,
+                            &mut branch_cache,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         let mut rows = Vec::new();
         for root in visible_roots {
-            self.append_visible_task_row(&mut rows, root, 0);
+            self.append_visible_task_row(
+                &mut rows,
+                root,
+                0,
+                &matching_ids,
+                &children_by_parent,
+                &mut branch_cache,
+            );
         }
         rows
     }
@@ -2110,28 +2187,36 @@ impl App {
         rows: &mut Vec<(usize, &'a Task)>,
         task: &'a Task,
         depth: usize,
+        matching_ids: &HashSet<TaskId>,
+        children_by_parent: &HashMap<Option<TaskId>, Vec<&'a Task>>,
+        branch_cache: &mut HashMap<TaskId, bool>,
     ) {
-        rows.push((depth, task));
-        if !self.expanded_task_ids.contains(&task.id) {
+        let task_has_match = branch_cache.get(&task.id).copied().unwrap_or(false);
+        if !task_has_match {
             return;
         }
-
-        let mut children = self
-            .screen_data
-            .tasks
+        rows.push((depth, task));
+        let children = children_by_parent
+            .get(&Some(task.id))
+            .cloned()
+            .unwrap_or_default();
+        let has_matching_descendant = children
             .iter()
-            .filter(|candidate| self.task_is_active(candidate))
-            .filter(|candidate| candidate.parent_task_id == Some(task.id))
-            .collect::<Vec<_>>();
-        children.sort_by(|left, right| {
-            left.child_order
-                .cmp(&right.child_order)
-                .then_with(|| left.created_at.cmp(&right.created_at))
-                .then_with(|| left.id.0.cmp(&right.id.0))
-        });
-
+            .any(|child| branch_cache.get(&child.id).copied().unwrap_or(false));
+        let should_expand = self.expanded_task_ids.contains(&task.id)
+            || (!matching_ids.contains(&task.id) && has_matching_descendant);
+        if !should_expand {
+            return;
+        }
         for child in children {
-            self.append_visible_task_row(rows, child, depth + 1);
+            self.append_visible_task_row(
+                rows,
+                child,
+                depth + 1,
+                matching_ids,
+                children_by_parent,
+                branch_cache,
+            );
         }
     }
 
@@ -3924,6 +4009,9 @@ impl App {
     }
 
     fn task_matches_selected_project(&self, task: &Task) -> bool {
+        if self.active_sidebar_tab != SidebarTab::Projects {
+            return true;
+        }
         if let Some(section_id) = self.selected_section_id {
             return task.section_id == Some(section_id);
         }
@@ -3933,12 +4021,18 @@ impl App {
     }
 
     fn task_matches_selected_tag(&self, task: &Task) -> bool {
+        if self.active_sidebar_tab != SidebarTab::Tags {
+            return true;
+        }
         self.selected_tag_id
             .map(|tag_id| self.task_tag_ids(task.id).contains(&tag_id))
             .unwrap_or(true)
     }
 
     fn task_matches_selected_filter(&self, task: &Task) -> bool {
+        if self.active_sidebar_tab != SidebarTab::Filters {
+            return true;
+        }
         let Some(filter_id) = self.selected_filter_id else {
             return true;
         };
@@ -3949,6 +4043,9 @@ impl App {
             return false;
         };
         let project_name = self.project_name(task.project_id);
+        let section_name = task
+            .section_id
+            .and_then(|section_id| self.section_name(section_id));
         let tag_names = self
             .task_tags(task.id)
             .into_iter()
@@ -3959,6 +4056,7 @@ impl App {
             task,
             self.today(),
             project_name,
+            section_name,
             tag_names.as_slice(),
         )
     }
@@ -4060,6 +4158,9 @@ impl App {
                     return false;
                 }
                 let project_name = self.project_name(task.project_id);
+                let section_name = task
+                    .section_id
+                    .and_then(|section_id| self.section_name(section_id));
                 let tag_names = self
                     .task_tags(task.id)
                     .into_iter()
@@ -4070,6 +4171,7 @@ impl App {
                     task,
                     self.today(),
                     project_name,
+                    section_name,
                     tag_names.as_slice(),
                 )
             })
@@ -12950,6 +13052,7 @@ mod tests {
             .expect("child task should create");
 
         app.refresh_tasks().expect("tasks should refresh");
+        app.active_sidebar_tab = SidebarTab::Projects;
         app.selected_project_id = Some(parent.id);
 
         let titles = app
@@ -12990,6 +13093,7 @@ mod tests {
             .expect("filter should create");
 
         app.refresh_tasks().expect("tasks should refresh");
+        app.active_sidebar_tab = SidebarTab::Filters;
         app.selected_filter_id = Some(filter.id);
 
         let titles = app
@@ -12998,6 +13102,108 @@ mod tests {
             .map(|task| task.title.as_str())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["Alpha"]);
+    }
+
+    #[test]
+    fn filters_tab_ignores_stale_project_selection_when_filtering_tasks() {
+        let mut app = test_app();
+        let inbox_project_id = app.inbox_project_id();
+        let other_project = app
+            .database
+            .project_repository()
+            .create("Other", None, ProjectColor::Blue, false, Local::now())
+            .expect("project should create");
+        let tasks = app.database.task_repository();
+        let tags = app.database.tag_repository();
+        let filters = app.database.filter_repository();
+
+        let work = tags
+            .create("Work", TagColor::Blue, false, Local::now())
+            .expect("tag should create");
+        let task_alpha = tasks
+            .create("Alpha", inbox_project_id, None, Local::now())
+            .expect("alpha task should create");
+        tasks
+            .create("Bravo", other_project.id, None, Local::now())
+            .expect("bravo task should create");
+        tags.replace_task_tags(task_alpha.id, &[work.id])
+            .expect("task tags should link");
+        let filter = filters
+            .create(
+                "Work Only",
+                "@Work",
+                FilterColor::Green,
+                false,
+                Local::now(),
+            )
+            .expect("filter should create");
+
+        app.refresh_tasks().expect("tasks should refresh");
+        app.selected_project_id = Some(other_project.id);
+        app.active_sidebar_tab = SidebarTab::Filters;
+        app.selected_filter_id = Some(filter.id);
+
+        let titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["Alpha"]);
+    }
+
+    #[test]
+    fn filters_tab_shows_matching_subtasks_even_when_parent_does_not_match() {
+        let mut app = test_app();
+        let inbox_project_id = app.inbox_project_id();
+        let tasks = app.database.task_repository();
+        let tags = app.database.tag_repository();
+        let filters = app.database.filter_repository();
+
+        let parent = tasks
+            .create("Parent", inbox_project_id, None, Local::now())
+            .expect("parent should create");
+        let child = tasks
+            .create("Child", inbox_project_id, None, Local::now())
+            .expect("child should create");
+        let child = tasks
+            .update(
+                child.id,
+                &TaskUpdate {
+                    title: "Child".to_string(),
+                    description: String::new(),
+                    project_id: inbox_project_id,
+                    section_id: None,
+                    parent_task_id: Some(parent.id),
+                    priority: TaskPriority::P4,
+                    due: None,
+                },
+            )
+            .expect("child should update");
+        let work = tags
+            .create("Work", TagColor::Blue, false, Local::now())
+            .expect("tag should create");
+        tags.replace_task_tags(child.id, &[work.id])
+            .expect("tag should link");
+        let filter = filters
+            .create(
+                "Work Only",
+                "@Work",
+                FilterColor::Green,
+                false,
+                Local::now(),
+            )
+            .expect("filter should create");
+
+        app.refresh_tasks().expect("tasks should refresh");
+        app.active_sidebar_tab = SidebarTab::Filters;
+        app.selected_filter_id = Some(filter.id);
+
+        let titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert!(titles.contains(&"Child"));
     }
 
     #[test]

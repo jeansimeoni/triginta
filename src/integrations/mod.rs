@@ -597,6 +597,11 @@ impl TodoistSyncProvider {
         sync_token: &str,
     ) -> Result<DownstreamApplyStats> {
         let sync_response = client.sync_resources(sync_token)?;
+        let label_name_by_id = sync_response
+            .labels
+            .iter()
+            .map(|label| (label.id.clone(), label.name.clone()))
+            .collect::<HashMap<_, _>>();
 
         let mut stats = DownstreamApplyStats::default();
 
@@ -653,6 +658,16 @@ impl TodoistSyncProvider {
         }
 
         for task in sync_response.items {
+            let labels = task.labels.unwrap_or_else(|| {
+                task.label_ids
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|label_id| {
+                        let id = label_id.as_string();
+                        label_name_by_id.get(id.as_str()).cloned()
+                    })
+                    .collect::<Vec<_>>()
+            });
             let remote = RemoteTaskRecord {
                 todoist_id: task.id,
                 project_todoist_id: task.project_id,
@@ -661,7 +676,7 @@ impl TodoistSyncProvider {
                 content: task.content,
                 description: task.description.unwrap_or_default(),
                 priority: Self::todoist_priority_to_local(task.priority.unwrap_or(1)),
-                labels: task.labels.unwrap_or_default(),
+                labels,
                 due_date: task
                     .due
                     .as_ref()
@@ -773,9 +788,26 @@ struct TodoistTask {
     description: Option<String>,
     priority: Option<u8>,
     labels: Option<Vec<String>>,
+    label_ids: Option<Vec<TodoistIdValue>>,
     due: Option<TodoistDue>,
     completed_at: Option<String>,
     checked: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum TodoistIdValue {
+    String(String),
+    Number(i64),
+}
+
+impl TodoistIdValue {
+    fn as_string(&self) -> String {
+        match self {
+            Self::String(value) => value.clone(),
+            Self::Number(value) => value.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
