@@ -1227,7 +1227,10 @@ mod tests {
 
     #[test]
     fn detect_due_lang_supports_pt_br_and_es_recurrence_strings() {
-        assert_eq!(TodoistSyncProvider::detect_due_lang("todo dia 25"), Some("pt"));
+        assert_eq!(
+            TodoistSyncProvider::detect_due_lang("todo dia 25"),
+            Some("pt")
+        );
         assert_eq!(
             TodoistSyncProvider::detect_due_lang("todos los dias"),
             Some("es")

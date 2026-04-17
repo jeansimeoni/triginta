@@ -51,18 +51,50 @@ pub fn parse_due_input_with_locales(
     let trimmed = input.trim();
 
     for locale in requested {
-        let normalized = locales::normalize_due_input_for_locale(trimmed, locale);
-        if let Some(mut due) =
-            parse_task_input_internal(format!("Placeholder {normalized}").as_str(), reference_date)
-                .due
-        {
-            due.string = trimmed.to_string();
-            due.due_lang = Some(locale.code().to_string());
+        if let Some(due) = parse_due_input_for_locale(trimmed, reference_date, locale, false) {
             return Some(due);
         }
     }
 
     None
+}
+
+pub fn parse_due_input_due_only_with_locales(
+    input: &str,
+    reference_date: NaiveDate,
+    locales: &[NlpLocale],
+) -> Option<TaskDue> {
+    let requested = if locales.is_empty() {
+        default_locale_priority()
+    } else {
+        locales.to_vec()
+    };
+    let trimmed = input.trim();
+
+    for locale in requested {
+        if let Some(due) = parse_due_input_for_locale(trimmed, reference_date, locale, true) {
+            return Some(due);
+        }
+    }
+
+    None
+}
+
+fn parse_due_input_for_locale(
+    input: &str,
+    reference_date: NaiveDate,
+    locale: NlpLocale,
+    require_due_only: bool,
+) -> Option<TaskDue> {
+    let normalized = locales::normalize_due_input_for_locale(input, locale);
+    let parsed = parse_task_input_internal(normalized.as_str(), reference_date);
+    if require_due_only && !parsed.cleaned_title.trim().is_empty() {
+        return None;
+    }
+    let mut due = parsed.due?;
+    due.string = input.to_string();
+    due.due_lang = Some(locale.code().to_string());
+    Some(due)
 }
 
 pub fn parse_due_time_input(input: &str) -> Option<NaiveTime> {
@@ -165,7 +197,16 @@ fn recurring_pattern_candidates(
     let mut matches = Vec::new();
     matches.extend(weekday_range_candidates(input, reference_date, lower));
     matches.extend(weekday_list_candidates(input, reference_date, lower));
-    matches.extend(monthly_day_of_month_candidates(input, reference_date, lower));
+    matches.extend(monthly_day_of_month_candidates(
+        input,
+        reference_date,
+        lower,
+    ));
+    matches.extend(monthly_boundary_day_candidates(
+        input,
+        reference_date,
+        lower,
+    ));
     matches.extend(monthly_ordinal_weekday_candidates(
         input,
         reference_date,
@@ -698,45 +739,81 @@ fn monthly_ordinal_weekday_candidates(
         } else {
             index
         };
-        if start_index + 5 >= words.len() {
-            continue;
-        }
-        if words[start_index].0 != "the" {
+
+        if start_index + 5 < words.len() && words[start_index].0 == "the" {
+            let Some(ordinal) = parse_ordinal_word(words[start_index + 1].0) else {
+                continue;
+            };
+            if words[start_index + 3].0 != "of"
+                || words[start_index + 4].0 != "the"
+                || words[start_index + 5].0 != "month"
+            {
+                continue;
+            }
+            let due_date = if words[start_index + 2].0 == "weekday" {
+                next_monthly_ordinal_business_day(reference_date, ordinal)
+            } else {
+                parse_weekday_word(words[start_index + 2].0).and_then(|weekday| {
+                    next_monthly_ordinal_weekday(reference_date, ordinal, weekday)
+                })
+            };
+            let Some(due_date) = due_date else {
+                continue;
+            };
+
+            let start = words[index].1;
+            let end = words[start_index + 5].2;
+            matches.push(with_time_suffix(
+                input,
+                start,
+                end,
+                TaskDue {
+                    date: due_date,
+                    datetime: None,
+                    timezone: None,
+                    string: input[start..end].trim().to_string(),
+                    due_lang: None,
+                    is_recurring: true,
+                },
+            ));
             continue;
         }
 
-        let Some(ordinal) = parse_ordinal_word(words[start_index + 1].0) else {
-            continue;
-        };
-        let Some(weekday) = parse_weekday_word(words[start_index + 2].0) else {
-            continue;
-        };
-        if words[start_index + 3].0 != "of"
-            || words[start_index + 4].0 != "the"
-            || words[start_index + 5].0 != "month"
-        {
-            continue;
+        if start_index + 3 < words.len() {
+            let Some(ordinal) = parse_ordinal_word(words[start_index].0) else {
+                continue;
+            };
+            if words[start_index + 2].0 != "every"
+                || singular_unit(words[start_index + 3].0) != "month"
+            {
+                continue;
+            }
+            let due_date = if words[start_index + 1].0 == "weekday" {
+                next_monthly_ordinal_business_day(reference_date, ordinal)
+            } else {
+                parse_weekday_word(words[start_index + 1].0).and_then(|weekday| {
+                    next_monthly_ordinal_weekday(reference_date, ordinal, weekday)
+                })
+            };
+            let Some(due_date) = due_date else {
+                continue;
+            };
+            let start = words[index].1;
+            let end = words[start_index + 3].2;
+            matches.push(with_time_suffix(
+                input,
+                start,
+                end,
+                TaskDue {
+                    date: due_date,
+                    datetime: None,
+                    timezone: None,
+                    string: input[start..end].trim().to_string(),
+                    due_lang: None,
+                    is_recurring: true,
+                },
+            ));
         }
-
-        let Some(due_date) = next_monthly_ordinal_weekday(reference_date, ordinal, weekday) else {
-            continue;
-        };
-
-        let start = words[index].1;
-        let end = words[start_index + 5].2;
-        matches.push(with_time_suffix(
-            input,
-            start,
-            end,
-            TaskDue {
-                date: due_date,
-                datetime: None,
-                timezone: None,
-                string: input[start..end].trim().to_string(),
-                due_lang: None,
-                is_recurring: true,
-            },
-        ));
     }
 
     matches
@@ -783,6 +860,97 @@ fn monthly_day_of_month_candidates(
     matches
 }
 
+fn monthly_boundary_day_candidates(
+    input: &str,
+    reference_date: NaiveDate,
+    lower: &str,
+) -> Vec<((usize, usize), TaskDue)> {
+    let words = words_with_positions(lower);
+    let mut matches = Vec::new();
+
+    for index in 0..words.len() {
+        let start_index = if words[index].0 == "every" {
+            index + 1
+        } else {
+            index
+        };
+
+        if start_index + 3 < words.len() {
+            let Some(boundary) = parse_month_boundary_word(words[start_index].0) else {
+                continue;
+            };
+            let day_kind = match words[start_index + 1].0 {
+                "day" => MonthDayKind::Calendar,
+                "weekday" => MonthDayKind::Business,
+                _ => continue,
+            };
+            if words[start_index + 2].0 != "every"
+                || singular_unit(words[start_index + 3].0) != "month"
+            {
+                continue;
+            }
+            let Some(due_date) = next_monthly_day_boundary(reference_date, day_kind, boundary)
+            else {
+                continue;
+            };
+            let start = words[index].1;
+            let end = words[start_index + 3].2;
+            matches.push(with_time_suffix(
+                input,
+                start,
+                end,
+                TaskDue {
+                    date: due_date,
+                    datetime: None,
+                    timezone: None,
+                    string: input[start..end].trim().to_string(),
+                    due_lang: None,
+                    is_recurring: true,
+                },
+            ));
+            continue;
+        }
+
+        if start_index + 5 < words.len() && words[start_index].0 == "the" {
+            let Some(boundary) = parse_month_boundary_word(words[start_index + 1].0) else {
+                continue;
+            };
+            let day_kind = match words[start_index + 2].0 {
+                "day" => MonthDayKind::Calendar,
+                "weekday" => MonthDayKind::Business,
+                _ => continue,
+            };
+            if words[start_index + 3].0 != "of"
+                || words[start_index + 4].0 != "the"
+                || singular_unit(words[start_index + 5].0) != "month"
+            {
+                continue;
+            }
+            let Some(due_date) = next_monthly_day_boundary(reference_date, day_kind, boundary)
+            else {
+                continue;
+            };
+            let start = words[index].1;
+            let end = words[start_index + 5].2;
+            matches.push(with_time_suffix(
+                input,
+                start,
+                end,
+                TaskDue {
+                    date: due_date,
+                    datetime: None,
+                    timezone: None,
+                    string: input[start..end].trim().to_string(),
+                    due_lang: None,
+                    is_recurring: true,
+                },
+            ));
+        }
+    }
+
+    matches
+}
+
 fn weekday_candidates() -> [(&'static str, Weekday); 17] {
     [
         ("monday", Weekday::Mon),
@@ -819,6 +987,26 @@ fn parse_ordinal_word(word: &str) -> Option<u8> {
         "third" => Some(3),
         "fourth" => Some(4),
         "fifth" => Some(5),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MonthBoundary {
+    First,
+    Last,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MonthDayKind {
+    Calendar,
+    Business,
+}
+
+fn parse_month_boundary_word(word: &str) -> Option<MonthBoundary> {
+    match word {
+        "first" => Some(MonthBoundary::First),
+        "last" => Some(MonthBoundary::Last),
         _ => None,
     }
 }
@@ -905,7 +1093,9 @@ fn month_day_date(reference_date: NaiveDate, month: u32, day: u32) -> Option<Nai
 
 fn next_month_day_for_recurrence(reference_date: NaiveDate, day: u32) -> Option<NaiveDate> {
     let this_month = NaiveDate::from_ymd_opt(reference_date.year(), reference_date.month(), day);
-    if let Some(date) = this_month && date >= reference_date {
+    if let Some(date) = this_month
+        && date >= reference_date
+    {
         return Some(date);
     }
     let next_month = reference_date.checked_add_months(Months::new(1))?;
@@ -1008,6 +1198,100 @@ fn next_monthly_ordinal_weekday(
         ordinal,
         weekday,
     )
+}
+
+fn next_monthly_ordinal_business_day(reference_date: NaiveDate, ordinal: u8) -> Option<NaiveDate> {
+    let this_month =
+        monthly_ordinal_business_day(reference_date.year(), reference_date.month(), ordinal);
+    if let Some(date) = this_month
+        && date >= reference_date
+    {
+        return Some(date);
+    }
+    let next_month = reference_date.checked_add_months(Months::new(1))?;
+    monthly_ordinal_business_day(next_month.year(), next_month.month(), ordinal)
+}
+
+fn monthly_ordinal_business_day(year: i32, month: u32, ordinal: u8) -> Option<NaiveDate> {
+    if ordinal == 0 {
+        return None;
+    }
+    let mut count = 0u8;
+    for day in 1..=31 {
+        let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
+            break;
+        };
+        if matches!(
+            date.weekday(),
+            Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu | Weekday::Fri
+        ) {
+            count = count.saturating_add(1);
+            if count == ordinal {
+                return Some(date);
+            }
+        }
+    }
+    None
+}
+
+fn next_monthly_day_boundary(
+    reference_date: NaiveDate,
+    kind: MonthDayKind,
+    boundary: MonthBoundary,
+) -> Option<NaiveDate> {
+    let this_month = monthly_day_boundary(
+        reference_date.year(),
+        reference_date.month(),
+        kind,
+        boundary,
+    )?;
+    if this_month >= reference_date {
+        return Some(this_month);
+    }
+    let next_month = reference_date.checked_add_months(Months::new(1))?;
+    monthly_day_boundary(next_month.year(), next_month.month(), kind, boundary)
+}
+
+fn monthly_day_boundary(
+    year: i32,
+    month: u32,
+    kind: MonthDayKind,
+    boundary: MonthBoundary,
+) -> Option<NaiveDate> {
+    match (kind, boundary) {
+        (MonthDayKind::Calendar, MonthBoundary::First) => NaiveDate::from_ymd_opt(year, month, 1),
+        (MonthDayKind::Calendar, MonthBoundary::Last) => (28..=31)
+            .rev()
+            .find_map(|day| NaiveDate::from_ymd_opt(year, month, day)),
+        (MonthDayKind::Business, MonthBoundary::First) => {
+            for day in 1..=31 {
+                let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
+                    break;
+                };
+                if matches!(
+                    date.weekday(),
+                    Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu | Weekday::Fri
+                ) {
+                    return Some(date);
+                }
+            }
+            None
+        }
+        (MonthDayKind::Business, MonthBoundary::Last) => {
+            for day in (1..=31).rev() {
+                let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
+                    continue;
+                };
+                if matches!(
+                    date.weekday(),
+                    Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu | Weekday::Fri
+                ) {
+                    return Some(date);
+                }
+            }
+            None
+        }
+    }
 }
 
 fn monthly_ordinal_weekday(
@@ -1131,7 +1415,7 @@ mod tests {
     use crate::domain::TaskDue;
 
     use super::{
-        NlpLocale, locale_priority_with_hint, local_naive_to_utc, next_recurring_due,
+        NlpLocale, local_naive_to_utc, locale_priority_with_hint, next_recurring_due,
         next_recurring_due_with_locales, parse_due_input_with_locales, parse_task_input,
     };
 
@@ -1656,6 +1940,64 @@ mod tests {
             .expect("due should parse");
         assert!(due.is_recurring);
         assert_eq!(due.string, "toda semana");
+    }
+
+    #[test]
+    fn parses_pt_br_fifth_business_day_of_month_recurring_phrase() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "no quinto dia util todo mes",
+            reference_date,
+            &[NlpLocale::PtBr],
+        )
+        .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.string, "no quinto dia util todo mes");
+        assert_eq!(
+            due.date,
+            NaiveDate::from_ymd_opt(2026, 5, 7).expect("valid date")
+        );
+    }
+
+    #[test]
+    fn parses_pt_br_first_and_last_day_of_month_recurring_phrases() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let first =
+            parse_due_input_with_locales("primeiro dia do mes", reference_date, &[NlpLocale::PtBr])
+                .expect("first-day due should parse");
+        assert!(first.is_recurring);
+        assert_eq!(first.string, "primeiro dia do mes");
+        assert_eq!(
+            first.date,
+            NaiveDate::from_ymd_opt(2026, 5, 1).expect("valid date")
+        );
+
+        let last =
+            parse_due_input_with_locales("ultimo dia do mes", reference_date, &[NlpLocale::PtBr])
+                .expect("last-day due should parse");
+        assert!(last.is_recurring);
+        assert_eq!(last.string, "ultimo dia do mes");
+        assert_eq!(
+            last.date,
+            NaiveDate::from_ymd_opt(2026, 4, 30).expect("valid date")
+        );
+    }
+
+    #[test]
+    fn parses_pt_br_last_business_day_of_month_recurring_phrase() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "ultimo dia util do mes",
+            reference_date,
+            &[NlpLocale::PtBr],
+        )
+        .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.string, "ultimo dia util do mes");
+        assert_eq!(
+            due.date,
+            NaiveDate::from_ymd_opt(2026, 4, 30).expect("valid date")
+        );
     }
 
     #[test]

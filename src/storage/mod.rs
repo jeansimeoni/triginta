@@ -2636,7 +2636,10 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
             .context("failed to load fallback inbox project by name")?;
         if let Some(id) = fallback {
             self.connection
-                .execute("UPDATE projects SET is_inbox = 1 WHERE id = ?1", params![id])
+                .execute(
+                    "UPDATE projects SET is_inbox = 1 WHERE id = ?1",
+                    params![id],
+                )
                 .context("failed to mark fallback inbox project as inbox")?;
             return Ok(ProjectId(id));
         }

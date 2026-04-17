@@ -30,8 +30,9 @@ use crate::{
         SyncEntitySnapshot, SyncRepository, TagRepository, TaskRepository,
     },
     task_nlp::{
-        NlpLocale, locale_priority_with_hint, next_recurring_due_with_locales,
-        parse_due_input_with_locales, parse_due_time_input, parse_task_input,
+        NlpLocale, ParsedTaskInput, locale_priority_with_hint, next_recurring_due_with_locales,
+        parse_due_input_due_only_with_locales, parse_due_input_with_locales, parse_due_time_input,
+        parse_task_input,
     },
     theme::ThemePalette,
     ui,
@@ -1902,6 +1903,113 @@ pub struct App {
 }
 
 impl App {
+    fn parse_task_input_with_locales(
+        &self,
+        input: &str,
+        reference_date: NaiveDate,
+    ) -> ParsedTaskInput {
+        let mut parsed = parse_task_input(input, reference_date);
+        if let Some(due) = parsed.due.as_mut() {
+            if due.due_lang.is_none() {
+                let locales = self.due_parse_locales();
+                if let Some(enriched) = parse_due_input_with_locales(
+                    due.string.as_str(),
+                    reference_date,
+                    locales.as_slice(),
+                ) {
+                    due.due_lang = enriched.due_lang;
+                }
+            }
+            return parsed;
+        }
+
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return parsed;
+        }
+
+        let mut starts = vec![0usize];
+        let mut in_word = false;
+        for (index, character) in trimmed.char_indices() {
+            if character.is_whitespace() {
+                in_word = false;
+            } else if !in_word {
+                starts.push(index);
+                in_word = true;
+            }
+        }
+        starts.sort_unstable();
+        starts.dedup();
+
+        let locales = self.due_parse_locales();
+        let mut best_with_title: Option<(usize, ParsedTaskInput)> = None;
+        let mut due_only_match: Option<(usize, ParsedTaskInput)> = None;
+        for start in &starts {
+            let suffix = trimmed[*start..].trim();
+            if suffix.is_empty() {
+                continue;
+            }
+            let Some(mut due) =
+                parse_due_input_due_only_with_locales(suffix, reference_date, locales.as_slice())
+            else {
+                continue;
+            };
+            due.string = suffix.to_string();
+            let cleaned_title = trimmed[..*start].trim_end().to_string();
+            let candidate = ParsedTaskInput {
+                cleaned_title: cleaned_title.clone(),
+                due: Some(due),
+            };
+            if cleaned_title.is_empty() {
+                match due_only_match.as_ref() {
+                    Some((existing_start, _)) if *existing_start <= *start => {}
+                    _ => due_only_match = Some((*start, candidate)),
+                }
+                continue;
+            }
+            match best_with_title.as_ref() {
+                Some((existing_start, _)) if *existing_start <= *start => {}
+                _ => best_with_title = Some((*start, candidate)),
+            }
+        }
+
+        if let Some((_, candidate)) = best_with_title {
+            return candidate;
+        }
+        if let Some((_, candidate)) = due_only_match {
+            return candidate;
+        }
+
+        let mut broad_due_only_match: Option<ParsedTaskInput> = None;
+        starts.sort_unstable_by(|left, right| right.cmp(left));
+        for start in starts {
+            let suffix = trimmed[start..].trim();
+            if suffix.is_empty() {
+                continue;
+            }
+            let Some(mut due) =
+                parse_due_input_with_locales(suffix, reference_date, locales.as_slice())
+            else {
+                continue;
+            };
+            due.string = suffix.to_string();
+            let cleaned_title = trimmed[..start].trim_end().to_string();
+            let candidate = ParsedTaskInput {
+                cleaned_title: cleaned_title.clone(),
+                due: Some(due),
+            };
+            if cleaned_title.is_empty() {
+                if broad_due_only_match.is_none() {
+                    broad_due_only_match = Some(candidate);
+                }
+                continue;
+            }
+            return candidate;
+        }
+
+        broad_due_only_match.unwrap_or(parsed)
+    }
+
     fn task_input_parse(
         &self,
         raw: &str,
@@ -1912,17 +2020,7 @@ impl App {
         let (without_project_tokens, project_id, section_id) =
             self.extract_task_project_reference(without_tag_tokens.as_str(), fallback_project_id);
         let (content, priority) = Self::extract_priority_reference(without_project_tokens.as_str());
-        let mut parsed = parse_task_input(content.as_str(), self.today());
-        if let Some(due) = parsed.due.as_mut()
-            && due.due_lang.is_none()
-        {
-            let locales = self.due_parse_locales();
-            if let Some(enriched) =
-                parse_due_input_with_locales(due.string.as_str(), self.today(), locales.as_slice())
-            {
-                due.due_lang = enriched.due_lang;
-            }
-        }
+        let parsed = self.parse_task_input_with_locales(content.as_str(), self.today());
         ParsedTaskDraft {
             cleaned_title: parsed.cleaned_title,
             due: parsed.due,
@@ -3873,7 +3971,8 @@ impl App {
         let date = if date_text.is_empty() {
             if let Some(due) = recurring_due.as_ref() {
                 due.date
-            } else if let Some(existing_due) = existing_due.as_ref().filter(|due| due.is_recurring) {
+            } else if let Some(existing_due) = existing_due.as_ref().filter(|due| due.is_recurring)
+            {
                 existing_due.date
             } else {
                 anyhow::bail!("due date is required when a due time is set");
@@ -6599,7 +6698,7 @@ impl App {
     fn after_editor_text_change(&self, editor: &mut TaskEditorState, reference_date: NaiveDate) {
         match editor.focused_field {
             TaskEditorField::Title => {
-                Self::sync_editor_due_from_title(editor, reference_date);
+                self.sync_editor_due_from_title(editor, reference_date);
                 Self::sync_editor_priority_from_title(editor);
             }
             TaskEditorField::Description => {}
@@ -6608,7 +6707,7 @@ impl App {
             }
             TaskEditorField::Tags => {}
             TaskEditorField::Priority => {
-                Self::sync_editor_title_from_priority_field(editor, reference_date);
+                self.sync_editor_title_from_priority_field(editor, reference_date);
             }
             TaskEditorField::DueDate | TaskEditorField::DueTime => {
                 editor.due_from_title = false;
@@ -6820,8 +6919,9 @@ impl App {
         Self::sync_session_note_scroll(editor);
     }
 
-    fn sync_editor_due_from_title(editor: &mut TaskEditorState, reference_date: NaiveDate) {
-        let parsed = parse_task_input(editor.title_input.as_str(), reference_date);
+    fn sync_editor_due_from_title(&self, editor: &mut TaskEditorState, reference_date: NaiveDate) {
+        let parsed =
+            self.parse_task_input_with_locales(editor.title_input.as_str(), reference_date);
         if let Some(due) = parsed.due {
             editor.due_date_input = due.date.format("%Y-%m-%d").to_string();
             editor.due_time_input = due
@@ -6866,6 +6966,7 @@ impl App {
     }
 
     fn sync_editor_title_from_priority_field(
+        &self,
         editor: &mut TaskEditorState,
         reference_date: NaiveDate,
     ) {
@@ -6875,7 +6976,7 @@ impl App {
         }
         editor.title_input = cleaned_title;
         editor.title_cursor = editor.title_cursor.min(editor.title_input.len());
-        Self::sync_editor_due_from_title(editor, reference_date);
+        self.sync_editor_due_from_title(editor, reference_date);
     }
 
     fn extract_project_reference_for_title_cleanup(raw: &str) -> (String, Option<String>) {
@@ -6894,7 +6995,11 @@ impl App {
         (cleaned, Some(query.to_string()))
     }
 
-    fn sync_editor_due_from_recurrence(&self, editor: &mut TaskEditorState, reference_date: NaiveDate) {
+    fn sync_editor_due_from_recurrence(
+        &self,
+        editor: &mut TaskEditorState,
+        reference_date: NaiveDate,
+    ) {
         let recurrence = editor.recurrence_input.trim();
         if recurrence.is_empty() {
             editor.due_natural.clear();
@@ -11247,8 +11352,8 @@ mod tests {
         TaskUpdate,
     };
     use crate::storage::{
-        Database, FilterRepository, ProjectRepository, SectionRepository, TagRepository,
-        SyncRepository, TaskRepository,
+        Database, FilterRepository, ProjectRepository, SectionRepository, SyncRepository,
+        TagRepository, TaskRepository,
     };
     use crate::task_nlp::{locale_priority_with_hint, parse_due_input_with_locales};
     use crate::theme::ThemePalette;
@@ -12295,6 +12400,77 @@ mod tests {
                 string: "tomorrow at 3pm".to_string(),
                 due_lang: Some("en".to_string()),
                 is_recurring: false,
+            })
+        );
+    }
+
+    #[test]
+    fn create_popup_parses_pt_br_due_phrase_from_title() {
+        let mut app = test_app();
+        let today = app.today();
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Terminar isto hoje".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let input = app.task_input_view().expect("input popup should be open");
+        let due_preview = input.due_preview.expect("due preview should be visible");
+        assert_eq!(due_preview.string, "hoje");
+        assert_eq!(due_preview.date, today);
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "Terminar isto");
+        assert_eq!(
+            task.due,
+            Some(TaskDue {
+                date: today,
+                datetime: None,
+                timezone: None,
+                string: "hoje".to_string(),
+                due_lang: Some("pt-BR".to_string()),
+                is_recurring: false,
+            })
+        );
+    }
+
+    #[test]
+    fn create_popup_prefers_specific_pt_br_recurrence_phrase_from_title() {
+        let mut app = test_app();
+        let expected_due = parse_due_input_with_locales(
+            "quinto dia util todo mes",
+            app.today(),
+            locale_priority_with_hint(None).as_slice(),
+        )
+        .expect("pt-BR recurrence should parse");
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Fazer esta tarefa no quinto dia util todo mes".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let input = app.task_input_view().expect("input popup should be open");
+        let due_preview = input.due_preview.expect("due preview should be visible");
+        assert_eq!(due_preview.string, "quinto dia util todo mes");
+        assert_eq!(due_preview.date, expected_due.date);
+        assert!(due_preview.is_recurring);
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "Fazer esta tarefa no");
+        assert_eq!(
+            task.due,
+            Some(TaskDue {
+                string: "quinto dia util todo mes".to_string(),
+                due_lang: Some("pt-BR".to_string()),
+                ..expected_due
             })
         );
     }
@@ -15444,13 +15620,7 @@ mod tests {
             updated.due.as_ref().expect("due should exist").string,
             "cada quinzena"
         );
-        assert!(
-            updated
-                .due
-                .as_ref()
-                .expect("due should exist")
-                .is_recurring
-        );
+        assert!(updated.due.as_ref().expect("due should exist").is_recurring);
     }
 
     #[test]
