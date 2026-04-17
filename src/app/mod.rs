@@ -1665,6 +1665,57 @@ const TASKS_SHORTCUTS: &[ShortcutTip] = &[
     },
 ];
 
+const TASKS_SHORTCUTS_NO_REORDER: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "h/l or ←/→",
+        description: "switch tab",
+    },
+    ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "move task",
+    },
+    ShortcutTip {
+        keys: "c",
+        description: "new task",
+    },
+    ShortcutTip {
+        keys: "C",
+        description: "new subtask",
+    },
+    ShortcutTip {
+        keys: "e/d",
+        description: "edit/delete",
+    },
+    ShortcutTip {
+        keys: "a",
+        description: "assign to timer",
+    },
+    ShortcutTip {
+        keys: "Space",
+        description: "toggle done",
+    },
+    ShortcutTip {
+        keys: "r",
+        description: "reschedule due",
+    },
+    ShortcutTip {
+        keys: "o/f",
+        description: "sort/hide done",
+    },
+    ShortcutTip {
+        keys: "=/-",
+        description: "expand/collapse",
+    },
+    ShortcutTip {
+        keys: "PgUp/PgDn",
+        description: "details scroll",
+    },
+    ShortcutTip {
+        keys: "/",
+        description: "search",
+    },
+];
+
 const STATISTICS_SHORTCUTS: &[ShortcutTip] = &[ShortcutTip {
     keys: "h/l or ←/→",
     description: "switch tab",
@@ -3831,7 +3882,13 @@ impl App {
             },
             PanelFocus::Favorites => FAVORITES_SHORTCUTS,
             PanelFocus::RightPane => match self.active_right_panel_tab {
-                RightPanelTab::Tasks => TASKS_SHORTCUTS,
+                RightPanelTab::Tasks => {
+                    if self.should_show_task_reorder_shortcut() {
+                        TASKS_SHORTCUTS
+                    } else {
+                        TASKS_SHORTCUTS_NO_REORDER
+                    }
+                }
                 RightPanelTab::Statistics => STATISTICS_SHORTCUTS,
             },
         }
@@ -4251,6 +4308,7 @@ impl App {
             && self.task_matches_selected_project(task)
             && self.task_matches_selected_tag(task)
             && self.task_matches_selected_filter(task)
+            && self.task_matches_selected_favorite(task)
             && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
     }
 
@@ -4436,11 +4494,15 @@ impl App {
                 } else {
                     self.selected_favorite_item = None;
                 }
+                self.sync_task_selection();
             }
         }
     }
 
     fn task_matches_selected_project(&self, task: &Task) -> bool {
+        if self.focused_panel == PanelFocus::Favorites {
+            return true;
+        }
         if self.active_sidebar_tab != SidebarTab::Projects {
             return true;
         }
@@ -4453,6 +4515,9 @@ impl App {
     }
 
     fn task_matches_selected_tag(&self, task: &Task) -> bool {
+        if self.focused_panel == PanelFocus::Favorites {
+            return true;
+        }
         if self.active_sidebar_tab != SidebarTab::Tags {
             return true;
         }
@@ -4462,6 +4527,9 @@ impl App {
     }
 
     fn task_matches_selected_filter(&self, task: &Task) -> bool {
+        if self.focused_panel == PanelFocus::Favorites {
+            return true;
+        }
         if self.active_sidebar_tab != SidebarTab::Filters {
             return true;
         }
@@ -4493,6 +4561,47 @@ impl App {
             section_name,
             tag_names.as_slice(),
         )
+    }
+
+    fn task_matches_selected_favorite(&self, task: &Task) -> bool {
+        if self.focused_panel != PanelFocus::Favorites {
+            return true;
+        }
+
+        match self.selected_favorite_item {
+            Some(FavoriteItemKind::Project(project_id)) => {
+                self.project_is_in_subtree(task.project_id, project_id)
+            }
+            Some(FavoriteItemKind::Tag(tag_id)) => self.task_tag_ids(task.id).contains(&tag_id),
+            Some(FavoriteItemKind::Filter(filter_id)) => {
+                let Some(filter) = self.filter_by_id(filter_id) else {
+                    return true;
+                };
+                let Ok(expr) = filters::parse_for_runtime(filter.query.as_str()) else {
+                    return false;
+                };
+                let project_name = self.project_name(task.project_id);
+                let project_hierarchy_names = self.project_hierarchy_names(task.project_id);
+                let section_name = task
+                    .section_id
+                    .and_then(|section_id| self.section_name(section_id));
+                let tag_names = self
+                    .task_tags(task.id)
+                    .into_iter()
+                    .map(|tag| tag.name.as_str())
+                    .collect::<Vec<_>>();
+                filters::evaluate_ignoring_unsupported(
+                    &expr,
+                    task,
+                    self.today(),
+                    project_name,
+                    project_hierarchy_names.as_slice(),
+                    section_name,
+                    tag_names.as_slice(),
+                )
+            }
+            None => true,
+        }
     }
 
     fn task_matches_view(&self, task: &Task, view: TaskView) -> bool {
@@ -6476,6 +6585,18 @@ impl App {
         Ok(())
     }
 
+    fn should_show_task_reorder_shortcut(&self) -> bool {
+        let Some(selected_task_id) = self.selected_task_id else {
+            return false;
+        };
+        self.screen_data
+            .tasks
+            .iter()
+            .find(|task| task.id == selected_task_id && self.task_is_active(task))
+            .and_then(|task| task.parent_task_id)
+            .is_some()
+    }
+
     fn searchable_tasks(&self, query: &str) -> Vec<&Task> {
         self.screen_data
             .tasks
@@ -7964,6 +8085,7 @@ impl App {
         let rows = self.favorite_rows();
         if rows.is_empty() {
             self.selected_favorite_item = None;
+            self.sync_task_selection();
             return;
         }
         let current_index = rows
@@ -7973,6 +8095,37 @@ impl App {
         let next_index = (current_index as isize + offset)
             .clamp(0, rows.len().saturating_sub(1) as isize) as usize;
         self.selected_favorite_item = Some(rows[next_index].item);
+        self.sync_task_selection();
+    }
+
+    fn apply_selected_favorite_filter(&mut self) {
+        let Some(item) = self.selected_favorite_item else {
+            return;
+        };
+
+        match item {
+            FavoriteItemKind::Project(project_id) => {
+                self.active_sidebar_tab = SidebarTab::Projects;
+                self.selected_project_id = Some(project_id);
+                self.selected_section_id = None;
+                self.selected_tag_id = None;
+                self.selected_filter_id = None;
+            }
+            FavoriteItemKind::Tag(tag_id) => {
+                self.active_sidebar_tab = SidebarTab::Tags;
+                self.selected_tag_id = Some(tag_id);
+                self.selected_project_id = None;
+                self.selected_section_id = None;
+                self.selected_filter_id = None;
+            }
+            FavoriteItemKind::Filter(filter_id) => {
+                self.active_sidebar_tab = SidebarTab::Filters;
+                self.selected_filter_id = Some(filter_id);
+                self.selected_tag_id = None;
+                self.selected_project_id = None;
+                self.selected_section_id = None;
+            }
+        }
     }
 
     fn open_create_filter_popup(&mut self) {
@@ -10494,6 +10647,9 @@ impl App {
                     && self.active_right_panel_tab == RightPanelTab::Tasks
                 {
                     self.sync_task_selection();
+                } else if self.focused_panel == PanelFocus::Favorites {
+                    self.sync_favorite_selection();
+                    self.sync_task_selection();
                 }
             }
             KeyCode::Tab => {
@@ -10502,6 +10658,9 @@ impl App {
                     && self.active_right_panel_tab == RightPanelTab::Tasks
                 {
                     self.sync_task_selection();
+                } else if self.focused_panel == PanelFocus::Favorites {
+                    self.sync_favorite_selection();
+                    self.sync_task_selection();
                 }
             }
             KeyCode::BackTab => {
@@ -10509,6 +10668,9 @@ impl App {
                 if self.focused_panel == PanelFocus::RightPane
                     && self.active_right_panel_tab == RightPanelTab::Tasks
                 {
+                    self.sync_task_selection();
+                } else if self.focused_panel == PanelFocus::Favorites {
+                    self.sync_favorite_selection();
                     self.sync_task_selection();
                 }
             }
@@ -10580,9 +10742,17 @@ impl App {
             }
             KeyCode::Home if self.focused_panel == PanelFocus::Favorites => {
                 self.selected_favorite_item = self.favorite_rows().first().map(|row| row.item);
+                self.sync_task_selection();
             }
             KeyCode::End if self.focused_panel == PanelFocus::Favorites => {
                 self.selected_favorite_item = self.favorite_rows().last().map(|row| row.item);
+                self.sync_task_selection();
+            }
+            KeyCode::Enter if self.focused_panel == PanelFocus::Favorites => {
+                self.apply_selected_favorite_filter();
+                self.focused_panel = PanelFocus::RightPane;
+                self.active_right_panel_tab = RightPanelTab::Tasks;
+                self.sync_task_selection();
             }
             KeyCode::Char('j') | KeyCode::Down if self.focused_panel == PanelFocus::Navigation => {
                 match self.active_sidebar_tab {
@@ -12192,6 +12362,146 @@ mod tests {
                 .map(|row| row.item),
             Some(FavoriteItemKind::Project(project.id))
         );
+    }
+
+    #[test]
+    fn favorites_panel_navigation_updates_visible_task_list() {
+        let mut app = test_app();
+        let now = Local::now();
+
+        let alpha = app
+            .database
+            .project_repository()
+            .create("Alpha Favorite", None, ProjectColor::Blue, true, now)
+            .expect("project should create");
+        let beta = app
+            .database
+            .project_repository()
+            .create("Beta Favorite", None, ProjectColor::Teal, true, now)
+            .expect("project should create");
+        app.database
+            .task_repository()
+            .create("Task Alpha", alpha.id, None, now)
+            .expect("task should create");
+        app.database
+            .task_repository()
+            .create("Task Beta", beta.id, None, now)
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch to favorites");
+
+        let first_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(first_titles, vec!["Task Alpha"]);
+
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("selection should move");
+        let second_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(second_titles, vec!["Task Beta"]);
+    }
+
+    #[test]
+    fn favorites_panel_enter_applies_selected_filter_and_focuses_task_list() {
+        let mut app = test_app();
+        let now = Local::now();
+        app.active_right_panel_tab = RightPanelTab::Statistics;
+
+        let tag = app
+            .database
+            .tag_repository()
+            .create("Favorite Tag", TagColor::Blue, true, now)
+            .expect("tag should create");
+        let project_id = app.inbox_project_id();
+        let task = app
+            .database
+            .task_repository()
+            .create("Tagged Task", project_id, None, now)
+            .expect("task should create");
+        app.database
+            .tag_repository()
+            .replace_task_tags(task.id, &[tag.id])
+            .expect("tag link should save");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch to favorites");
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("selection should move to tag");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should apply favorite");
+
+        assert_eq!(app.focused_panel(), PanelFocus::RightPane);
+        assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
+        assert_eq!(app.active_sidebar_tab(), SidebarTab::Tags);
+        assert_eq!(app.selected_tag_id, Some(tag.id));
+        let titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|candidate| candidate.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["Tagged Task"]);
+    }
+
+    #[test]
+    fn favorites_navigation_ignores_existing_sidebar_filters_for_preview() {
+        let mut app = test_app();
+        let now = Local::now();
+
+        let busy = app
+            .database
+            .tag_repository()
+            .create("Busy", TagColor::Red, false, now)
+            .expect("tag should create");
+        let alpha = app
+            .database
+            .project_repository()
+            .create("Alpha Favorite", None, ProjectColor::Blue, true, now)
+            .expect("project should create");
+        let beta = app
+            .database
+            .project_repository()
+            .create("Beta Favorite", None, ProjectColor::Teal, true, now)
+            .expect("project should create");
+        let alpha_task = app
+            .database
+            .task_repository()
+            .create("Task Alpha", alpha.id, None, now)
+            .expect("task should create");
+        app.database
+            .task_repository()
+            .create("Task Beta", beta.id, None, now)
+            .expect("task should create");
+        app.database
+            .tag_repository()
+            .replace_task_tags(alpha_task.id, &[busy.id])
+            .expect("tag link should save");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        // Start with a conflicting sidebar filter that would normally hide Task Beta.
+        app.active_sidebar_tab = SidebarTab::Tags;
+        app.selected_tag_id = Some(busy.id);
+        app.sync_task_selection();
+
+        app.handle_key(crossterm::event::KeyCode::Char('7'))
+            .expect("focus should switch to favorites");
+        app.handle_key(crossterm::event::KeyCode::Down)
+            .expect("selection should move");
+
+        let titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["Task Beta"]);
     }
 
     #[test]
@@ -16597,6 +16907,67 @@ mod tests {
             .find(|tip| tip.keys == "r")
             .expect("tasks shortcuts should include r");
         assert_eq!(reschedule_tip.description, "reschedule due");
+    }
+
+    #[test]
+    fn tasks_shortcuts_hide_reorder_for_non_child_selection() {
+        let mut app = test_app();
+        let now = Local::now();
+        app.database
+            .task_repository()
+            .create("Standalone", app.inbox_project_id(), None, now)
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+        let tasks_shortcuts = app.focused_panel_shortcuts();
+        assert!(
+            tasks_shortcuts.iter().all(|tip| tip.keys != "J/K"),
+            "reorder shortcut should be hidden when selected task is not a child"
+        );
+    }
+
+    #[test]
+    fn tasks_shortcuts_show_reorder_for_child_of_expanded_parent() {
+        let mut app = test_app();
+        let now = Local::now();
+        let repository = app.database.task_repository();
+        let inbox_project_id = app.inbox_project_id();
+
+        let parent = repository
+            .create("Alpha Parent", inbox_project_id, None, now)
+            .expect("parent task should create");
+        let child = repository
+            .create("Beta Child", inbox_project_id, None, now)
+            .expect("child task should create");
+        repository
+            .update(
+                child.id,
+                &TaskUpdate {
+                    title: "Beta Child".to_string(),
+                    description: String::new(),
+                    project_id: inbox_project_id,
+                    section_id: None,
+                    parent_task_id: Some(parent.id),
+                    priority: TaskPriority::P4,
+                    due: None,
+                },
+            )
+            .expect("child should be assigned to parent");
+        app.refresh_tasks().expect("tasks should refresh");
+
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+        app.selected_task_id = Some(parent.id);
+        app.expand_selected_task();
+        app.selected_task_id = Some(child.id);
+
+        let tasks_shortcuts = app.focused_panel_shortcuts();
+        assert!(
+            tasks_shortcuts.iter().any(|tip| tip.keys == "J/K"),
+            "reorder shortcut should be shown when selected task is a child in expanded branch"
+        );
     }
 
     #[test]
