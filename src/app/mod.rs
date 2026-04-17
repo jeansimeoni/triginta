@@ -4039,10 +4039,11 @@ impl App {
         let Some(filter) = self.filter_by_id(filter_id) else {
             return true;
         };
-        let Ok(expr) = filters::parse_and_validate(filter.query.as_str()) else {
+        let Ok(expr) = filters::parse_for_runtime(filter.query.as_str()) else {
             return false;
         };
         let project_name = self.project_name(task.project_id);
+        let project_hierarchy_names = self.project_hierarchy_names(task.project_id);
         let section_name = task
             .section_id
             .and_then(|section_id| self.section_name(section_id));
@@ -4051,11 +4052,12 @@ impl App {
             .into_iter()
             .map(|tag| tag.name.as_str())
             .collect::<Vec<_>>();
-        filters::evaluate(
+        filters::evaluate_ignoring_unsupported(
             &expr,
             task,
             self.today(),
             project_name,
+            project_hierarchy_names.as_slice(),
             section_name,
             tag_names.as_slice(),
         )
@@ -4144,7 +4146,7 @@ impl App {
         let Some(filter) = self.filter_by_id(filter_id) else {
             return 0;
         };
-        let Ok(expr) = filters::parse_and_validate(filter.query.as_str()) else {
+        let Ok(expr) = filters::parse_for_runtime(filter.query.as_str()) else {
             return 0;
         };
         self.screen_data
@@ -4158,6 +4160,7 @@ impl App {
                     return false;
                 }
                 let project_name = self.project_name(task.project_id);
+                let project_hierarchy_names = self.project_hierarchy_names(task.project_id);
                 let section_name = task
                     .section_id
                     .and_then(|section_id| self.section_name(section_id));
@@ -4166,11 +4169,12 @@ impl App {
                     .into_iter()
                     .map(|tag| tag.name.as_str())
                     .collect::<Vec<_>>();
-                filters::evaluate(
+                filters::evaluate_ignoring_unsupported(
                     &expr,
                     task,
                     self.today(),
                     project_name,
+                    project_hierarchy_names.as_slice(),
                     section_name,
                     tag_names.as_slice(),
                 )
@@ -4188,6 +4192,24 @@ impl App {
     fn project_name(&self, project_id: ProjectId) -> Option<&str> {
         self.project_by_id(project_id)
             .map(|project| project.name.as_str())
+    }
+
+    fn project_hierarchy_names(&self, project_id: ProjectId) -> Vec<&str> {
+        let mut names = Vec::new();
+        let mut cursor = Some(project_id);
+        let mut visited = 0usize;
+        while let Some(id) = cursor {
+            let Some(project) = self.project_by_id(id) else {
+                break;
+            };
+            names.push(project.name.as_str());
+            cursor = project.parent_project_id;
+            visited += 1;
+            if visited > self.screen_data.projects.len() {
+                break;
+            }
+        }
+        names
     }
 
     fn section_by_id(&self, section_id: SectionId) -> Option<&Section> {
@@ -13207,6 +13229,88 @@ mod tests {
     }
 
     #[test]
+    fn filters_tab_runtime_ignores_unsupported_terms() {
+        let mut app = test_app();
+        let inbox_project_id = app.inbox_project_id();
+        let tasks = app.database.task_repository();
+        let tags = app.database.tag_repository();
+        let filters = app.database.filter_repository();
+
+        let work = tags
+            .create("Work", TagColor::Blue, false, Local::now())
+            .expect("tag should create");
+        let task_alpha = tasks
+            .create("Alpha", inbox_project_id, None, Local::now())
+            .expect("alpha task should create");
+        tasks
+            .create("Bravo", inbox_project_id, None, Local::now())
+            .expect("bravo task should create");
+        tags.replace_task_tags(task_alpha.id, &[work.id])
+            .expect("task tags should link");
+        let filter = filters
+            .create(
+                "Work Compat",
+                "@Work & foo:bar",
+                FilterColor::Green,
+                false,
+                Local::now(),
+            )
+            .expect("filter should create");
+
+        app.refresh_tasks().expect("tasks should refresh");
+        app.active_sidebar_tab = SidebarTab::Filters;
+        app.selected_filter_id = Some(filter.id);
+
+        let titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["Alpha"]);
+    }
+
+    #[test]
+    fn filters_tab_supports_double_hash_project_subtree_filters() {
+        let mut app = test_app();
+        let root = app
+            .database
+            .project_repository()
+            .create("GTD", None, ProjectColor::Blue, false, Local::now())
+            .expect("root should create");
+        let child = app
+            .database
+            .project_repository()
+            .create(
+                "Itens de Ação",
+                Some(root.id),
+                ProjectColor::Green,
+                false,
+                Local::now(),
+            )
+            .expect("child should create");
+        app.database
+            .task_repository()
+            .create("Child task", child.id, None, Local::now())
+            .expect("task should create");
+        let filter = app
+            .database
+            .filter_repository()
+            .create("Tree", "##GTD", FilterColor::Green, false, Local::now())
+            .expect("filter should create");
+
+        app.refresh_tasks().expect("tasks should refresh");
+        app.active_sidebar_tab = SidebarTab::Filters;
+        app.selected_filter_id = Some(filter.id);
+
+        let titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["Child task"]);
+    }
+
+    #[test]
     fn filter_editor_blocks_unsupported_queries() {
         let mut app = test_app();
         app.handle_key(crossterm::event::KeyCode::Char('6'))
@@ -13220,7 +13324,7 @@ mod tests {
         }
         app.handle_key(crossterm::event::KeyCode::Tab)
             .expect("tab should move to query");
-        for character in "assignee:me".chars() {
+        for character in "foo:bar".chars() {
             app.handle_key(crossterm::event::KeyCode::Char(character))
                 .expect("typing should work");
         }

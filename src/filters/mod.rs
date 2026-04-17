@@ -14,7 +14,9 @@ pub enum FilterExpr {
 pub enum FilterTerm {
     Tag(String),
     Project(String),
+    ProjectWithChildren(String),
     Section(String),
+    AssignedToMe,
     Priority(TaskPriority),
     DueToday,
     Overdue,
@@ -23,6 +25,7 @@ pub enum FilterTerm {
     StatusDone,
     StatusTodo,
     Search(String),
+    Unsupported(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,11 +52,22 @@ enum Token {
 }
 
 pub fn parse_and_validate(query: &str) -> Result<FilterExpr, FilterValidationError> {
+    parse_impl(query, false)
+}
+
+pub fn parse_for_runtime(query: &str) -> Result<FilterExpr, FilterValidationError> {
+    parse_impl(query, true)
+}
+
+fn parse_impl(
+    query: &str,
+    allow_unsupported_terms: bool,
+) -> Result<FilterExpr, FilterValidationError> {
     let tokens = tokenize(query)?;
     if tokens.is_empty() {
         return Err(FilterValidationError::new("query cannot be empty"));
     }
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, allow_unsupported_terms);
     let expr = parser.parse_expression()?;
     if parser.has_remaining() {
         return Err(FilterValidationError::new(
@@ -68,23 +82,172 @@ pub fn evaluate(
     task: &Task,
     today: NaiveDate,
     project_name: Option<&str>,
+    project_hierarchy_names: &[&str],
     section_name: Option<&str>,
     tag_names: &[&str],
 ) -> bool {
     match expr {
-        FilterExpr::Term(term) => {
-            evaluate_term(term, task, today, project_name, section_name, tag_names)
-        }
-        FilterExpr::Not(inner) => {
-            !evaluate(inner, task, today, project_name, section_name, tag_names)
-        }
+        FilterExpr::Term(term) => evaluate_term(
+            term,
+            task,
+            today,
+            project_name,
+            project_hierarchy_names,
+            section_name,
+            tag_names,
+        ),
+        FilterExpr::Not(inner) => !evaluate(
+            inner,
+            task,
+            today,
+            project_name,
+            project_hierarchy_names,
+            section_name,
+            tag_names,
+        ),
         FilterExpr::And(left, right) => {
-            evaluate(left, task, today, project_name, section_name, tag_names)
-                && evaluate(right, task, today, project_name, section_name, tag_names)
+            evaluate(
+                left,
+                task,
+                today,
+                project_name,
+                project_hierarchy_names,
+                section_name,
+                tag_names,
+            ) && evaluate(
+                right,
+                task,
+                today,
+                project_name,
+                project_hierarchy_names,
+                section_name,
+                tag_names,
+            )
         }
         FilterExpr::Or(left, right) => {
-            evaluate(left, task, today, project_name, section_name, tag_names)
-                || evaluate(right, task, today, project_name, section_name, tag_names)
+            evaluate(
+                left,
+                task,
+                today,
+                project_name,
+                project_hierarchy_names,
+                section_name,
+                tag_names,
+            ) || evaluate(
+                right,
+                task,
+                today,
+                project_name,
+                project_hierarchy_names,
+                section_name,
+                tag_names,
+            )
+        }
+    }
+}
+
+pub fn evaluate_ignoring_unsupported(
+    expr: &FilterExpr,
+    task: &Task,
+    today: NaiveDate,
+    project_name: Option<&str>,
+    project_hierarchy_names: &[&str],
+    section_name: Option<&str>,
+    tag_names: &[&str],
+) -> bool {
+    evaluate_optional(
+        expr,
+        task,
+        today,
+        project_name,
+        project_hierarchy_names,
+        section_name,
+        tag_names,
+    )
+    .unwrap_or(true)
+}
+
+fn evaluate_optional(
+    expr: &FilterExpr,
+    task: &Task,
+    today: NaiveDate,
+    project_name: Option<&str>,
+    project_hierarchy_names: &[&str],
+    section_name: Option<&str>,
+    tag_names: &[&str],
+) -> Option<bool> {
+    match expr {
+        FilterExpr::Term(FilterTerm::Unsupported(_)) => None,
+        FilterExpr::Term(term) => Some(evaluate_term(
+            term,
+            task,
+            today,
+            project_name,
+            project_hierarchy_names,
+            section_name,
+            tag_names,
+        )),
+        FilterExpr::Not(inner) => evaluate_optional(
+            inner,
+            task,
+            today,
+            project_name,
+            project_hierarchy_names,
+            section_name,
+            tag_names,
+        )
+        .map(|value| !value),
+        FilterExpr::And(left, right) => {
+            let left = evaluate_optional(
+                left,
+                task,
+                today,
+                project_name,
+                project_hierarchy_names,
+                section_name,
+                tag_names,
+            );
+            let right = evaluate_optional(
+                right,
+                task,
+                today,
+                project_name,
+                project_hierarchy_names,
+                section_name,
+                tag_names,
+            );
+            match (left, right) {
+                (Some(left), Some(right)) => Some(left && right),
+                (Some(left), None) => Some(left),
+                (None, Some(right)) => Some(right),
+                (None, None) => None,
+            }
+        }
+        FilterExpr::Or(left, right) => {
+            let left = evaluate_optional(
+                left,
+                task,
+                today,
+                project_name,
+                project_hierarchy_names,
+                section_name,
+                tag_names,
+            );
+            let right = evaluate_optional(
+                right,
+                task,
+                today,
+                project_name,
+                project_hierarchy_names,
+                section_name,
+                tag_names,
+            );
+            match (left, right) {
+                (Some(left), Some(right)) => Some(left || right),
+                (Some(left), None) => Some(left),
+                (None, Some(right)) => Some(right),
+                (None, None) => None,
+            }
         }
     }
 }
@@ -94,6 +257,7 @@ fn evaluate_term(
     task: &Task,
     today: NaiveDate,
     project_name: Option<&str>,
+    project_hierarchy_names: &[&str],
     section_name: Option<&str>,
     tag_names: &[&str],
 ) -> bool {
@@ -102,10 +266,13 @@ fn evaluate_term(
         FilterTerm::Project(name) => {
             project_name.is_some_and(|project| project.eq_ignore_ascii_case(name))
         }
+        FilterTerm::ProjectWithChildren(name) => project_hierarchy_names
+            .iter()
+            .any(|project| project.eq_ignore_ascii_case(name)),
         FilterTerm::Section(name) => {
             section_name.is_some_and(|section| section.eq_ignore_ascii_case(name))
-                || project_name.is_some_and(|project| project.eq_ignore_ascii_case(name))
         }
+        FilterTerm::AssignedToMe => true,
         FilterTerm::Priority(priority) => task.priority == *priority,
         FilterTerm::DueToday => task.due.as_ref().is_some_and(|due| due.date == today),
         FilterTerm::Overdue => task.due.as_ref().is_some_and(|due| due.date < today),
@@ -117,6 +284,7 @@ fn evaluate_term(
             .title
             .to_lowercase()
             .contains(query.to_lowercase().as_str()),
+        FilterTerm::Unsupported(_) => false,
     }
 }
 
@@ -192,12 +360,61 @@ fn tokenize(query: &str) -> Result<Vec<Token>, FilterValidationError> {
                 let value = chars[start..i].iter().collect::<String>();
                 tokens.push(token_from_term(value.trim().to_string())?);
             }
-            _ => {
+            '/' => {
                 let start = i;
-                while i < chars.len()
-                    && !chars[i].is_whitespace()
-                    && !matches!(chars[i], '&' | ',' | '|' | '!' | '(' | ')')
-                {
+                i += 1;
+                while i < chars.len() {
+                    if matches!(chars[i], '&' | ',' | '|' | '!' | '(' | ')') {
+                        break;
+                    }
+                    if chars[i].is_whitespace() {
+                        let mut j = i;
+                        while j < chars.len() && chars[j].is_whitespace() {
+                            j += 1;
+                        }
+                        if j >= chars.len()
+                            || matches!(chars[j], '&' | ',' | '|' | '!' | '(' | ')')
+                            || chars[j] == '@'
+                            || chars[j] == '#'
+                            || chars[j] == '/'
+                            || chars[j] == '"'
+                        {
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                let value = chars[start..i].iter().collect::<String>();
+                tokens.push(token_from_term(value.trim().to_string())?);
+            }
+            _ => {
+                if let Some((assigned_term, consumed_until)) = consume_assigned_to_term(&chars, i) {
+                    tokens.push(token_from_term(assigned_term)?);
+                    i = consumed_until;
+                    continue;
+                }
+                let start = i;
+                let mut saw_colon = false;
+                while i < chars.len() && !matches!(chars[i], '&' | ',' | '|' | '!' | '(' | ')') {
+                    if chars[i] == ':' {
+                        saw_colon = true;
+                    }
+                    if chars[i].is_whitespace() {
+                        let mut j = i;
+                        while j < chars.len() && chars[j].is_whitespace() {
+                            j += 1;
+                        }
+                        if j >= chars.len()
+                            || matches!(chars[j], '&' | ',' | '|' | '!' | '(' | ')')
+                            || chars[j] == '@'
+                            || chars[j] == '#'
+                            || chars[j] == '/'
+                            || chars[j] == '"'
+                            || !saw_colon
+                        {
+                            break;
+                        }
+                    }
                     i += 1;
                 }
                 let value = chars[start..i].iter().collect::<String>();
@@ -221,7 +438,10 @@ fn token_from_term(value: String) -> Result<Token, FilterValidationError> {
     Ok(Token::Term(value))
 }
 
-fn parse_term(raw: &str) -> Result<FilterTerm, FilterValidationError> {
+fn parse_term_impl(
+    raw: &str,
+    allow_unsupported_terms: bool,
+) -> Result<FilterTerm, FilterValidationError> {
     let normalized = raw.trim();
     if normalized.is_empty() {
         return Err(FilterValidationError::new("empty term in query"));
@@ -233,7 +453,15 @@ fn parse_term(raw: &str) -> Result<FilterTerm, FilterValidationError> {
         }
         return Ok(FilterTerm::Tag(tag.trim().to_string()));
     }
-    if let Some(section) = normalized.strip_prefix("##") {
+    if let Some(project) = normalized.strip_prefix("##") {
+        if project.trim().is_empty() {
+            return Err(FilterValidationError::new(
+                "project-with-children term cannot be empty",
+            ));
+        }
+        return Ok(FilterTerm::ProjectWithChildren(project.trim().to_string()));
+    }
+    if let Some(section) = normalized.strip_prefix('/') {
         if section.trim().is_empty() {
             return Err(FilterValidationError::new("section term cannot be empty"));
         }
@@ -266,6 +494,13 @@ fn parse_term(raw: &str) -> Result<FilterTerm, FilterValidationError> {
     }
     if normalized.eq_ignore_ascii_case("subtask") {
         return Ok(FilterTerm::Subtask);
+    }
+    if normalized.eq_ignore_ascii_case("assignee:me")
+        || normalized.eq_ignore_ascii_case("assigned:me")
+        || normalized.eq_ignore_ascii_case("assigned to:me")
+        || normalized.eq_ignore_ascii_case("assigned to: me")
+    {
+        return Ok(FilterTerm::AssignedToMe);
     }
 
     if let Some(priority) = normalized
@@ -303,6 +538,17 @@ fn parse_term(raw: &str) -> Result<FilterTerm, FilterValidationError> {
             "tag" => Ok(FilterTerm::Tag(value.to_string())),
             "project" => Ok(FilterTerm::Project(value.to_string())),
             "section" => Ok(FilterTerm::Section(value.to_string())),
+            "assignee" | "assigned" | "assigned to" => {
+                if value.eq_ignore_ascii_case("me") {
+                    Ok(FilterTerm::AssignedToMe)
+                } else if allow_unsupported_terms {
+                    Ok(FilterTerm::Unsupported(normalized.to_string()))
+                } else {
+                    Err(FilterValidationError::new(format!(
+                        "unsupported assignee value: {value}"
+                    )))
+                }
+            }
             "status" => {
                 if value.eq_ignore_ascii_case("done") || value.eq_ignore_ascii_case("completed") {
                     Ok(FilterTerm::StatusDone)
@@ -340,20 +586,31 @@ fn parse_term(raw: &str) -> Result<FilterTerm, FilterValidationError> {
                     "unsupported priority value: {value}"
                 ))),
             },
-            _ => Err(FilterValidationError::new(format!(
-                "unsupported term: {normalized}"
-            ))),
+            _ => {
+                if allow_unsupported_terms {
+                    Ok(FilterTerm::Unsupported(normalized.to_string()))
+                } else {
+                    Err(FilterValidationError::new(format!(
+                        "unsupported term: {normalized}"
+                    )))
+                }
+            }
         };
     }
 
-    Err(FilterValidationError::new(format!(
-        "unsupported term: {normalized}"
-    )))
+    if allow_unsupported_terms {
+        Ok(FilterTerm::Unsupported(normalized.to_string()))
+    } else {
+        Err(FilterValidationError::new(format!(
+            "unsupported term: {normalized}"
+        )))
+    }
 }
 
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
+    allow_unsupported_terms: bool,
 }
 
 #[cfg(test)]
@@ -389,8 +646,14 @@ mod tests {
 
     #[test]
     fn parser_rejects_unsupported_terms() {
-        let error = parse_and_validate("assignee:me").expect_err("term should be rejected");
+        let error = parse_and_validate("foo:bar").expect_err("term should be rejected");
         assert!(error.message.contains("unsupported"));
+    }
+
+    #[test]
+    fn parser_supports_assigned_to_me_term() {
+        parse_and_validate("assigned to: me").expect("query should parse");
+        parse_and_validate("assignee:me").expect("query should parse");
     }
 
     #[test]
@@ -414,6 +677,7 @@ mod tests {
             &task,
             today,
             Some("Inbox"),
+            &["Inbox"],
             None,
             &["Work", "Focus"],
         ));
@@ -429,6 +693,7 @@ mod tests {
             &task,
             today,
             Some("Inbox"),
+            &["Inbox"],
             None,
             &["Work"]
         ));
@@ -436,7 +701,7 @@ mod tests {
 
     #[test]
     fn evaluator_supports_section_and_subtask_terms() {
-        let expr = parse_and_validate("##Roadmap & subtask").expect("query should parse");
+        let expr = parse_and_validate("/Roadmap & subtask").expect("query should parse");
         let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
         let mut task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
         task.parent_task_id = Some(TaskId(99));
@@ -445,7 +710,24 @@ mod tests {
             &task,
             today,
             Some("GTD"),
+            &["GTD"],
             Some("Roadmap"),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn evaluator_supports_project_with_children_term() {
+        let expr = parse_and_validate("##GTD").expect("query should parse");
+        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
+        let task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
+        assert!(evaluate(
+            &expr,
+            &task,
+            today,
+            Some("Items"),
+            &["Items", "GTD"],
+            None,
             &[]
         ));
     }
@@ -461,6 +743,7 @@ mod tests {
             &task,
             today,
             Some("Um Dia / Talvez"),
+            &["Um Dia / Talvez"],
             None,
             &["Waiting For..."],
         ));
@@ -468,8 +751,12 @@ mod tests {
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, index: 0 }
+    fn new(tokens: Vec<Token>, allow_unsupported_terms: bool) -> Self {
+        Self {
+            tokens,
+            index: 0,
+            allow_unsupported_terms,
+        }
     }
 
     fn has_remaining(&self) -> bool {
@@ -514,7 +801,10 @@ impl Parser {
         match self.peek().cloned() {
             Some(Token::Term(value)) => {
                 self.index += 1;
-                Ok(FilterExpr::Term(parse_term(value.as_str())?))
+                Ok(FilterExpr::Term(parse_term_impl(
+                    value.as_str(),
+                    self.allow_unsupported_terms,
+                )?))
             }
             Some(Token::LParen) => {
                 self.index += 1;
@@ -552,4 +842,53 @@ impl Parser {
             || matches!(self.peek(), Some(Token::Not))
             || matches!(self.peek(), Some(Token::LParen))
     }
+}
+
+fn consume_assigned_to_term(chars: &[char], start: usize) -> Option<(String, usize)> {
+    if !slice_eq_ignore_ascii_case(chars, start, "assigned") {
+        return None;
+    }
+    let mut index = start + "assigned".len();
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    if !slice_eq_ignore_ascii_case(chars, index, "to") {
+        return None;
+    }
+    index += "to".len();
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    if index >= chars.len() || chars[index] != ':' {
+        return None;
+    }
+    index += 1;
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    if index >= chars.len() {
+        return None;
+    }
+    let mut end = index;
+    while end < chars.len() && !matches!(chars[end], '&' | ',' | '|' | '!' | '(' | ')') {
+        end += 1;
+    }
+    let value = chars[start..end]
+        .iter()
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        return None;
+    }
+    Some((value, end))
+}
+
+fn slice_eq_ignore_ascii_case(chars: &[char], start: usize, needle: &str) -> bool {
+    let end = start.saturating_add(needle.len());
+    if end > chars.len() {
+        return false;
+    }
+    let candidate = chars[start..end].iter().collect::<String>();
+    candidate.eq_ignore_ascii_case(needle)
 }
