@@ -431,13 +431,22 @@ impl TodoistSyncProvider {
             );
         }
 
+        let should_be_completed = task.completed_at.is_some();
         if let Some(remote_id) = task.todoist_id.as_deref() {
             client.post_no_content(&format!("/tasks/{remote_id}"), &Value::Object(body))?;
+            if should_be_completed {
+                client.post_empty(&format!("/tasks/{remote_id}/close"))?;
+            } else {
+                client.post_empty(&format!("/tasks/{remote_id}/reopen"))?;
+            }
             Ok(None)
         } else {
             let created = client.post_json::<Value>("/tasks", &Value::Object(body))?;
             let created_id = value_id_as_string(&created)
                 .context("todoist task create response is missing id")?;
+            if should_be_completed {
+                client.post_empty(&format!("/tasks/{created_id}/close"))?;
+            }
             Ok(Some(created_id))
         }
     }
@@ -925,6 +934,13 @@ impl TodoistRestClient {
     fn post_no_content(&self, path: &str, body: &Value) -> Result<()> {
         self.request_builder("POST", path)
             .send_json(body)
+            .map_err(map_ureq_error)?;
+        Ok(())
+    }
+
+    fn post_empty(&self, path: &str) -> Result<()> {
+        self.request_builder("POST", path)
+            .call()
             .map_err(map_ureq_error)?;
         Ok(())
     }

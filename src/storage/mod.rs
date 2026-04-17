@@ -208,6 +208,7 @@ pub struct SyncTaskSnapshot {
     pub due_datetime_utc: Option<String>,
     pub due_timezone: Option<String>,
     pub due_string: Option<String>,
+    pub completed_at: Option<String>,
     pub labels: Vec<String>,
     pub deleted_at: Option<String>,
 }
@@ -1254,7 +1255,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     .query_row(
                         "SELECT tasks.id, tasks.todoist_id, projects.todoist_id, sections.todoist_id, parent.todoist_id,
                                 projects.is_inbox, tasks.title, tasks.description, tasks.priority,
-                                tasks.due_date, tasks.due_datetime_utc, tasks.due_timezone, tasks.due_string, tasks.deleted_at
+                                tasks.due_date, tasks.due_datetime_utc, tasks.due_timezone, tasks.due_string, tasks.completed_at, tasks.deleted_at
                          FROM tasks
                          LEFT JOIN projects ON projects.id = tasks.project_id
                          LEFT JOIN sections ON sections.id = tasks.section_id
@@ -1276,7 +1277,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                                 due_datetime_utc: row.get(10)?,
                                 due_timezone: row.get(11)?,
                                 due_string: row.get(12)?,
-                                deleted_at: row.get(13)?,
+                                completed_at: row.get(13)?,
+                                deleted_at: row.get(14)?,
                                 labels: Vec::new(),
                             })
                         },
