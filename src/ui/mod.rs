@@ -3617,19 +3617,27 @@ fn task_list_footer_hints(
         " f shown  "
     };
 
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(symbols.sort, Style::default().fg(palette.accent)),
         Span::styled(" o sort  ", Style::default().fg(palette.subtle_text)),
         Span::styled(symbols.expanded, Style::default().fg(palette.accent)),
         Span::styled(" =/- tree  ", Style::default().fg(palette.subtle_text)),
-        Span::styled(symbols.move_hint, Style::default().fg(palette.accent)),
-        Span::styled(" J/K order  ", Style::default().fg(palette.subtle_text)),
         Span::styled(symbols.visible, Style::default().fg(palette.accent)),
         Span::styled(done_filter_hint, Style::default().fg(palette.subtle_text)),
         Span::styled(symbols.done, Style::default().fg(palette.accent)),
         Span::styled(" space done", Style::default().fg(palette.subtle_text)),
-    ])
-    .right_aligned()
+    ];
+    if app.should_show_task_reorder_shortcut() {
+        spans.splice(
+            4..4,
+            [
+                Span::styled(symbols.move_hint, Style::default().fg(palette.accent)),
+                Span::styled(" J/K order  ", Style::default().fg(palette.subtle_text)),
+            ],
+        );
+    }
+
+    Line::from(spans).right_aligned()
 }
 
 fn render_task_editor_popup(

@@ -2479,6 +2479,9 @@ impl App {
             .unwrap_or_default();
 
         let mut rows = Vec::new();
+        let keep_expanded_descendants = self.active_sidebar_tab == SidebarTab::Projects
+            || (self.active_sidebar_tab == SidebarTab::Navigation
+                && self.active_task_view == TaskView::All);
         for root in visible_roots {
             self.append_visible_task_row(
                 &mut rows,
@@ -2488,7 +2491,7 @@ impl App {
                 &scoped_visible_ids,
                 &children_by_parent,
                 &mut branch_cache,
-                false,
+                keep_expanded_descendants,
             );
         }
         rows
@@ -2590,9 +2593,8 @@ impl App {
         include_unmatched_descendants: bool,
     ) {
         let task_has_match = branch_cache.get(&task.id).copied().unwrap_or(false);
-        let allow_unmatched_task = include_unmatched_descendants
-            && self.active_sidebar_tab == SidebarTab::Projects
-            && scoped_visible_ids.contains(&task.id);
+        let allow_unmatched_task =
+            include_unmatched_descendants && scoped_visible_ids.contains(&task.id);
         if !task_has_match && !allow_unmatched_task {
             return;
         }
@@ -6585,7 +6587,7 @@ impl App {
         Ok(())
     }
 
-    fn should_show_task_reorder_shortcut(&self) -> bool {
+    pub fn should_show_task_reorder_shortcut(&self) -> bool {
         let Some(selected_task_id) = self.selected_task_id else {
             return false;
         };
@@ -14317,6 +14319,62 @@ mod tests {
             .map(|task| task.title.as_str())
             .collect::<Vec<_>>();
         assert!(expanded_titles.contains(&"Child"));
+    }
+
+    #[test]
+    fn navigation_all_keeps_expanded_children_visible_in_task_list() {
+        let mut app = test_app();
+        let inbox_project_id = app.inbox_project_id();
+        let tasks = app.database.task_repository();
+        let now = Local::now();
+        let parent = tasks
+            .create("Parent", inbox_project_id, None, now)
+            .expect("parent should create");
+        let child = tasks
+            .create("Child", inbox_project_id, None, now)
+            .expect("child should create");
+        tasks
+            .update(
+                child.id,
+                &TaskUpdate {
+                    title: "Child".to_string(),
+                    description: String::new(),
+                    project_id: inbox_project_id,
+                    section_id: None,
+                    parent_task_id: Some(parent.id),
+                    priority: TaskPriority::P4,
+                    due: None,
+                },
+            )
+            .expect("child should update");
+
+        app.refresh_tasks().expect("tasks should refresh");
+        app.active_sidebar_tab = SidebarTab::Navigation;
+        app.active_task_view = TaskView::All;
+        app.focused_panel = PanelFocus::RightPane;
+        app.active_right_panel_tab = RightPanelTab::Tasks;
+        app.selected_task_id = Some(parent.id);
+        app.expand_selected_task();
+
+        app.handle_key(crossterm::event::KeyCode::Char('/'))
+            .expect("search should open");
+        for character in "parent".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should filter");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should lock search");
+
+        let titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert!(titles.contains(&"Parent"));
+        assert!(
+            titles.contains(&"Child"),
+            "expanded child should remain visible in Navigation->All"
+        );
     }
 
     #[test]
