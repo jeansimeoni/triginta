@@ -1905,7 +1905,7 @@ fn render_status_bar(
     let sync_indicator = app.sync_indicator_view();
     let sync_label = sync_indicator.as_ref().map(|status| {
         format!(
-            "{} {}",
+            "{} {} [S]",
             sync_indicator_glyph(status.state, symbols),
             status.integration_name
         )
@@ -1943,6 +1943,13 @@ fn render_status_bar(
         right_spans.push(Span::styled(
             status.integration_name,
             Style::default().fg(palette.subtle_text),
+        ));
+        right_spans.push(Span::raw(" "));
+        right_spans.push(Span::styled(
+            "[S]",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
         ));
         right_spans.push(Span::raw("  "));
     }
@@ -2025,7 +2032,7 @@ fn sync_indicator_glyph(state: SyncIndicatorStateView, symbols: Symbols) -> &'st
 
     match state {
         SyncIndicatorStateView::Connected => symbols.done,
-        SyncIndicatorStateView::Running => symbols.in_progress,
+        SyncIndicatorStateView::Running => "",
         SyncIndicatorStateView::Error => symbols.voided,
     }
 }
@@ -2033,7 +2040,7 @@ fn sync_indicator_glyph(state: SyncIndicatorStateView, symbols: Symbols) -> &'st
 fn sync_indicator_style(state: SyncIndicatorStateView, palette: ThemePalette) -> Style {
     match state {
         SyncIndicatorStateView::Connected => Style::default().fg(palette.success),
-        SyncIndicatorStateView::Running => Style::default().fg(palette.accent),
+        SyncIndicatorStateView::Running => Style::default().fg(palette.success),
         SyncIndicatorStateView::Error => Style::default().fg(palette.error),
     }
 }
@@ -2963,6 +2970,35 @@ fn render_sync_status_panel(
     panel: &SyncStatusPanelView,
     palette: ThemePalette,
 ) {
+    let status_label = match panel.status.as_str() {
+        "ok" => "Healthy",
+        "dry_run" => "Healthy (dry-run)",
+        "degraded" => "Needs attention",
+        "error" => "Error",
+        "idle" => "Idle",
+        _ => panel.status.as_str(),
+    };
+    let trigger_label = match panel.trigger.as_str() {
+        "startup" => "on startup",
+        "poll" => "by scheduled polling",
+        "mutation_debounced" => "after local changes",
+        "n/a" => "not run yet",
+        _ => panel.trigger.as_str(),
+    };
+    let outbox_line = if panel.pending_outbox == 0 {
+        "No local changes are waiting to be pushed.".to_string()
+    } else {
+        format!("{} local change(s) waiting to sync.", panel.pending_outbox)
+    };
+    let last_cycle_line = if panel.delivered_outbox == 0 && panel.failed_outbox == 0 {
+        "Last cycle did not push local changes.".to_string()
+    } else {
+        format!(
+            "Last cycle pushed {} change(s) and failed {}.",
+            panel.delivered_outbox, panel.failed_outbox
+        )
+    };
+
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Integration: ", Style::default().fg(palette.subtle_text)),
@@ -2974,22 +3010,16 @@ fn render_sync_status_panel(
             ),
         ]),
         Line::from(vec![
-            Span::styled("Status: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(panel.status.as_str(), Style::default().fg(palette.text)),
+            Span::styled("Connection: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(status_label, Style::default().fg(palette.text)),
         ]),
         Line::from(vec![
-            Span::styled("Trigger: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(panel.trigger.as_str(), Style::default().fg(palette.text)),
+            Span::styled("Sync Runs: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(trigger_label, Style::default().fg(palette.text)),
         ]),
         Line::from(vec![
-            Span::styled("Outbox: ", Style::default().fg(palette.subtle_text)),
-            Span::styled(
-                format!(
-                    "pending={} delivered={} failed={}",
-                    panel.pending_outbox, panel.delivered_outbox, panel.failed_outbox
-                ),
-                Style::default().fg(palette.text),
-            ),
+            Span::styled("Pending: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(outbox_line, Style::default().fg(palette.text)),
         ]),
         Line::from(vec![
             Span::styled("Last Sync: ", Style::default().fg(palette.subtle_text)),
@@ -2999,31 +3029,37 @@ fn render_sync_status_panel(
             ),
         ]),
         Line::from(vec![
-            Span::styled("Next Poll In: ", Style::default().fg(palette.subtle_text)),
+            Span::styled("Next Check: ", Style::default().fg(palette.subtle_text)),
             Span::styled(
                 panel.next_poll_in.as_str(),
                 Style::default().fg(palette.text),
             ),
-            Span::styled("  interval=", Style::default().fg(palette.subtle_text)),
+            Span::styled(" (every ", Style::default().fg(palette.subtle_text)),
             Span::styled(
                 panel.poll_interval.as_str(),
                 Style::default().fg(palette.text),
             ),
+            Span::styled(")", Style::default().fg(palette.subtle_text)),
         ]),
     ];
     if let Some(pending_push_in) = panel.pending_push_in.as_ref() {
+        let pending_push_text = format!("scheduled in {}", pending_push_in);
         lines.push(Line::from(vec![
-            Span::styled(
-                "Pending Push In: ",
-                Style::default().fg(palette.subtle_text),
-            ),
-            Span::styled(pending_push_in.as_str(), Style::default().fg(palette.text)),
+            Span::styled("Local Push: ", Style::default().fg(palette.subtle_text)),
+            Span::styled(pending_push_text, Style::default().fg(palette.text)),
         ]));
     }
+    lines.push(Line::from(vec![
+        Span::styled("Last Result: ", Style::default().fg(palette.subtle_text)),
+        Span::styled(last_cycle_line, Style::default().fg(palette.text)),
+    ]));
     if panel.dry_run {
         lines.push(Line::from(vec![
             Span::styled("Mode: ", Style::default().fg(palette.subtle_text)),
-            Span::styled("dry-run", Style::default().fg(palette.accent)),
+            Span::styled(
+                "Dry-run (no remote changes are written)",
+                Style::default().fg(palette.accent),
+            ),
         ]));
     }
     if let Some(last_error) = panel.last_error.as_ref() {
@@ -3032,15 +3068,6 @@ fn render_sync_status_panel(
             Span::styled(last_error.as_str(), Style::default().fg(palette.error)),
         ]));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Summary: ", Style::default().fg(palette.subtle_text)),
-        Span::styled(
-            panel.latest_summary.as_str(),
-            Style::default().fg(palette.text),
-        ),
-    ]));
-
     let content_width = lines.iter().map(Line::width).max().unwrap_or(32) + 4;
     let width = (content_width as u16)
         .min(frame.area().width.saturating_sub(4))
@@ -3329,10 +3356,6 @@ const STATUS_BAR_GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "?",
         description: "help",
-    },
-    ShortcutTip {
-        keys: "Shift+S",
-        description: "sync",
     },
     ShortcutTip {
         keys: "q",

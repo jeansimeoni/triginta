@@ -71,6 +71,17 @@ pub struct TodoistSyncProvider {
 }
 
 impl TodoistSyncProvider {
+    fn outbox_entity_priority(entity_type: &str) -> u8 {
+        match entity_type {
+            "project" => 0,
+            "section" => 1,
+            "tag" => 2,
+            "filter" => 3,
+            "task" => 4,
+            _ => 5,
+        }
+    }
+
     pub fn new(config: TodoistIntegrationConfig, dry_run: bool) -> Self {
         Self { config, dry_run }
     }
@@ -130,7 +141,12 @@ impl TodoistSyncProvider {
         }
 
         let mut values = latest_by_entity.into_values().collect::<Vec<_>>();
-        values.sort_by_key(|entry| entry.id);
+        values.sort_by_key(|entry| {
+            (
+                Self::outbox_entity_priority(entry.entity_type.as_str()),
+                entry.id,
+            )
+        });
         values
     }
 
@@ -345,6 +361,12 @@ impl TodoistSyncProvider {
             Value::String(task.description.clone()),
         );
         body.insert("priority".to_string(), Value::Number(task.priority.into()));
+
+        if task.todoist_id.is_none() && task.project_todoist_id.is_none() && !task.project_is_inbox
+        {
+            bail!("task project mapping is not synced yet; retrying after project sync");
+        }
+
         if let Some(project_id) = task.project_todoist_id.as_deref() {
             body.insert(
                 "project_id".to_string(),
@@ -365,6 +387,16 @@ impl TodoistSyncProvider {
         }
         if let Some(due_string) = task.due_string.as_ref() {
             body.insert("due_string".to_string(), Value::String(due_string.clone()));
+        } else if let Some(due_datetime_utc) = task.due_datetime_utc.as_ref() {
+            body.insert(
+                "due_datetime".to_string(),
+                Value::String(due_datetime_utc.clone()),
+            );
+        } else if let Some(due_date) = task.due_date {
+            body.insert(
+                "due_date".to_string(),
+                Value::String(due_date.format("%Y-%m-%d").to_string()),
+            );
         }
         if !task.labels.is_empty() {
             body.insert(
@@ -751,8 +783,6 @@ impl TaskSyncProvider for TodoistSyncProvider {
         let now = Utc::now();
         let now_rfc3339 = now.to_rfc3339();
         let client = TodoistRestClient::new(token);
-        let (delivered, failed, cycle_error) =
-            self.process_ready_outbox(sync_repository, now, &client)?;
         let previous = sync_repository.get_state(self.provider_name())?;
         let next_sync_token_seed = previous
             .as_ref()
@@ -760,7 +790,9 @@ impl TaskSyncProvider for TodoistSyncProvider {
             .unwrap_or("*")
             .to_string();
         let mut downstream_error = None;
-        let downstream_stats = if matches!(trigger, SyncTrigger::Startup | SyncTrigger::Poll) {
+        let should_pull_downstream =
+            !self.dry_run || !matches!(trigger, SyncTrigger::MutationDebounced);
+        let downstream_stats = if should_pull_downstream {
             match self.pull_remote_downstream(
                 sync_repository,
                 &client,
@@ -776,16 +808,24 @@ impl TaskSyncProvider for TodoistSyncProvider {
         } else {
             None
         };
+        let (delivered, failed, cycle_error) =
+            self.process_ready_outbox(sync_repository, now, &client)?;
 
         let pending = sync_repository.list_outbox(self.provider_name(), i64::MAX)?;
         let combined_error = cycle_error.clone().or(downstream_error.clone());
+        let previous_sync_token = previous.as_ref().and_then(|state| state.sync_token.clone());
         let next_sync_token = downstream_stats
             .as_ref()
             .and_then(|stats| stats.next_sync_token.clone())
-            .or_else(|| previous.and_then(|state| state.sync_token));
+            .or(previous_sync_token.clone());
+        let persisted_sync_token = if self.dry_run {
+            previous_sync_token
+        } else {
+            next_sync_token
+        };
         sync_repository.upsert_state(&SyncStateRecord {
             provider: self.provider_name().to_string(),
-            sync_token: next_sync_token,
+            sync_token: persisted_sync_token,
             last_synced_at: Some(now_rfc3339.clone()),
             last_status: Some(if combined_error.is_some() {
                 "degraded".to_string()

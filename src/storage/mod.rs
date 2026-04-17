@@ -198,11 +198,15 @@ pub struct SyncTaskSnapshot {
     pub local_id: i64,
     pub todoist_id: Option<String>,
     pub project_todoist_id: Option<String>,
+    pub project_is_inbox: bool,
     pub section_todoist_id: Option<String>,
     pub parent_todoist_id: Option<String>,
     pub title: String,
     pub description: String,
     pub priority: i64,
+    pub due_date: Option<NaiveDate>,
+    pub due_datetime_utc: Option<String>,
+    pub due_timezone: Option<String>,
     pub due_string: Option<String>,
     pub labels: Vec<String>,
     pub deleted_at: Option<String>,
@@ -1211,7 +1215,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     .connection
                     .query_row(
                         "SELECT tasks.id, tasks.todoist_id, projects.todoist_id, sections.todoist_id, parent.todoist_id,
-                                tasks.title, tasks.description, tasks.priority, tasks.due_string, tasks.deleted_at
+                                projects.is_inbox, tasks.title, tasks.description, tasks.priority,
+                                tasks.due_date, tasks.due_datetime_utc, tasks.due_timezone, tasks.due_string, tasks.deleted_at
                          FROM tasks
                          LEFT JOIN projects ON projects.id = tasks.project_id
                          LEFT JOIN sections ON sections.id = tasks.section_id
@@ -1225,11 +1230,15 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                                 project_todoist_id: row.get(2)?,
                                 section_todoist_id: row.get(3)?,
                                 parent_todoist_id: row.get(4)?,
-                                title: row.get(5)?,
-                                description: row.get(6)?,
-                                priority: row.get(7)?,
-                                due_string: row.get(8)?,
-                                deleted_at: row.get(9)?,
+                                project_is_inbox: row.get::<_, Option<i64>>(5)?.unwrap_or(0) != 0,
+                                title: row.get(6)?,
+                                description: row.get(7)?,
+                                priority: row.get(8)?,
+                                due_date: row.get(9)?,
+                                due_datetime_utc: row.get(10)?,
+                                due_timezone: row.get(11)?,
+                                due_string: row.get(12)?,
+                                deleted_at: row.get(13)?,
                                 labels: Vec::new(),
                             })
                         },
@@ -1768,13 +1777,17 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         dry_run: bool,
     ) -> Result<SyncApplyOutcome> {
         let now_local = Local::now();
-        let project_local_id =
-            if let Some(project_todoist_id) = remote.project_todoist_id.as_deref() {
+        let project_local_id = match remote.project_todoist_id.as_deref() {
+            Some(project_todoist_id) => {
                 self.lookup_local_id_by_todoist("projects", project_todoist_id)?
-                    .unwrap_or(self.inbox_project_local_id()?)
-            } else {
-                self.inbox_project_local_id()?
-            };
+            }
+            None => Some(self.inbox_project_local_id()?),
+        };
+        if remote.project_todoist_id.is_some() && project_local_id.is_none() {
+            return Ok(SyncApplyOutcome::Skipped);
+        }
+        let project_local_id =
+            project_local_id.context("resolved remote project mapping is missing unexpectedly")?;
         let section_local_id = match remote.section_todoist_id.as_deref() {
             Some(todoist_id) => self.lookup_local_id_by_todoist("sections", todoist_id)?,
             None => None,
@@ -1891,13 +1904,47 @@ impl SqliteSyncRepository<'_> {
     }
 
     fn inbox_project_local_id(&self) -> Result<i64> {
-        self.connection
+        if let Some(id) = self
+            .connection
             .query_row(
-                "SELECT id FROM projects WHERE is_inbox = 1 ORDER BY id LIMIT 1",
+                "SELECT id FROM projects WHERE is_inbox = 1 AND deleted_at IS NULL ORDER BY id LIMIT 1",
                 [],
                 |row| row.get::<_, i64>(0),
             )
-            .context("failed to load inbox project for remote task apply")
+            .optional()?
+        {
+            return Ok(id);
+        }
+
+        let fallback = self
+            .connection
+            .query_row(
+                "SELECT id
+                 FROM projects
+                 WHERE deleted_at IS NULL
+                   AND lower(name) = 'inbox'
+                 ORDER BY id
+                 LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if let Some(id) = fallback {
+            self.connection.execute(
+                "UPDATE projects SET is_inbox = 1 WHERE id = ?1",
+                params![id],
+            )?;
+            return Ok(id);
+        }
+
+        self.connection
+            .execute(
+                "INSERT INTO projects(name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+                 VALUES ('Inbox', NULL, 'charcoal', 0, 1, 0, ?1, ?1, NULL, NULL, NULL)",
+                params![Local::now()],
+            )
+            .context("failed to create fallback inbox project for remote task apply")?;
+        Ok(self.connection.last_insert_rowid())
     }
 
     fn match_unmapped_tag_by_name(&self, name: &str) -> Result<Option<i64>> {

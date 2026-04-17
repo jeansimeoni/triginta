@@ -1193,7 +1193,6 @@ pub struct SyncStatusPanelView {
     pub integration_name: &'static str,
     pub status: String,
     pub trigger: String,
-    pub latest_summary: String,
     pub pending_outbox: usize,
     pub delivered_outbox: usize,
     pub failed_outbox: usize,
@@ -1834,6 +1833,7 @@ struct TodoistSyncUiState {
     failed_outbox: usize,
     is_running: bool,
     dry_run: bool,
+    activity_until: Option<DateTime<Local>>,
 }
 
 // `App` owns the mutable runtime state for the TUI loop.
@@ -1964,6 +1964,7 @@ impl App {
                 failed_outbox: 0,
                 is_running: false,
                 dry_run: debug_dry_run_sync_enabled(),
+                activity_until: None,
             })
         } else {
             None
@@ -3232,12 +3233,12 @@ impl App {
 
     pub fn sync_indicator_view(&self) -> Option<SyncIndicatorView> {
         let state = self.todoist_sync.as_ref()?;
+        let now = Local::now();
         let status = if state.last_error.is_some() {
             SyncIndicatorStateView::Error
         } else if state.is_running
+            || state.activity_until.is_some_and(|until| now <= until)
             || state.pending_push_at.is_some()
-            || state.pending_outbox > 0
-            || state.last_seen_outbox_len > 0
         {
             SyncIndicatorStateView::Running
         } else {
@@ -3277,7 +3278,6 @@ impl App {
             integration_name: "Todoist",
             status: state.last_status.clone(),
             trigger,
-            latest_summary: state.latest_status_line.clone(),
             pending_outbox: state.pending_outbox,
             delivered_outbox: state.delivered_outbox,
             failed_outbox: state.failed_outbox,
@@ -10385,11 +10385,17 @@ impl App {
         let provider = sync.provider.clone();
         if let Some(sync) = self.todoist_sync.as_mut() {
             sync.is_running = true;
+            sync.activity_until = Some(now + ChronoDuration::seconds(3));
         }
         let sync_result = provider.sync(&self.database.sync_repository(), trigger);
 
         match sync_result {
-            Ok(report) => self.apply_todoist_sync_report(report, now),
+            Ok(report) => {
+                self.apply_todoist_sync_report(report, now);
+                if let Err(error) = self.refresh_tasks() {
+                    warn!(error = %error, "failed to refresh UI data after todoist sync");
+                }
+            }
             Err(error) => {
                 warn!(
                     provider = provider.provider_name(),
@@ -10408,6 +10414,7 @@ impl App {
                     sync.pending_outbox = sync.last_seen_outbox_len;
                     sync.delivered_outbox = 0;
                     sync.failed_outbox = 0;
+                    sync.activity_until = Some(now + ChronoDuration::seconds(3));
                     let min_interval = Duration::from_secs(
                         self.config
                             .integrations
@@ -10476,6 +10483,15 @@ impl App {
         sync.delivered_outbox = report.delivered_outbox;
         sync.failed_outbox = report.failed_outbox;
         sync.is_running = false;
+        sync.activity_until = if report.pending_outbox > 0
+            || report.delivered_outbox > 0
+            || report.failed_outbox > 0
+            || report.last_error.is_some()
+        {
+            Some(now + ChronoDuration::seconds(3))
+        } else {
+            None
+        };
 
         if report.last_error.is_some() {
             sync.poll_interval =
