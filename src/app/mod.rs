@@ -1317,6 +1317,10 @@ const GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
         description: "help",
     },
     ShortcutTip {
+        keys: "c",
+        description: "new task",
+    },
+    ShortcutTip {
         keys: "Shift+S",
         description: "sync status",
     },
@@ -1365,6 +1369,10 @@ const HISTORY_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "PgUp/PgDn",
         description: "page",
+    },
+    ShortcutTip {
+        keys: "Home/End",
+        description: "jump first/last",
     },
     ShortcutTip {
         keys: "a",
@@ -1417,6 +1425,14 @@ const TAGS_SHORTCUTS: &[ShortcutTip] = &[
         description: "move tag",
     },
     ShortcutTip {
+        keys: "PgUp/PgDn",
+        description: "page",
+    },
+    ShortcutTip {
+        keys: "Home/End",
+        description: "jump first/last",
+    },
+    ShortcutTip {
         keys: "C/e/d",
         description: "new/edit/delete tag",
     },
@@ -1454,6 +1470,14 @@ const FILTERS_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "j/k or ↑/↓",
         description: "move filter",
+    },
+    ShortcutTip {
+        keys: "PgUp/PgDn",
+        description: "page",
+    },
+    ShortcutTip {
+        keys: "Home/End",
+        description: "jump first/last",
     },
     ShortcutTip {
         keys: "C/e/d",
@@ -1499,6 +1523,14 @@ const TAG_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
         description: "jump to field",
     },
     ShortcutTip {
+        keys: "Home/End/←/→",
+        description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "Backspace/Del",
+        description: "delete char",
+    },
+    ShortcutTip {
         keys: "h/l or j/k",
         description: "change value",
     },
@@ -1533,6 +1565,14 @@ const FILTER_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
         description: "jump to field",
     },
     ShortcutTip {
+        keys: "Home/End/←/→",
+        description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "Backspace/Del",
+        description: "delete char",
+    },
+    ShortcutTip {
         keys: "h/l or j/k",
         description: "change value",
     },
@@ -1563,8 +1603,8 @@ const PROJECTS_SHORTCUTS: &[ShortcutTip] = &[
         description: "page",
     },
     ShortcutTip {
-        keys: "Home",
-        description: "all projects",
+        keys: "Home/End",
+        description: "jump first/last",
     },
     ShortcutTip {
         keys: "C",
@@ -1620,6 +1660,10 @@ const FAVORITES_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "f",
         description: "remove favorite",
+    },
+    ShortcutTip {
+        keys: "Enter",
+        description: "open task list",
     },
     ShortcutTip {
         keys: "/",
@@ -1748,6 +1792,10 @@ const INPUT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "submit",
     },
     ShortcutTip {
+        keys: "Tab",
+        description: "accept suggestion",
+    },
+    ShortcutTip {
         keys: "Ctrl+e",
         description: "full editor",
     },
@@ -1758,6 +1806,14 @@ const INPUT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "Home/End",
         description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "←/→",
+        description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "↑/↓",
+        description: "move suggestion",
     },
     ShortcutTip {
         keys: "Backspace/Del",
@@ -1785,6 +1841,14 @@ const EDITOR_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "Ctrl+e",
         description: "external editor",
+    },
+    ShortcutTip {
+        keys: "Home/End/←/→",
+        description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "Backspace/Del",
+        description: "delete char",
     },
     ShortcutTip {
         keys: "F8/F10",
@@ -1818,6 +1882,10 @@ const SEARCH_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "move cursor",
     },
     ShortcutTip {
+        keys: "←/→",
+        description: "move cursor",
+    },
+    ShortcutTip {
         keys: "Backspace/Del",
         description: "delete char",
     },
@@ -1841,6 +1909,18 @@ const SESSION_NOTE_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
         description: "clear",
     },
     ShortcutTip {
+        keys: "Enter",
+        description: "new line",
+    },
+    ShortcutTip {
+        keys: "Home/End/←/→",
+        description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "Backspace/Del",
+        description: "delete char",
+    },
+    ShortcutTip {
         keys: "j/k or ↑/↓",
         description: "move line",
     },
@@ -1852,8 +1932,8 @@ const SESSION_NOTE_VIEWER_SHORTCUTS: &[ShortcutTip] = &[
         description: "scroll",
     },
     ShortcutTip {
-        keys: "Home/End",
-        description: "jump",
+        keys: "Home",
+        description: "jump top",
     },
     ShortcutTip {
         keys: "Esc or v",
@@ -1872,6 +1952,10 @@ const PANEL_SEARCH_SHORTCUTS: &[ShortcutTip] = &[
     },
     ShortcutTip {
         keys: "Home/End",
+        description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "←/→",
         description: "move cursor",
     },
     ShortcutTip {
@@ -1909,6 +1993,14 @@ const PROJECT_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
         description: "jump to field",
     },
     ShortcutTip {
+        keys: "Home/End/←/→",
+        description: "move cursor",
+    },
+    ShortcutTip {
+        keys: "Backspace/Del",
+        description: "delete char",
+    },
+    ShortcutTip {
         keys: "h/l or j/k",
         description: "change value",
     },
@@ -1939,6 +2031,10 @@ const SECTION_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
         description: "move cursor",
     },
     ShortcutTip {
+        keys: "←/→",
+        description: "move cursor",
+    },
+    ShortcutTip {
         keys: "Backspace/Del",
         description: "delete char",
     },
@@ -1961,7 +2057,7 @@ const SORT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "apply sort",
     },
     ShortcutTip {
-        keys: "Esc",
+        keys: "Esc/o",
         description: "cancel",
     },
     ShortcutTip {
@@ -12089,11 +12185,13 @@ mod tests {
     use crate::theme::ThemePalette;
 
     use super::{
-        App, CycleEntryState, FavoriteItemKind, HistoryPanelTab, PanelFocus, PreviewLineView,
-        RightPanelTab, RunOptions, ScreenData, SidebarTab, TaskEditorField, TaskEditorState,
-        TaskListBreadcrumbSegmentKind, TaskListBreadcrumbSegmentView, TaskListBreadcrumbView,
-        TaskView, TimerPhase, TimerRunState, apply_debug_overrides, chrono_duration,
-        duration_to_stored_minutes,
+        App, CycleEntryState, FAVORITES_SHORTCUTS, FILTERS_SHORTCUTS, FavoriteItemKind,
+        GLOBAL_SHORTCUTS, HISTORY_SHORTCUTS, HistoryPanelTab, INPUT_POPUP_SHORTCUTS,
+        PROJECTS_SHORTCUTS, PanelFocus, PreviewLineView, RightPanelTab, RunOptions,
+        SORT_POPUP_SHORTCUTS, ScreenData, ShortcutTip, SidebarTab, TAGS_SHORTCUTS, TaskEditorField,
+        TaskEditorState, TaskListBreadcrumbSegmentKind, TaskListBreadcrumbSegmentView,
+        TaskListBreadcrumbView, TaskView, TimerPhase, TimerRunState, apply_debug_overrides,
+        chrono_duration, duration_to_stored_minutes,
     };
 
     fn assert_key_value_preview_line(
@@ -17161,6 +17259,25 @@ mod tests {
             .expect("help should close");
         assert!(!app.is_help_open());
         assert_eq!(app.help_scroll(), 0);
+    }
+
+    #[test]
+    fn help_shortcuts_cover_shared_navigation_and_popup_keys() {
+        fn has_tip(tips: &[ShortcutTip], keys: &str, description: &str) -> bool {
+            tips.iter()
+                .any(|tip| tip.keys == keys && tip.description == description)
+        }
+
+        assert!(has_tip(GLOBAL_SHORTCUTS, "c", "new task"));
+        assert!(has_tip(HISTORY_SHORTCUTS, "Home/End", "jump first/last"));
+        assert!(has_tip(TAGS_SHORTCUTS, "PgUp/PgDn", "page"));
+        assert!(has_tip(TAGS_SHORTCUTS, "Home/End", "jump first/last"));
+        assert!(has_tip(FILTERS_SHORTCUTS, "PgUp/PgDn", "page"));
+        assert!(has_tip(FILTERS_SHORTCUTS, "Home/End", "jump first/last"));
+        assert!(has_tip(PROJECTS_SHORTCUTS, "Home/End", "jump first/last"));
+        assert!(has_tip(FAVORITES_SHORTCUTS, "Enter", "open task list"));
+        assert!(has_tip(INPUT_POPUP_SHORTCUTS, "Tab", "accept suggestion"));
+        assert!(has_tip(SORT_POPUP_SHORTCUTS, "Esc/o", "cancel"));
     }
 
     #[test]

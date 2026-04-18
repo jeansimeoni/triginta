@@ -2959,7 +2959,9 @@ fn render_help_dialog(frame: &mut Frame<'_>, app: &App, palette: ThemePalette) {
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
         ))
-        .title_bottom(Line::from("j/k or PgUp/PgDn scroll  Esc or ? closes").right_aligned())
+        .title_bottom(
+            Line::from("j/k or PgUp/PgDn scroll  Home/End jump  Esc or ? closes").right_aligned(),
+        )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.accent));
     let inner = block.inner(area);
