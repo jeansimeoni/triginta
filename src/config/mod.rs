@@ -12,6 +12,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     pub config_dir: PathBuf,
+    pub config_search_dirs: Vec<PathBuf>,
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
     pub log_path: PathBuf,
@@ -30,7 +31,11 @@ impl AppPaths {
         let project_dirs = ProjectDirs::from("", "", "triginta")
             .ok_or_else(|| anyhow!("failed to resolve application directories"))?;
 
-        Self::from_project_dirs(project_dirs.config_dir(), project_dirs.data_dir())
+        Self::from_project_dirs_with_extra_config_dirs(
+            project_dirs.config_dir(),
+            project_dirs.data_dir(),
+            macos_xdg_config_dir().into_iter().collect(),
+        )
     }
 
     pub fn from_data_dir(data_dir: PathBuf) -> Result<Self> {
@@ -39,8 +44,24 @@ impl AppPaths {
     }
 
     fn from_project_dirs(config_dir: &Path, data_dir: &Path) -> Result<Self> {
+        Self::from_project_dirs_with_extra_config_dirs(config_dir, data_dir, Vec::new())
+    }
+
+    fn from_project_dirs_with_extra_config_dirs(
+        config_dir: &Path,
+        data_dir: &Path,
+        extra_config_dirs: Vec<PathBuf>,
+    ) -> Result<Self> {
+        let mut config_search_dirs = vec![config_dir.to_path_buf()];
+        for extra_config_dir in extra_config_dirs {
+            if !config_search_dirs.contains(&extra_config_dir) {
+                config_search_dirs.push(extra_config_dir);
+            }
+        }
+
         Ok(Self {
             config_dir: config_dir.to_path_buf(),
+            config_search_dirs,
             data_dir: data_dir.to_path_buf(),
             db_path: data_dir.join(db_filename()),
             log_path: data_dir.join("logs").join("triginta.log"),
@@ -75,13 +96,31 @@ impl AppPaths {
         Ok(())
     }
 
-    fn config_candidates(&self) -> [PathBuf; 3] {
-        [
-            self.config_toml_path.clone(),
-            self.config_yaml_path.clone(),
-            self.config_yml_path.clone(),
-        ]
+    fn config_candidates(&self) -> Vec<PathBuf> {
+        self.config_search_dirs
+            .iter()
+            .flat_map(|config_dir| {
+                [
+                    config_dir.join("config.toml"),
+                    config_dir.join("config.yaml"),
+                    config_dir.join("config.yml"),
+                ]
+            })
+            .collect()
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_xdg_config_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .map(|home| home.join(".config").join("triginta"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_xdg_config_dir() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(debug_assertions)]
@@ -1007,6 +1046,10 @@ mod tests {
         assert_eq!(paths.data_dir, base);
         assert_eq!(paths.config_dir, PathBuf::from("/tmp/triginta-test/config"));
         assert_eq!(
+            paths.config_search_dirs,
+            vec![PathBuf::from("/tmp/triginta-test/config")]
+        );
+        assert_eq!(
             paths.db_path,
             PathBuf::from(format!("/tmp/triginta-test/{}", db_filename()))
         );
@@ -1038,6 +1081,31 @@ mod tests {
         assert_eq!(config.ui.project_list_sort, ProjectSortOrder::Manual);
         assert!(!config.ui.persist_project_list_sort);
         assert!(config.ui.hide_completed_tasks);
+    }
+
+    #[test]
+    fn load_app_config_from_extra_config_dir() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let data_dir = base.path().join("data");
+        let primary_config_dir = base.path().join("primary-config");
+        let extra_config_dir = base.path().join("xdg-config");
+        fs::create_dir_all(&extra_config_dir).expect("extra config dir should exist");
+        let paths = AppPaths::from_project_dirs_with_extra_config_dirs(
+            &primary_config_dir,
+            &data_dir,
+            vec![extra_config_dir.clone()],
+        )
+        .expect("paths should resolve");
+        fs::write(
+            extra_config_dir.join("config.toml"),
+            r#"[ui]
+glyph_mode = "ascii"
+"#,
+        )
+        .expect("fallback config should be written");
+
+        let config = load_app_config(&paths).expect("fallback config should load");
+        assert_eq!(config.ui.glyph_mode, GlyphMode::Ascii);
     }
 
     #[test]
@@ -1144,6 +1212,28 @@ stats:
     }
 
     #[test]
+    fn load_app_config_rejects_multiple_files_across_config_dirs() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let data_dir = base.path().join("data");
+        let primary_config_dir = base.path().join("primary-config");
+        let extra_config_dir = base.path().join("xdg-config");
+        let paths = AppPaths::from_project_dirs_with_extra_config_dirs(
+            &primary_config_dir,
+            &data_dir,
+            vec![extra_config_dir.clone()],
+        )
+        .expect("paths should resolve");
+        fs::create_dir_all(&primary_config_dir).expect("primary config dir should exist");
+        fs::create_dir_all(&extra_config_dir).expect("extra config dir should exist");
+        fs::write(&paths.config_toml_path, "").expect("primary config should be written");
+        fs::write(extra_config_dir.join("config.yaml"), "")
+            .expect("extra config should be written");
+
+        let error = load_app_config(&paths).expect_err("multiple config files should fail");
+        assert!(error.to_string().contains("multiple config files found"));
+    }
+
+    #[test]
     fn save_app_config_writes_toml_when_missing() {
         let base = tempfile::tempdir().expect("tempdir should be created");
         let paths =
@@ -1197,6 +1287,43 @@ timer:
         assert!(saved.contains("persist_project_list_sort: true"));
         assert!(saved.contains("hide_completed_tasks: false"));
         assert!(saved.contains("daily_target: 150m"));
+        assert!(!paths.config_toml_path.exists());
+    }
+
+    #[test]
+    fn save_app_config_preserves_existing_yaml_format_in_extra_config_dir() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let data_dir = base.path().join("data");
+        let primary_config_dir = base.path().join("primary-config");
+        let extra_config_dir = base.path().join("xdg-config");
+        let paths = AppPaths::from_project_dirs_with_extra_config_dirs(
+            &primary_config_dir,
+            &data_dir,
+            vec![extra_config_dir.clone()],
+        )
+        .expect("paths should resolve");
+        fs::create_dir_all(&extra_config_dir).expect("extra config dir should exist");
+        let extra_yaml_path = extra_config_dir.join("config.yaml");
+        fs::write(
+            &extra_yaml_path,
+            r#"ui:
+  glyph_mode: nerd-fonts
+  theme: catppuccin-mocha
+timer:
+  pomodoro_length: 25m
+  short_break_length: 5m
+  long_break_length: 15m
+  long_break_interval: 4
+"#,
+        )
+        .expect("fallback yaml should be written");
+        let mut config = load_app_config(&paths).expect("fallback config should load");
+        config.ui.task_list_sort = TaskSortOrder::TitleAsc;
+
+        save_app_config(&paths, &config).expect("config should save");
+
+        let saved = fs::read_to_string(&extra_yaml_path).expect("fallback yaml should exist");
+        assert!(saved.contains("task_list_sort: title-asc"));
         assert!(!paths.config_toml_path.exists());
     }
 

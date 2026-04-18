@@ -7,6 +7,7 @@ Typical locations:
 
 - Linux: `~/.config/triginta/config.toml`
 - macOS: `~/Library/Application Support/triginta/config.toml`
+- macOS also checks: `~/.config/triginta/config.toml`
 - Windows: `%APPDATA%\triginta\config.toml`
 
 Triginta supports exactly one config file at a time. Supported formats:
@@ -15,8 +16,8 @@ Triginta supports exactly one config file at a time. Supported formats:
 - `config.yaml`
 - `config.yml`
 
-If more than one of those files exists in the config directory, startup fails
-with an explicit error so the active config stays unambiguous.
+If more than one of those files exists in the searched config directories,
+startup fails with an explicit error so the active config stays unambiguous.
 
 ## Structure
 

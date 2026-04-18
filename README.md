@@ -127,6 +127,9 @@ On startup, Triginta creates its local directories, initializes SQLite if needed
 By default, application paths are resolved through the platform-specific
 standard app directories for `triginta`.
 
+On macOS, Triginta also checks `~/.config/triginta/config.toml` or YAML
+equivalent for the app config file.
+
 The app also supports overriding the data location with `TRIGINTA_DATA_DIR`.
 
 When `TRIGINTA_DATA_DIR` is set, Triginta uses this layout:
