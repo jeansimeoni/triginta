@@ -806,6 +806,27 @@ pub struct TaskListRowView {
     pub is_expanded: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskListBreadcrumbSegmentKind {
+    Navigation(TaskView),
+    Project,
+    Tag,
+    Filter,
+    Favorite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskListBreadcrumbSegmentView {
+    pub kind: TaskListBreadcrumbSegmentKind,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskListBreadcrumbView {
+    pub navigation: TaskListBreadcrumbSegmentView,
+    pub scope: Option<TaskListBreadcrumbSegmentView>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDuePreviewView {
     pub date: NaiveDate,
@@ -2342,6 +2363,24 @@ impl App {
         self.active_task_view
     }
 
+    pub fn task_list_breadcrumb_view(&self) -> TaskListBreadcrumbView {
+        let navigation = TaskListBreadcrumbSegmentView {
+            kind: TaskListBreadcrumbSegmentKind::Navigation(self.active_task_view),
+            label: self.active_task_view.label().to_string(),
+        };
+        let scope = if self.focused_panel == PanelFocus::Favorites {
+            Some(self.favorite_scope_breadcrumb_segment())
+        } else {
+            match self.active_sidebar_tab {
+                SidebarTab::Navigation => None,
+                SidebarTab::Projects => Some(self.project_scope_breadcrumb_segment()),
+                SidebarTab::Tags => Some(self.tag_scope_breadcrumb_segment()),
+                SidebarTab::Filters => Some(self.filter_scope_breadcrumb_segment()),
+            }
+        };
+        TaskListBreadcrumbView { navigation, scope }
+    }
+
     pub fn should_quit(&self) -> bool {
         self.should_quit
     }
@@ -2678,6 +2717,99 @@ impl App {
         if current != self.task_details_anchor_task_id {
             self.task_details_anchor_task_id = current;
             self.task_details_scroll = 0;
+        }
+    }
+
+    fn project_scope_breadcrumb_segment(&self) -> TaskListBreadcrumbSegmentView {
+        if let Some(section_id) = self.selected_section_id
+            && let Some(section) = self.section_by_id(section_id)
+        {
+            let project_name = self
+                .project_name(section.project_id)
+                .unwrap_or("Unknown Project");
+            return TaskListBreadcrumbSegmentView {
+                kind: TaskListBreadcrumbSegmentKind::Project,
+                label: format!("Project: {project_name} / {}", section.name),
+            };
+        }
+        if let Some(project_id) = self.selected_project_id {
+            let project_name = self.project_name(project_id).unwrap_or("Unknown Project");
+            return TaskListBreadcrumbSegmentView {
+                kind: TaskListBreadcrumbSegmentKind::Project,
+                label: format!("Project: {project_name}"),
+            };
+        }
+        TaskListBreadcrumbSegmentView {
+            kind: TaskListBreadcrumbSegmentKind::Project,
+            label: "Project: All Projects".to_string(),
+        }
+    }
+
+    fn tag_scope_breadcrumb_segment(&self) -> TaskListBreadcrumbSegmentView {
+        if let Some(tag_id) = self.selected_tag_id {
+            let tag_name = self
+                .tag_by_id(tag_id)
+                .map(|tag| tag.name.as_str())
+                .unwrap_or("Unknown Tag");
+            return TaskListBreadcrumbSegmentView {
+                kind: TaskListBreadcrumbSegmentKind::Tag,
+                label: format!("Tag: {tag_name}"),
+            };
+        }
+        TaskListBreadcrumbSegmentView {
+            kind: TaskListBreadcrumbSegmentKind::Tag,
+            label: "Tag: All Tags".to_string(),
+        }
+    }
+
+    fn filter_scope_breadcrumb_segment(&self) -> TaskListBreadcrumbSegmentView {
+        if let Some(filter_id) = self.selected_filter_id {
+            let filter_name = self
+                .filter_by_id(filter_id)
+                .map(|filter| filter.name.as_str())
+                .unwrap_or("Unknown Filter");
+            return TaskListBreadcrumbSegmentView {
+                kind: TaskListBreadcrumbSegmentKind::Filter,
+                label: format!("Filter: {filter_name}"),
+            };
+        }
+        TaskListBreadcrumbSegmentView {
+            kind: TaskListBreadcrumbSegmentKind::Filter,
+            label: "Filter: All Filters".to_string(),
+        }
+    }
+
+    fn favorite_scope_breadcrumb_segment(&self) -> TaskListBreadcrumbSegmentView {
+        match self.selected_favorite_item {
+            Some(FavoriteItemKind::Project(project_id)) => TaskListBreadcrumbSegmentView {
+                kind: TaskListBreadcrumbSegmentKind::Favorite,
+                label: format!(
+                    "Favorite: Project {}",
+                    self.project_name(project_id).unwrap_or("Unknown Project")
+                ),
+            },
+            Some(FavoriteItemKind::Tag(tag_id)) => TaskListBreadcrumbSegmentView {
+                kind: TaskListBreadcrumbSegmentKind::Favorite,
+                label: format!(
+                    "Favorite: Tag {}",
+                    self.tag_by_id(tag_id)
+                        .map(|tag| tag.name.as_str())
+                        .unwrap_or("Unknown Tag")
+                ),
+            },
+            Some(FavoriteItemKind::Filter(filter_id)) => TaskListBreadcrumbSegmentView {
+                kind: TaskListBreadcrumbSegmentKind::Favorite,
+                label: format!(
+                    "Favorite: Filter {}",
+                    self.filter_by_id(filter_id)
+                        .map(|filter| filter.name.as_str())
+                        .unwrap_or("Unknown Filter")
+                ),
+            },
+            None => TaskListBreadcrumbSegmentView {
+                kind: TaskListBreadcrumbSegmentKind::Favorite,
+                label: "Favorite: All".to_string(),
+            },
         }
     }
 
@@ -11959,6 +12091,7 @@ mod tests {
     use super::{
         App, CycleEntryState, FavoriteItemKind, HistoryPanelTab, PanelFocus, PreviewLineView,
         RightPanelTab, RunOptions, ScreenData, SidebarTab, TaskEditorField, TaskEditorState,
+        TaskListBreadcrumbSegmentKind, TaskListBreadcrumbSegmentView, TaskListBreadcrumbView,
         TaskView, TimerPhase, TimerRunState, apply_debug_overrides, chrono_duration,
         duration_to_stored_minutes,
     };
@@ -12579,6 +12712,87 @@ mod tests {
         assert_eq!(app.focused_panel(), PanelFocus::RightPane);
         assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
         assert_eq!(app.selected_project_id, Some(project.id));
+    }
+
+    #[test]
+    fn task_list_breadcrumb_shows_navigation_only_in_navigation_tab() {
+        let app = test_app();
+        assert_eq!(
+            app.task_list_breadcrumb_view(),
+            TaskListBreadcrumbView {
+                navigation: TaskListBreadcrumbSegmentView {
+                    kind: TaskListBreadcrumbSegmentKind::Navigation(TaskView::All),
+                    label: "All".to_string(),
+                },
+                scope: None,
+            }
+        );
+    }
+
+    #[test]
+    fn task_list_breadcrumb_shows_navigation_and_project_context() {
+        let mut app = test_app();
+        let project = app
+            .database
+            .project_repository()
+            .create(
+                "Context Project",
+                None,
+                ProjectColor::Blue,
+                false,
+                Local::now(),
+            )
+            .expect("project should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.active_sidebar_tab = SidebarTab::Projects;
+        app.selected_project_id = Some(project.id);
+
+        assert_eq!(
+            app.task_list_breadcrumb_view(),
+            TaskListBreadcrumbView {
+                navigation: TaskListBreadcrumbSegmentView {
+                    kind: TaskListBreadcrumbSegmentKind::Navigation(TaskView::All),
+                    label: "All".to_string(),
+                },
+                scope: Some(TaskListBreadcrumbSegmentView {
+                    kind: TaskListBreadcrumbSegmentKind::Project,
+                    label: "Project: Context Project".to_string(),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn task_list_breadcrumb_shows_selected_favorite_context() {
+        let mut app = test_app();
+        let filter = app
+            .database
+            .filter_repository()
+            .create(
+                "High Priority",
+                "p1 | p2",
+                FilterColor::Red,
+                true,
+                Local::now(),
+            )
+            .expect("filter should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.focused_panel = PanelFocus::Favorites;
+        app.selected_favorite_item = Some(FavoriteItemKind::Filter(filter.id));
+
+        assert_eq!(
+            app.task_list_breadcrumb_view(),
+            TaskListBreadcrumbView {
+                navigation: TaskListBreadcrumbSegmentView {
+                    kind: TaskListBreadcrumbSegmentKind::Navigation(TaskView::All),
+                    label: "All".to_string(),
+                },
+                scope: Some(TaskListBreadcrumbSegmentView {
+                    kind: TaskListBreadcrumbSegmentKind::Favorite,
+                    label: "Favorite: Filter High Priority".to_string(),
+                }),
+            }
+        );
     }
 
     #[test]

@@ -25,7 +25,8 @@ use crate::{
         RightPanelTab, ScreenData, SectionDeleteConfirmationView, SectionEditorView,
         SessionNoteEditorView, SessionNoteViewerView, ShortcutSection, ShortcutTip, SidebarTab,
         SyncIndicatorStateView, SyncStatusPanelView, TagDeleteConfirmationView, TagEditorView,
-        TagListRowView, TagSortPopupView, TaskEditorView, TaskInputView, TaskListRowView,
+        TagListRowView, TagSortPopupView, TaskEditorView, TaskInputView,
+        TaskListBreadcrumbSegmentKind, TaskListBreadcrumbView, TaskListRowView,
         TaskReschedulePopupView, TaskSearchView, TaskSortPopupView, TaskView, TimerPhase,
     },
     domain::{
@@ -619,8 +620,9 @@ fn render_task_list_panel(
         focused_panel == PanelFocus::RightPane,
         palette,
     );
+    let breadcrumb = app.task_list_breadcrumb_view();
     let block = panel_block(
-        right_panel_title(RightPanelTab::Tasks, symbols, palette),
+        right_panel_title(RightPanelTab::Tasks, symbols, palette, Some(breadcrumb)),
         focused_panel == PanelFocus::RightPane,
         palette,
     )
@@ -1465,7 +1467,7 @@ fn render_statistics_panel(
 
     let is_focused = focused_panel == PanelFocus::RightPane;
     let block = panel_block(
-        right_panel_title(RightPanelTab::Statistics, symbols, palette),
+        right_panel_title(RightPanelTab::Statistics, symbols, palette, None),
         is_focused,
         palette,
     )
@@ -6125,6 +6127,7 @@ fn right_panel_title(
     active_tab: RightPanelTab,
     symbols: Symbols,
     palette: ThemePalette,
+    breadcrumb: Option<TaskListBreadcrumbView>,
 ) -> Line<'static> {
     let tasks_style = if active_tab == RightPanelTab::Tasks {
         Style::default().fg(palette.accent)
@@ -6137,12 +6140,56 @@ fn right_panel_title(
         Style::default().fg(palette.subtle_text)
     };
 
-    Line::from(vec![
+    let mut spans = vec![
         Span::raw("[8] "),
         Span::styled(format!("{} Tasks", symbols.tasks), tasks_style),
+    ];
+    if active_tab == RightPanelTab::Tasks
+        && let Some(breadcrumb) = breadcrumb
+    {
+        spans.push(Span::raw(" | "));
+        spans.extend(task_list_breadcrumb_spans(&breadcrumb, symbols, palette));
+    }
+    spans.extend([
         Span::raw(" - "),
         Span::styled(format!("{} Stats", symbols.stats), stats_style),
-    ])
+    ]);
+
+    Line::from(spans)
+}
+
+fn task_list_breadcrumb_spans(
+    breadcrumb: &TaskListBreadcrumbView,
+    symbols: Symbols,
+    palette: ThemePalette,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    spans.push(Span::styled(
+        breadcrumb_segment_label(&breadcrumb.navigation, symbols),
+        Style::default().fg(palette.subtle_text),
+    ));
+    if let Some(scope) = &breadcrumb.scope {
+        spans.push(Span::raw(format!(" {} ", symbols.collapsed)));
+        spans.push(Span::styled(
+            breadcrumb_segment_label(scope, symbols),
+            Style::default().fg(palette.subtle_text),
+        ));
+    }
+    spans
+}
+
+fn breadcrumb_segment_label(
+    segment: &crate::app::TaskListBreadcrumbSegmentView,
+    symbols: Symbols,
+) -> String {
+    let glyph = match segment.kind {
+        TaskListBreadcrumbSegmentKind::Navigation(view) => task_view_symbol(view, symbols),
+        TaskListBreadcrumbSegmentKind::Project => symbols.project,
+        TaskListBreadcrumbSegmentKind::Tag => symbols.tag,
+        TaskListBreadcrumbSegmentKind::Filter => symbols.filter,
+        TaskListBreadcrumbSegmentKind::Favorite => symbols.favorite,
+    };
+    format!("{glyph} {}", segment.label)
 }
 
 fn panel_block(title: Line<'static>, focused: bool, palette: ThemePalette) -> Block<'static> {
