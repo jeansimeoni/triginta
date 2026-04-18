@@ -1552,20 +1552,14 @@ fn render_statistics_panel(
     ];
     frame.render_widget(Paragraph::new(kpis).wrap(Wrap { trim: true }), sections[0]);
 
-    let chart_sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
-        .split(sections[1]);
-
-    render_focus_trend_chart(
+    render_statistics_chart_grid(
         frame,
-        chart_sections[0],
+        sections[1],
         focus_30.as_slice(),
         daily_target_minutes,
+        data,
         palette,
     );
-
-    render_statistics_bars(frame, chart_sections[1], focus_30.as_slice(), data, palette);
 }
 
 fn today_completed_focus_minutes(data: &ScreenData) -> u32 {
@@ -1717,40 +1711,49 @@ fn render_focus_trend_chart(
     frame.render_widget(chart, area);
 }
 
-fn render_statistics_bars(
+fn render_statistics_chart_grid(
     frame: &mut Frame<'_>,
     area: Rect,
     focus_30: &[(NaiveDate, u32)],
+    daily_target_minutes: u32,
     data: &ScreenData,
     palette: ThemePalette,
 ) {
-    if area.height < 5 || area.width < 20 {
+    if area.height < 10 || area.width < 100 {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
+            .split(area);
+
+        render_focus_trend_chart(frame, sections[0], focus_30, daily_target_minutes, palette);
+        render_last_7_days_bars(frame, sections[1], focus_30, palette);
+        render_weekday_average_bars(frame, sections[2], focus_30, palette);
+        render_hourly_bars(frame, sections[3], data, palette);
         return;
     }
 
-    let sections = if area.width >= 96 {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(34),
-                Constraint::Percentage(33),
-                Constraint::Percentage(33),
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(34),
-                Constraint::Percentage(33),
-                Constraint::Percentage(33),
-            ])
-            .split(area)
-    };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[0]);
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
 
-    render_last_7_days_bars(frame, sections[0], focus_30, palette);
-    render_weekday_average_bars(frame, sections[1], focus_30, palette);
-    render_hourly_bars(frame, sections[2], data, palette);
+    render_focus_trend_chart(frame, top[0], focus_30, daily_target_minutes, palette);
+    render_last_7_days_bars(frame, top[1], focus_30, palette);
+    render_weekday_average_bars(frame, bottom[0], focus_30, palette);
+    render_hourly_bars(frame, bottom[1], data, palette);
 }
 
 fn render_last_7_days_bars(
@@ -1860,9 +1863,11 @@ fn render_hourly_bars(frame: &mut Frame<'_>, area: Rect, data: &ScreenData, pale
         totals[index] = bucket.focus_seconds.div_ceil(60);
     }
 
+    let content_width = area.width.saturating_sub(2);
+    let bar_width = if content_width >= 48 { 2 } else { 1 };
     let bars = (0..24)
         .map(|hour| {
-            let label = if hour % 3 == 0 {
+            let label = if bar_width >= 2 && hour % 3 == 0 {
                 format!("{hour:02}")
             } else {
                 String::new()
@@ -1889,7 +1894,7 @@ fn render_hourly_bars(frame: &mut Frame<'_>, area: Rect, data: &ScreenData, pale
                 .title("Hour Distribution"),
         )
         .data(BarGroup::default().bars(&bars))
-        .bar_width(1)
+        .bar_width(bar_width)
         .bar_gap(0)
         .max(max);
     frame.render_widget(chart, area);
