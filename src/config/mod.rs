@@ -459,7 +459,7 @@ impl TodoistSyncRuntimeConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppConfig {
     pub ui: UiConfig,
     pub timer: TimerSettings,
@@ -467,28 +467,9 @@ pub struct AppConfig {
     pub integrations: IntegrationConfig,
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            ui: UiConfig::default(),
-            timer: TimerSettings::default(),
-            stats: StatsSettings::default(),
-            integrations: IntegrationConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IntegrationConfig {
     pub todoist: TodoistIntegrationConfig,
-}
-
-impl Default for IntegrationConfig {
-    fn default() -> Self {
-        Self {
-            todoist: TodoistIntegrationConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1023,9 +1004,9 @@ fn parse_duration_string(value: &str) -> Result<Duration> {
 
 fn format_duration_string(duration: Duration) -> String {
     let seconds = duration.as_secs();
-    if seconds % 3600 == 0 {
+    if seconds.is_multiple_of(3600) {
         format!("{}h", seconds / 3600)
-    } else if seconds % 60 == 0 {
+    } else if seconds.is_multiple_of(60) {
         format!("{}m", seconds / 60)
     } else {
         format!("{seconds}s")

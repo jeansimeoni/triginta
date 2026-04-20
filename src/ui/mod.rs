@@ -804,7 +804,7 @@ fn render_task_details_panel(
                     .to_string()
             })
             .unwrap_or_else(|| due.date.format("%Y-%m-%d").to_string());
-        if due.string.trim().to_ascii_lowercase() != normalized_due.to_ascii_lowercase() {
+        if !due.string.trim().eq_ignore_ascii_case(&normalized_due) {
             meta_lines.push(Line::from(format!("From: {}", due.string.trim())));
         }
     }
@@ -1407,25 +1407,25 @@ fn markdown_inline_tokens(input: &str) -> Vec<MarkdownInlineToken> {
         };
         let label = &after_open[..close];
         let after_label = &after_open[close + 1..];
-        if let Some(after_paren) = after_label.strip_prefix('(') {
-            if let Some(end_url) = after_paren.find(')') {
-                let url = &after_paren[..end_url];
-                let text = if label.is_empty() {
-                    url.to_string()
+        if let Some(after_paren) = after_label.strip_prefix('(')
+            && let Some(end_url) = after_paren.find(')')
+        {
+            let url = &after_paren[..end_url];
+            let text = if label.is_empty() {
+                url.to_string()
+            } else {
+                label.to_string()
+            };
+            tokens.push(MarkdownInlineToken {
+                text,
+                url: if url.is_empty() {
+                    None
                 } else {
-                    label.to_string()
-                };
-                tokens.push(MarkdownInlineToken {
-                    text,
-                    url: if url.is_empty() {
-                        None
-                    } else {
-                        Some(url.to_string())
-                    },
-                });
-                rest = &after_paren[end_url + 1..];
-                continue;
-            }
+                    Some(url.to_string())
+                },
+            });
+            rest = &after_paren[end_url + 1..];
+            continue;
         }
         tokens.push(MarkdownInlineToken {
             text: format!("[{label}]"),
@@ -2371,10 +2371,7 @@ fn section_name_for_task<'a>(data: &'a ScreenData, task: &Task) -> Option<&'a st
         .map(|section| section.name.as_str())
 }
 
-fn task_tags_for_task<'a>(
-    data: &'a ScreenData,
-    task_id: crate::domain::TaskId,
-) -> Vec<(&'a str, TagColor)> {
+fn task_tags_for_task(data: &ScreenData, task_id: crate::domain::TaskId) -> Vec<(&str, TagColor)> {
     let mut tags = data
         .task_tag_links
         .iter()
@@ -2428,16 +2425,12 @@ fn format_task_tags_for_row(
     let remaining = tags.len().saturating_sub(segments.len());
     if remaining > 0 {
         let suffix = format!("+{remaining}");
-        if !segments.is_empty()
-            && used + task_tag_segment_content_width(suffix.as_str(), false, symbols) + 1
-                <= max_width
-        {
-            segments.push(TaskTagRowSegment {
-                text: suffix,
-                color: None,
-            });
-        } else if segments.is_empty()
-            && task_tag_segment_content_width(suffix.as_str(), false, symbols) <= max_width
+        let suffix_fits_after_segment =
+            used + task_tag_segment_content_width(suffix.as_str(), false, symbols) < max_width;
+        let suffix_fits_alone =
+            task_tag_segment_content_width(suffix.as_str(), false, symbols) <= max_width;
+        if (!segments.is_empty() && suffix_fits_after_segment)
+            || (segments.is_empty() && suffix_fits_alone)
         {
             segments.push(TaskTagRowSegment {
                 text: suffix,
@@ -3919,6 +3912,8 @@ fn render_task_editor_popup(
     }
 }
 
+// Rendering call sites stay clearer with field data passed explicitly.
+#[allow(clippy::too_many_arguments)]
 fn render_editor_field(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -3967,6 +3962,8 @@ fn render_editor_field(
     }
 }
 
+// Multiline fields add scroll state to the same explicit field-rendering shape.
+#[allow(clippy::too_many_arguments)]
 fn render_editor_multiline_field(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -5724,10 +5721,8 @@ fn history_rows(entries: &[SessionEntry], tasks: &[Task]) -> Vec<HistoryRow> {
                 previous_was_focus = true;
             }
             SessionKind::ShortBreak | SessionKind::LongBreak => {
-                if previous_was_focus {
-                    if let Some(last) = rows.last_mut() {
-                        last.break_seconds = entry.duration_seconds;
-                    }
+                if previous_was_focus && let Some(last) = rows.last_mut() {
+                    last.break_seconds = entry.duration_seconds;
                 }
                 previous_was_focus = false;
             }
@@ -6543,6 +6538,8 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 }
 
 #[cfg(test)]
+// Helper functions below are shared by runtime rendering and tests in this large UI module.
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
         FormPreviewPanelView, PreviewLineView, STATUS_BAR_GLOBAL_SHORTCUTS, TaskTagRowSegment,

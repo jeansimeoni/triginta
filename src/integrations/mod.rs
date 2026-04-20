@@ -1244,8 +1244,10 @@ mod tests {
 
         let database = Database::open_in_memory()?;
         let sync = database.sync_repository();
-        let mut config = TodoistIntegrationConfig::default();
-        config.enabled = true;
+        let config = TodoistIntegrationConfig {
+            enabled: true,
+            ..TodoistIntegrationConfig::default()
+        };
         let provider = TodoistSyncProvider::new(config, true);
 
         sync.enqueue_outbox(

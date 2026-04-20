@@ -442,6 +442,8 @@ pub trait PomodoroRepository {
         ended_at: DateTime<Local>,
         duration_minutes: u32,
     ) -> Result<SessionEntry>;
+    // Mirrors the session_history columns to keep repository calls explicit.
+    #[allow(clippy::too_many_arguments)]
     fn record_session_entry(
         &self,
         task_id: Option<TaskId>,
@@ -3896,6 +3898,8 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
         )
     }
 
+    // Mirrors the session_history columns to keep repository calls explicit.
+    #[allow(clippy::too_many_arguments)]
     fn record_session_entry(
         &self,
         task_id: Option<TaskId>,

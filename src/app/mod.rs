@@ -2625,7 +2625,6 @@ impl App {
                 &mut rows,
                 root,
                 0,
-                &matching_ids,
                 &scoped_visible_ids,
                 &children_by_parent,
                 &mut branch_cache,
@@ -2719,12 +2718,13 @@ impl App {
         }
     }
 
+    // Keep the traversal state explicit; bundling it hides which sets mutate across recursion.
+    #[allow(clippy::too_many_arguments)]
     fn append_visible_task_row<'a>(
         &'a self,
         rows: &mut Vec<(usize, &'a Task)>,
         task: &'a Task,
         depth: usize,
-        matching_ids: &HashSet<TaskId>,
         scoped_visible_ids: &HashSet<TaskId>,
         children_by_parent: &HashMap<Option<TaskId>, Vec<&'a Task>>,
         branch_cache: &mut HashMap<TaskId, bool>,
@@ -2751,7 +2751,6 @@ impl App {
                 rows,
                 child,
                 depth + 1,
-                matching_ids,
                 scoped_visible_ids,
                 children_by_parent,
                 branch_cache,
@@ -4658,10 +4657,10 @@ impl App {
         match target {
             PanelSearchTarget::NavigationViews => {
                 let filtered = self.navigation_task_views();
-                if let Some(first) = filtered.first().copied() {
-                    if !filtered.contains(&self.active_task_view) {
-                        self.active_task_view = first;
-                    }
+                if let Some(first) = filtered.first().copied()
+                    && !filtered.contains(&self.active_task_view)
+                {
+                    self.active_task_view = first;
                 }
                 self.sync_task_selection();
             }
@@ -4671,13 +4670,12 @@ impl App {
                     .into_iter()
                     .map(|row| (row.project_id, row.section_id))
                     .collect::<Vec<_>>();
-                if let Some((first_project, first_section)) = filtered_selection.first().copied() {
-                    if !filtered_selection
+                if let Some((first_project, first_section)) = filtered_selection.first().copied()
+                    && !filtered_selection
                         .contains(&(self.selected_project_id, self.selected_section_id))
-                    {
-                        self.selected_project_id = first_project;
-                        self.selected_section_id = first_section;
-                    }
+                {
+                    self.selected_project_id = first_project;
+                    self.selected_section_id = first_section;
                 }
                 self.sync_task_selection();
             }
@@ -4690,10 +4688,10 @@ impl App {
                     .into_iter()
                     .map(|row| row.tag_id)
                     .collect::<Vec<_>>();
-                if let Some(first) = filtered_ids.first().copied() {
-                    if !filtered_ids.contains(&self.selected_tag_id) {
-                        self.selected_tag_id = first;
-                    }
+                if let Some(first) = filtered_ids.first().copied()
+                    && !filtered_ids.contains(&self.selected_tag_id)
+                {
+                    self.selected_tag_id = first;
                 }
                 self.sync_task_selection();
             }
@@ -4703,10 +4701,10 @@ impl App {
                     .into_iter()
                     .map(|row| row.filter_id)
                     .collect::<Vec<_>>();
-                if let Some(first) = filtered_ids.first().copied() {
-                    if !filtered_ids.contains(&self.selected_filter_id) {
-                        self.selected_filter_id = first;
-                    }
+                if let Some(first) = filtered_ids.first().copied()
+                    && !filtered_ids.contains(&self.selected_filter_id)
+                {
+                    self.selected_filter_id = first;
                 }
                 self.sync_task_selection();
             }
@@ -5483,10 +5481,10 @@ impl App {
                 .chars()
                 .last()
                 .is_some_and(char::is_whitespace)
-            && !value[..token_start]
+            && value[..token_start]
                 .chars()
                 .last()
-                .is_some_and(|ch| ch == ',')
+                .is_none_or(|ch| ch != ',')
         {
             return None;
         }
@@ -5586,10 +5584,10 @@ impl App {
     ) -> Result<Vec<TagId>> {
         let mut tag_ids = Vec::new();
         for query in queries {
-            if let Some(tag_id) = self.resolve_or_create_tag_input(query, now)? {
-                if !tag_ids.contains(&tag_id) {
-                    tag_ids.push(tag_id);
-                }
+            if let Some(tag_id) = self.resolve_or_create_tag_input(query, now)?
+                && !tag_ids.contains(&tag_id)
+            {
+                tag_ids.push(tag_id);
             }
         }
         Ok(tag_ids)
@@ -5660,7 +5658,7 @@ impl App {
                     .chars()
                     .last()
                     .is_some_and(char::is_whitespace)
-                && !value[..start].chars().last().is_some_and(|ch| ch == ',')
+                && value[..start].chars().last().is_none_or(|ch| ch != ',')
             {
                 search_from = start + 1;
                 continue;
@@ -5787,15 +5785,14 @@ impl App {
         ancestor_has_more: &[bool],
     ) {
         let mut children = self.project_children(parent_project_id);
-        if parent_project_id.is_none() {
-            if let Some(inbox) = self
+        if parent_project_id.is_none()
+            && let Some(inbox) = self
                 .screen_data
                 .projects
                 .iter()
                 .find(|project| project.is_inbox && project.deleted_at.is_none())
-            {
-                children.insert(0, inbox);
-            }
+        {
+            children.insert(0, inbox);
         }
 
         let total_children = children.len();
@@ -6546,20 +6543,19 @@ impl App {
         self.screen_data.tags = self.database.tag_repository().list_all()?;
         self.screen_data.filters = self.database.filter_repository().list_all()?;
         self.screen_data.task_tag_links = self.database.tag_repository().list_task_tag_links()?;
-        if let Some(task_id) = self.assigned_task_id {
-            if !self
+        if let Some(task_id) = self.assigned_task_id
+            && !self
                 .screen_data
                 .tasks
                 .iter()
                 .any(|task| task.id == task_id && self.task_is_active(task))
-            {
-                self.assigned_task_id = None;
-            }
+        {
+            self.assigned_task_id = None;
         }
-        if let Some(task_id) = self.active_focus_task_id {
-            if !self.screen_data.tasks.iter().any(|task| task.id == task_id) {
-                self.active_focus_task_id = None;
-            }
+        if let Some(task_id) = self.active_focus_task_id
+            && !self.screen_data.tasks.iter().any(|task| task.id == task_id)
+        {
+            self.active_focus_task_id = None;
         }
         let active_task_ids = self
             .screen_data
@@ -6615,10 +6611,10 @@ impl App {
     ) -> Option<crate::domain::TaskDue> {
         let target_date = option.resolve_date(reference_date)?;
         let existing_datetime = existing_due.and_then(|due| due.datetime);
-        let datetime = existing_datetime.and_then(|current| {
+        let datetime = existing_datetime.map(|current| {
             let local_time = current.with_timezone(&Local).time();
             let next_naive = target_date.and_time(local_time);
-            Some(Self::local_naive_to_utc(next_naive))
+            Self::local_naive_to_utc(next_naive)
         });
         let timezone = existing_due.and_then(|due| due.timezone.clone());
 
@@ -10075,26 +10071,24 @@ impl App {
                         self.task_editor = Some(editor);
                         return Ok(true);
                     }
-                    if editor.focused_field == TaskEditorField::Parent {
-                        if let Some(parent_task_id) = self.resolve_parent_task_input(
+                    if editor.focused_field == TaskEditorField::Parent
+                        && let Some(parent_task_id) = self.resolve_parent_task_input(
                             editor.parent_input.as_str(),
                             editor.task_id,
                             editor.project_id,
-                        ) {
-                            if let Some(parent_task) = self
-                                .screen_data
-                                .tasks
-                                .iter()
-                                .find(|task| task.id == parent_task_id)
-                            {
-                                editor.parent_task_id = Some(parent_task_id);
-                                editor.parent_input = parent_task.title.clone();
-                                editor.parent_cursor = editor.parent_input.len();
-                                editor.suggestion_index = 0;
-                                self.task_editor = Some(editor);
-                                return Ok(true);
-                            }
-                        }
+                        )
+                        && let Some(parent_task) = self
+                            .screen_data
+                            .tasks
+                            .iter()
+                            .find(|task| task.id == parent_task_id)
+                    {
+                        editor.parent_task_id = Some(parent_task_id);
+                        editor.parent_input = parent_task.title.clone();
+                        editor.parent_cursor = editor.parent_input.len();
+                        editor.suggestion_index = 0;
+                        self.task_editor = Some(editor);
+                        return Ok(true);
                     }
                     return self.submit_task_editor(editor, now);
                 }
@@ -10161,26 +10155,24 @@ impl App {
                         self.task_editor = Some(editor);
                         return Ok(true);
                     }
-                    if editor.focused_field == TaskEditorField::Parent {
-                        if let Some(parent_task_id) = self.resolve_parent_task_input(
+                    if editor.focused_field == TaskEditorField::Parent
+                        && let Some(parent_task_id) = self.resolve_parent_task_input(
                             editor.parent_input.as_str(),
                             editor.task_id,
                             editor.project_id,
-                        ) {
-                            if let Some(parent_task) = self
-                                .screen_data
-                                .tasks
-                                .iter()
-                                .find(|task| task.id == parent_task_id)
-                            {
-                                editor.parent_task_id = Some(parent_task_id);
-                                editor.parent_input = parent_task.title.clone();
-                                editor.parent_cursor = editor.parent_input.len();
-                                editor.suggestion_index = 0;
-                                self.task_editor = Some(editor);
-                                return Ok(true);
-                            }
-                        }
+                        )
+                        && let Some(parent_task) = self
+                            .screen_data
+                            .tasks
+                            .iter()
+                            .find(|task| task.id == parent_task_id)
+                    {
+                        editor.parent_task_id = Some(parent_task_id);
+                        editor.parent_input = parent_task.title.clone();
+                        editor.parent_cursor = editor.parent_input.len();
+                        editor.suggestion_index = 0;
+                        self.task_editor = Some(editor);
+                        return Ok(true);
                     }
                     editor.focused_field = editor.focused_field.next();
                     editor.suggestion_index = 0;
@@ -11751,10 +11743,7 @@ impl App {
             None
         };
 
-        if report.last_error.is_some() {
-            sync.poll_interval =
-                (sync.poll_interval.saturating_mul(2)).clamp(min_interval, max_interval);
-        } else if report.pending_outbox == 0 {
+        if report.last_error.is_some() || report.pending_outbox == 0 {
             sync.poll_interval =
                 (sync.poll_interval.saturating_mul(2)).clamp(min_interval, max_interval);
         } else {
@@ -12081,9 +12070,9 @@ fn apply_debug_overrides(config: &mut AppConfig, options: RunOptions) {
 fn debug_dry_run_sync_enabled() -> bool {
     #[cfg(debug_assertions)]
     {
-        return env::var("TRIGINTA_DRY_RUN_SYNC")
+        env::var("TRIGINTA_DRY_RUN_SYNC")
             .map(|value| value == "1")
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
     #[cfg(not(debug_assertions))]
     {

@@ -616,144 +616,6 @@ struct Parser {
     allow_unsupported_terms: bool,
 }
 
-#[cfg(test)]
-mod tests {
-    use chrono::{Local, NaiveDate};
-
-    use crate::domain::{ProjectId, Task, TaskDue, TaskId, TaskPriority, TaskStatus};
-
-    use super::{evaluate, parse_and_validate};
-
-    fn sample_task(
-        title: &str,
-        status: TaskStatus,
-        priority: TaskPriority,
-        due: Option<TaskDue>,
-    ) -> Task {
-        Task {
-            id: TaskId(1),
-            project_id: ProjectId(1),
-            section_id: None,
-            parent_task_id: None,
-            child_order: 1,
-            title: title.to_string(),
-            description: String::new(),
-            status,
-            priority,
-            created_at: Local::now(),
-            completed_at: None,
-            deleted_at: None,
-            due,
-        }
-    }
-
-    #[test]
-    fn parser_rejects_unsupported_terms() {
-        let error = parse_and_validate("foo:bar").expect_err("term should be rejected");
-        assert!(error.message.contains("unsupported"));
-    }
-
-    #[test]
-    fn parser_supports_assigned_to_me_term() {
-        parse_and_validate("assigned to: me").expect("query should parse");
-        parse_and_validate("assignee:me").expect("query should parse");
-    }
-
-    #[test]
-    fn evaluator_supports_boolean_expressions() {
-        let expr = parse_and_validate("@Work & (today | p1)").expect("query should parse");
-        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
-        let task = sample_task(
-            "Write release notes",
-            TaskStatus::Todo,
-            TaskPriority::P4,
-            Some(TaskDue {
-                date: today,
-                datetime: None,
-                timezone: None,
-                string: "today".to_string(),
-                due_lang: None,
-                is_recurring: false,
-            }),
-        );
-        assert!(evaluate(
-            &expr,
-            &task,
-            today,
-            Some("Inbox"),
-            &["Inbox"],
-            None,
-            &["Work", "Focus"],
-        ));
-    }
-
-    #[test]
-    fn evaluator_applies_negation() {
-        let expr = parse_and_validate("!completed & @Work").expect("query should parse");
-        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
-        let task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
-        assert!(evaluate(
-            &expr,
-            &task,
-            today,
-            Some("Inbox"),
-            &["Inbox"],
-            None,
-            &["Work"]
-        ));
-    }
-
-    #[test]
-    fn evaluator_supports_section_and_subtask_terms() {
-        let expr = parse_and_validate("/Roadmap & subtask").expect("query should parse");
-        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
-        let mut task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
-        task.parent_task_id = Some(TaskId(99));
-        assert!(evaluate(
-            &expr,
-            &task,
-            today,
-            Some("GTD"),
-            &["GTD"],
-            Some("Roadmap"),
-            &[]
-        ));
-    }
-
-    #[test]
-    fn evaluator_supports_project_with_children_term() {
-        let expr = parse_and_validate("##GTD").expect("query should parse");
-        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
-        let task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
-        assert!(evaluate(
-            &expr,
-            &task,
-            today,
-            Some("Items"),
-            &["Items", "GTD"],
-            None,
-            &[]
-        ));
-    }
-
-    #[test]
-    fn parser_accepts_project_and_tag_with_spaces_without_quotes() {
-        let expr =
-            parse_and_validate("#Um Dia / Talvez & @Waiting For...").expect("query should parse");
-        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
-        let task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
-        assert!(evaluate(
-            &expr,
-            &task,
-            today,
-            Some("Um Dia / Talvez"),
-            &["Um Dia / Talvez"],
-            None,
-            &["Waiting For..."],
-        ));
-    }
-}
-
 impl Parser {
     fn new(tokens: Vec<Token>, allow_unsupported_terms: bool) -> Self {
         Self {
@@ -895,4 +757,142 @@ fn slice_eq_ignore_ascii_case(chars: &[char], start: usize, needle: &str) -> boo
     }
     let candidate = chars[start..end].iter().collect::<String>();
     candidate.eq_ignore_ascii_case(needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Local, NaiveDate};
+
+    use crate::domain::{ProjectId, Task, TaskDue, TaskId, TaskPriority, TaskStatus};
+
+    use super::{evaluate, parse_and_validate};
+
+    fn sample_task(
+        title: &str,
+        status: TaskStatus,
+        priority: TaskPriority,
+        due: Option<TaskDue>,
+    ) -> Task {
+        Task {
+            id: TaskId(1),
+            project_id: ProjectId(1),
+            section_id: None,
+            parent_task_id: None,
+            child_order: 1,
+            title: title.to_string(),
+            description: String::new(),
+            status,
+            priority,
+            created_at: Local::now(),
+            completed_at: None,
+            deleted_at: None,
+            due,
+        }
+    }
+
+    #[test]
+    fn parser_rejects_unsupported_terms() {
+        let error = parse_and_validate("foo:bar").expect_err("term should be rejected");
+        assert!(error.message.contains("unsupported"));
+    }
+
+    #[test]
+    fn parser_supports_assigned_to_me_term() {
+        parse_and_validate("assigned to: me").expect("query should parse");
+        parse_and_validate("assignee:me").expect("query should parse");
+    }
+
+    #[test]
+    fn evaluator_supports_boolean_expressions() {
+        let expr = parse_and_validate("@Work & (today | p1)").expect("query should parse");
+        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
+        let task = sample_task(
+            "Write release notes",
+            TaskStatus::Todo,
+            TaskPriority::P4,
+            Some(TaskDue {
+                date: today,
+                datetime: None,
+                timezone: None,
+                string: "today".to_string(),
+                due_lang: None,
+                is_recurring: false,
+            }),
+        );
+        assert!(evaluate(
+            &expr,
+            &task,
+            today,
+            Some("Inbox"),
+            &["Inbox"],
+            None,
+            &["Work", "Focus"],
+        ));
+    }
+
+    #[test]
+    fn evaluator_applies_negation() {
+        let expr = parse_and_validate("!completed & @Work").expect("query should parse");
+        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
+        let task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
+        assert!(evaluate(
+            &expr,
+            &task,
+            today,
+            Some("Inbox"),
+            &["Inbox"],
+            None,
+            &["Work"]
+        ));
+    }
+
+    #[test]
+    fn evaluator_supports_section_and_subtask_terms() {
+        let expr = parse_and_validate("/Roadmap & subtask").expect("query should parse");
+        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
+        let mut task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
+        task.parent_task_id = Some(TaskId(99));
+        assert!(evaluate(
+            &expr,
+            &task,
+            today,
+            Some("GTD"),
+            &["GTD"],
+            Some("Roadmap"),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn evaluator_supports_project_with_children_term() {
+        let expr = parse_and_validate("##GTD").expect("query should parse");
+        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
+        let task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
+        assert!(evaluate(
+            &expr,
+            &task,
+            today,
+            Some("Items"),
+            &["Items", "GTD"],
+            None,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn parser_accepts_project_and_tag_with_spaces_without_quotes() {
+        let expr =
+            parse_and_validate("#Um Dia / Talvez & @Waiting For...").expect("query should parse");
+        let today = NaiveDate::from_ymd_opt(2026, 4, 14).expect("valid date");
+        let task = sample_task("Task", TaskStatus::Todo, TaskPriority::P4, None);
+        assert!(evaluate(
+            &expr,
+            &task,
+            today,
+            Some("Um Dia / Talvez"),
+            &["Um Dia / Talvez"],
+            None,
+            &["Waiting For..."],
+        ));
+    }
 }

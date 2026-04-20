@@ -441,11 +441,12 @@ impl TaskStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum TaskPriority {
     P1,
     P2,
     P3,
+    #[default]
     P4,
 }
 
@@ -489,12 +490,6 @@ impl TaskPriority {
             Self::P3 => "P3",
             Self::P4 => "P4",
         }
-    }
-}
-
-impl Default for TaskPriority {
-    fn default() -> Self {
-        Self::P4
     }
 }
 

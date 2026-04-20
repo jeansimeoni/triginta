@@ -432,24 +432,24 @@ fn iso_date_candidates(input: &str) -> Vec<((usize, usize), TaskDue)> {
     let mut index = 0;
 
     while index + 10 <= input.len() {
-        if let Some(candidate) = input.get(index..index + 10) {
-            if looks_like_iso_date(candidate) && is_phrase_boundary(input, index, index + 10) {
-                if let Ok(date) = NaiveDate::parse_from_str(candidate, "%Y-%m-%d") {
-                    matches.push(with_time_suffix(
-                        input,
-                        index,
-                        index + 10,
-                        TaskDue {
-                            date,
-                            datetime: None,
-                            timezone: None,
-                            string: candidate.to_string(),
-                            due_lang: None,
-                            is_recurring: false,
-                        },
-                    ));
-                }
-            }
+        if let Some(candidate) = input.get(index..index + 10)
+            && looks_like_iso_date(candidate)
+            && is_phrase_boundary(input, index, index + 10)
+            && let Ok(date) = NaiveDate::parse_from_str(candidate, "%Y-%m-%d")
+        {
+            matches.push(with_time_suffix(
+                input,
+                index,
+                index + 10,
+                TaskDue {
+                    date,
+                    datetime: None,
+                    timezone: None,
+                    string: candidate.to_string(),
+                    due_lang: None,
+                    is_recurring: false,
+                },
+            ));
         }
         index += 1;
     }
