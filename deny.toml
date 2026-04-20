@@ -4,6 +4,9 @@
 # or advisories should fail until they are reviewed.
 
 [graph]
+# Match the first public release targets from the release plan. Platform crates
+# outside this set are still pinned in Cargo.lock, but they are not part of the
+# first release gate.
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
@@ -30,6 +33,9 @@ allow = [
     "Zlib",
 ]
 exceptions = [
+    # Pulled in by `directories`; reviewed as acceptable for this GPLv3
+    # application because MPL's file-level copyleft does not change Triginta's
+    # GPLv3 licensing.
     { allow = ["MPL-2.0"], crate = "option-ext" },
 ]
 
@@ -44,6 +50,8 @@ wildcards = "deny"
 highlight = "simplest-path"
 
 skip = [
+    # These duplicate versions are current transitive constraints in the locked
+    # macOS/Linux graph. New duplicate versions should fail until reviewed.
     { crate = "getrandom@0.2.17", reason = "Transitive rustls/ring version; reviewed in Phase 2." },
     { crate = "getrandom@0.4.2", reason = "Transitive tempfile/uuid version; reviewed in Phase 2." },
     { crate = "hashbrown@0.14.5", reason = "Transitive rusqlite/hashlink version; reviewed in Phase 2." },
