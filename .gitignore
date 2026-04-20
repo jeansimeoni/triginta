@@ -22,3 +22,12 @@ target
 
 # Local planning spikes
 /roadmap/
+
+# Private AI tooling artifacts (must stay local-only)
+AGENTS.md
+.codex/
+CLAUDE.md
+.claude/
+.cursor/
+.windsurf/
+.aider*
