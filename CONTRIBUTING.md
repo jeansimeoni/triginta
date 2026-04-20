@@ -35,6 +35,7 @@ cargo deny check
 - Preserve clear boundaries between app state, UI, domain logic, storage, and integrations.
 - Prefer simple, readable Rust over clever abstractions.
 - Keep first-run behavior valid with an empty database (no sample data injection).
+- Keep developer-only CLI flags hidden from help output and unavailable in release builds.
 
 ## Pull Request Expectations
 

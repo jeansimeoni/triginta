@@ -2,30 +2,156 @@
 // Copyright (C) 2026 Jean Simeoni
 
 use anyhow::Result;
+use clap::{Arg, ArgAction, Command, error::ErrorKind};
+
+#[derive(Debug)]
+enum CliAction {
+    Run(triginta::app::RunOptions),
+    PrintAndExit(String),
+}
 
 fn main() -> Result<()> {
     // In C this would usually be `int main(void)` plus explicit error codes.
     // Rust programs commonly return `Result` from `main`, which lets the `?`
     // operator propagate failures instead of manually checking every call.
-    triginta::app::run(debug_run_options())
-}
-
-#[cfg(debug_assertions)]
-fn debug_run_options() -> triginta::app::RunOptions {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let force_ascii = args.iter().any(|arg| arg == "--ascii");
-    let force_short_timer = args.iter().any(|arg| arg == "--short-timer");
-    let reset_data = args.iter().any(|arg| arg == "--reset-data");
-    let dry_run_sync = args.iter().any(|arg| arg == "--dry-run-sync");
-    triginta::app::RunOptions {
-        force_ascii,
-        force_short_timer,
-        reset_data,
-        dry_run_sync,
+    match parse_cli_action(std::env::args_os()) {
+        Ok(CliAction::Run(options)) => triginta::app::run(options),
+        Ok(CliAction::PrintAndExit(output)) => {
+            print!("{output}");
+            Ok(())
+        }
+        Err(error) => error.exit(),
     }
 }
 
-#[cfg(not(debug_assertions))]
-fn debug_run_options() -> triginta::app::RunOptions {
-    triginta::app::RunOptions::default()
+fn parse_cli_action<I, T>(args: I) -> std::result::Result<CliAction, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    parse_cli_action_with_debug_flags(args, cfg!(debug_assertions))
+}
+
+fn parse_cli_action_with_debug_flags<I, T>(
+    args: I,
+    include_debug_flags: bool,
+) -> std::result::Result<CliAction, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    match cli_command(include_debug_flags).try_get_matches_from(args) {
+        Ok(matches) => Ok(CliAction::Run(triginta::app::RunOptions {
+            force_ascii: matches.get_flag("ascii"),
+            force_short_timer: matches.get_flag("short-timer"),
+            reset_data: matches.get_flag("reset-data"),
+            dry_run_sync: matches.get_flag("dry-run-sync"),
+        })),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            Ok(CliAction::PrintAndExit(error.to_string()))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn cli_command(include_debug_flags: bool) -> Command {
+    let mut command = Command::new("triginta")
+        .about("A local-first TUI Pomodoro timer and task manager.")
+        .version(env!("CARGO_PKG_VERSION"))
+        .arg_required_else_help(false)
+        .disable_help_subcommand(true);
+
+    if include_debug_flags {
+        command = command
+            .arg(hidden_debug_flag("ascii"))
+            .arg(hidden_debug_flag("short-timer"))
+            .arg(hidden_debug_flag("reset-data"))
+            .arg(hidden_debug_flag("dry-run-sync"));
+    }
+
+    command
+}
+
+fn hidden_debug_flag(name: &'static str) -> Arg {
+    Arg::new(name)
+        .long(name)
+        .action(ArgAction::SetTrue)
+        .hide(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliAction, parse_cli_action_with_debug_flags};
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn help_prints_without_run_options() {
+        let action = parse_cli_action_with_debug_flags(["triginta", "--help"], true)
+            .expect("help should parse as an exit action");
+
+        let CliAction::PrintAndExit(output) = action else {
+            panic!("help should not start the app");
+        };
+
+        assert!(output.contains("Usage: triginta"));
+        assert!(output.contains("--version"));
+        assert!(!output.contains("--ascii"));
+    }
+
+    #[test]
+    fn version_prints_without_run_options() {
+        let action = parse_cli_action_with_debug_flags(["triginta", "--version"], true)
+            .expect("version should parse as an exit action");
+
+        let CliAction::PrintAndExit(output) = action else {
+            panic!("version should not start the app");
+        };
+
+        assert!(output.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn unknown_flag_returns_cli_error() {
+        let error = parse_cli_action_with_debug_flags(["triginta", "--unknown"], true)
+            .expect_err("unknown flags should fail");
+
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn debug_flags_populate_run_options_when_enabled() {
+        let action = parse_cli_action_with_debug_flags(
+            [
+                "triginta",
+                "--ascii",
+                "--short-timer",
+                "--reset-data",
+                "--dry-run-sync",
+            ],
+            true,
+        )
+        .expect("debug flags should parse in debug-style mode");
+
+        let CliAction::Run(options) = action else {
+            panic!("debug flags should run the app");
+        };
+
+        assert!(options.force_ascii);
+        assert!(options.force_short_timer);
+        assert!(options.reset_data);
+        assert!(options.dry_run_sync);
+    }
+
+    #[test]
+    fn debug_flags_are_rejected_when_disabled() {
+        let error = parse_cli_action_with_debug_flags(["triginta", "--ascii"], false)
+            .expect_err("debug flags should fail in release-style mode");
+
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    }
 }

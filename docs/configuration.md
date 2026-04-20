@@ -412,10 +412,22 @@ Defaults:
 - `long_break_length = "15m"`
 - `long_break_interval = 4`
 
+## CLI Flags
+
+Release builds support these stable command-line flags:
+
+```bash
+triginta --help
+triginta --version
+```
+
+Unknown flags fail with usage information instead of being ignored.
+
 ## Debug Overrides
 
-Debug builds support CLI flags that override file configuration for local
-testing.
+Debug builds support hidden developer-only CLI flags that override file
+configuration for local testing. These flags are not accepted by release builds
+and are not shown in `--help`.
 
 ### ASCII mode
 

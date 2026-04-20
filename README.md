@@ -66,16 +66,16 @@ Run the TUI:
 mise exec -- cargo run
 ```
 
-Force ASCII-only symbols in debug builds:
+Show release-safe CLI help:
 
 ```bash
-mise exec -- cargo run -- --ascii
+mise exec -- cargo run -- --help
 ```
 
-Use short timer durations in debug builds:
+Show the application version:
 
 ```bash
-mise exec -- cargo run -- --short-timer
+mise exec -- cargo run -- --version
 ```
 
 Run the test suite:
@@ -171,7 +171,12 @@ Themes:
 - custom themes can be added as `toml` or `yaml` files under the per-user
   `themes/` directory inside the app config directory
 
-Debug-only overrides:
+Release-safe CLI flags:
+
+- `--help`: print CLI usage information
+- `--version`: print the Triginta version
+
+Developer-only debug overrides:
 
 - `--ascii`: force ASCII glyphs regardless of config
 - `--short-timer`: force `30s/10s/20s` timer lengths for testing
