@@ -41,12 +41,18 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     match cli_command(include_debug_flags).try_get_matches_from(args) {
-        Ok(matches) => Ok(CliAction::Run(triginta::app::RunOptions {
-            force_ascii: matches.get_flag("ascii"),
-            force_short_timer: matches.get_flag("short-timer"),
-            reset_data: matches.get_flag("reset-data"),
-            dry_run_sync: matches.get_flag("dry-run-sync"),
-        })),
+        Ok(matches) => {
+            if !include_debug_flags {
+                return Ok(CliAction::Run(triginta::app::RunOptions::default()));
+            }
+
+            Ok(CliAction::Run(triginta::app::RunOptions {
+                force_ascii: matches.get_flag("ascii"),
+                force_short_timer: matches.get_flag("short-timer"),
+                reset_data: matches.get_flag("reset-data"),
+                dry_run_sync: matches.get_flag("dry-run-sync"),
+            }))
+        }
         Err(error)
             if matches!(
                 error.kind(),
@@ -145,6 +151,21 @@ mod tests {
         assert!(options.force_short_timer);
         assert!(options.reset_data);
         assert!(options.dry_run_sync);
+    }
+
+    #[test]
+    fn no_args_defaults_when_debug_flags_are_disabled() {
+        let action = parse_cli_action_with_debug_flags(["triginta"], false)
+            .expect("no-arg release-style parse should start the app");
+
+        let CliAction::Run(options) = action else {
+            panic!("no-arg release-style parse should run the app");
+        };
+
+        assert!(!options.force_ascii);
+        assert!(!options.force_short_timer);
+        assert!(!options.reset_data);
+        assert!(!options.dry_run_sync);
     }
 
     #[test]
