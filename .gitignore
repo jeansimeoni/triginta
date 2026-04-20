@@ -25,6 +25,7 @@ target
 
 # Private AI tooling artifacts (must stay local-only)
 AGENTS.md
+.codex
 .codex/
 CLAUDE.md
 .claude/
