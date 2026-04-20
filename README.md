@@ -55,8 +55,9 @@ install -Dm755 target/release/triginta ~/.local/bin/triginta
 triginta --version
 ```
 
-Package-manager and shell-installer methods are documented as unavailable until
-published. See [Install](docs/install.md) for details and uninstall steps.
+The shell installer is available after a GitHub Release exists. Package-manager
+methods are not published yet. See [Install](docs/install.md) for details and
+uninstall steps.
 
 ## Quick Start
 

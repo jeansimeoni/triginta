@@ -58,11 +58,53 @@ and duplicate-version impact before merging.
 
 ## Release Process
 
-Triginta is preparing for its first public release. Until release automation is
-in place, releases are maintainer-controlled and should not be cut from
-contributor branches. Future release automation will use `cargo-dist`; release
-PRs should document generated artifacts, package metadata changes, and any
-changes to supported platforms or installation methods.
+Releases are maintainer-controlled and are published by the generated `dist`
+workflow from protected version tags such as `v0.1.0`.
+
+Before tagging a release:
+
+- Ensure `Cargo.toml` has the intended version.
+- Ensure `CHANGELOG.md` has a heading for that version and includes licensing
+  and source-availability notes.
+- Run the local quality gates:
+
+```bash
+mise exec -- cargo fmt --check
+mise exec -- cargo clippy --all-targets -- -D warnings
+mise exec -- cargo test --locked
+cargo deny check
+```
+
+- Verify release automation:
+
+```bash
+dist generate --check
+dist plan
+dist plan --output-format=json --no-local-paths
+```
+
+- Confirm the plan includes:
+  - `triginta-installer.sh`
+  - `sha256.sum`
+  - `source.tar.gz`
+  - `aarch64-apple-darwin`
+  - `x86_64-apple-darwin`
+  - `x86_64-unknown-linux-musl`
+  - `aarch64-unknown-linux-musl`
+
+To cut the release, tag the reviewed release commit and push the tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+After the workflow completes, verify that the GitHub Release contains archives,
+checksums, the source tarball, and the shell installer. Then test the installer
+from the published release URL.
+
+Repository settings should protect `v*` tags so only maintainers can create or
+move release tags.
 
 ## Private Tooling Policy
 

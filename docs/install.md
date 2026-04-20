@@ -1,8 +1,8 @@
 # Install
 
-Triginta is currently distributed from source. Package-manager and shell
-installer entries are listed here so users know their status, but they are not
-published yet.
+Triginta can be built from source today. After the first GitHub Release is
+published, the release page will also provide prebuilt archives, checksums, and
+a shell installer.
 
 ## Requirements
 
@@ -54,8 +54,18 @@ If `~/.local/bin` is not on your `PATH`, add it in your shell configuration.
 
 ## Shell Installer
 
-A shell installer is not published yet. Until it exists, use the source or
-manual local install methods above.
+The shell installer is available after a GitHub Release exists. For release
+`v0.1.0`, the command will be:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/triginta/releases/download/v0.1.0/triginta-installer.sh | sh
+```
+
+If that release URL does not exist yet, use the source or manual local install
+methods above.
+
+Release archives include checksums. Verify downloaded archives against the
+corresponding `.sha256` file or `sha256.sum` from the GitHub Release.
 
 ## Homebrew
 
@@ -68,6 +78,9 @@ An Arch User Repository package is not published yet. Until it exists, use the
 source or manual local install methods above.
 
 ## Update
+
+If you installed with the shell installer after a GitHub Release was published,
+run the installer for the newer release version.
 
 For a source checkout:
 

@@ -25,3 +25,11 @@ once public releases begin.
 - SQLite-backed local storage with first-run empty-state behavior.
 - Projects, sections, tags, filters, subtasks, and session history.
 - Todoist sync foundations behind explicit integration boundaries.
+- GitHub Release automation for prebuilt Linux/macOS archives, checksums,
+  source archives, and a shell installer.
+
+### License
+
+- Source and release artifacts are distributed under `GPL-3.0-only`.
+- Release archives include the project `LICENSE`, `README.md`, and
+  `CHANGELOG.md`.
