@@ -1,0 +1,26 @@
+name: Documentation issue
+description: Report missing, confusing, or outdated documentation.
+title: "docs: "
+labels: ["documentation"]
+body:
+  - type: textarea
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link or name the README section, docs page, or command output.
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: Issue
+      description: What is missing, confusing, or incorrect?
+    validations:
+      required: true
+  - type: textarea
+    id: suggested_change
+    attributes:
+      label: Suggested change
+      description: Optional wording or structure that would make it clearer.
+    validations:
+      required: false

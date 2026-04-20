@@ -41,6 +41,8 @@ cargo deny check
 - Use focused PRs with clear commit messages.
 - Include tests for behavior changes, especially app state transitions and storage behavior.
 - Update docs when configuration or user-visible behavior changes, including `docs/configuration.md` when applicable.
+- Wait for Code Owner review before merging. Release authority and final merge decisions remain with Jean Simeoni.
+- Keep history linear by rebasing or updating your branch before merge when requested.
 
 ## Licensing
 
@@ -52,6 +54,14 @@ Dependency changes must preserve the GPLv3-compatible dependency policy in
 `Cargo.lock`. Treat any `Cargo.toml` or `Cargo.lock` dependency update as a
 reviewed supply-chain change: check the new license, advisory status, source,
 and duplicate-version impact before merging.
+
+## Release Process
+
+Triginta is preparing for its first public release. Until release automation is
+in place, releases are maintainer-controlled and should not be cut from
+contributor branches. Future release automation will use `cargo-dist`; release
+PRs should document generated artifacts, package metadata changes, and any
+changes to supported platforms or installation methods.
 
 ## Private Tooling Policy
 
