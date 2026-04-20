@@ -5,8 +5,14 @@ Thanks for contributing to Triginta.
 ## Development Setup
 
 1. Install `mise`.
-2. From the repository root, run commands with `mise exec -- ...` if your shell has not already loaded the toolchain.
-3. Build locally:
+2. Install the pinned dependency policy tool:
+
+```bash
+cargo install --locked cargo-deny --version 0.19.4
+```
+
+3. From the repository root, run commands with `mise exec -- ...` if your shell has not already loaded the toolchain.
+4. Build locally:
 
 ```bash
 mise exec -- cargo build
@@ -20,6 +26,7 @@ Run these before opening a pull request:
 mise exec -- cargo fmt --check
 mise exec -- cargo clippy --all-targets -- -D warnings
 mise exec -- cargo test --locked
+cargo deny check
 ```
 
 ## Project Expectations
@@ -38,6 +45,13 @@ mise exec -- cargo test --locked
 ## Licensing
 
 By submitting contributions, you agree that your work is licensed under the project license and can be redistributed under those terms.
+
+Dependency changes must preserve the GPLv3-compatible dependency policy in
+`deny.toml`. Runtime and development dependencies are pinned exactly in
+`Cargo.toml`, and transitive dependencies are pinned by the committed
+`Cargo.lock`. Treat any `Cargo.toml` or `Cargo.lock` dependency update as a
+reviewed supply-chain change: check the new license, advisory status, source,
+and duplicate-version impact before merging.
 
 ## Private Tooling Policy
 

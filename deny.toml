@@ -1,0 +1,59 @@
+# Dependency policy for Triginta.
+#
+# This file is intentionally narrow: new licenses, sources, duplicate versions,
+# or advisories should fail until they are reviewed.
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+[licenses]
+confidence-threshold = 0.8
+unused-allowed-license = "allow"
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "GPL-3.0-only",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "option-ext" },
+]
+
+[advisories]
+db-path = "target/cargo-deny-advisory-dbs"
+yanked = "deny"
+unmaintained = "workspace"
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "simplest-path"
+
+skip = [
+    { crate = "getrandom@0.2.17", reason = "Transitive rustls/ring version; reviewed in Phase 2." },
+    { crate = "getrandom@0.4.2", reason = "Transitive tempfile/uuid version; reviewed in Phase 2." },
+    { crate = "hashbrown@0.14.5", reason = "Transitive rusqlite/hashlink version; reviewed in Phase 2." },
+    { crate = "hashbrown@0.15.5", reason = "Transitive ratatui/lru version; reviewed in Phase 2." },
+    { crate = "hashbrown@0.16.1", reason = "Transitive indexmap version; reviewed in Phase 2." },
+    { crate = "unicode-width@0.1.14", reason = "Transitive ratatui/unicode-truncate version; reviewed in Phase 2." },
+    { crate = "unicode-width@0.2.0", reason = "Direct dependency and ratatui version; reviewed in Phase 2." },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
