@@ -216,4 +216,9 @@ mise exec -- cargo test
 
 ## License
 
-MIT
+Triginta is licensed under the GNU General Public License version 3 only
+(`GPL-3.0-only`).
+
+Redistribution and modification are allowed under GPL v3 terms. Copies and
+modified versions must preserve the GPL v3 license terms and the copyright
+notices included with the project.

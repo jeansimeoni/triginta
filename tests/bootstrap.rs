@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Jean Simeoni
+
 use anyhow::Result;
 use tempfile::tempdir;
 use triginta::{config::AppPaths, storage::Database};

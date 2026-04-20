@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Jean Simeoni
+
 use chrono::{DateTime, Local, NaiveDate, Utc};
 
 // Tuple structs are lightweight "newtypes": this is roughly like wrapping an

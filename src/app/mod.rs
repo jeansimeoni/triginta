@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Jean Simeoni
+
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::{collections::HashMap, collections::HashSet, env, fs, process::Command, time::Duration};

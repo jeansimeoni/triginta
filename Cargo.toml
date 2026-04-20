@@ -2,8 +2,13 @@
 name = "triginta"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.94"
 description = "A local-first TUI Pomodoro timer and task manager."
-license = "MIT"
+license = "GPL-3.0-only"
+repository = "https://github.com/jeansimeoni/triginta"
+homepage = "https://github.com/jeansimeoni/triginta"
+keywords = ["pomodoro", "tui", "task-management", "sqlite", "todoist"]
+categories = ["command-line-utilities", "date-and-time"]
 
 [dependencies]
 anyhow = "1.0"
