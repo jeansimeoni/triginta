@@ -13,6 +13,14 @@ a shell installer.
 
 The repository pins Rust through `rust-toolchain.toml` and `mise.toml`.
 
+Prebuilt Linux release artifacts are intended to be self-contained for SQLite
+and TLS. Users should not need system SQLite, OpenSSL, `libsqlite3`, `libssl`,
+or `libcrypto` to run the published Linux musl binaries.
+
+The UI still requires an interactive terminal. A Nerd Font is optional for
+enhanced glyphs; ASCII mode is available for terminals that do not render those
+glyphs correctly.
+
 ## Build From Source
 
 Clone the repository and build an optimized binary:

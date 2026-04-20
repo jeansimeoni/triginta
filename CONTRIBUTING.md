@@ -92,6 +92,34 @@ dist plan --output-format=json --no-local-paths
   - `x86_64-unknown-linux-musl`
   - `aarch64-unknown-linux-musl`
 
+- Build and verify release artifacts:
+
+```bash
+dist build --artifacts=all
+scripts/verify-release-artifacts.sh target/distrib
+```
+
+The verification script checks archive contents, Linux musl linkage, and
+host-compatible `--version`/`--help` execution. Linux artifacts must not depend
+on system `libsqlite3`, `libssl`, or `libcrypto`.
+
+Local Linux-to-musl artifact builds require the cross-compilation tools reported
+by `dist`, such as `cargo-zigbuild` and Zig. If those tools are unavailable
+locally, run this artifact build and verification step in release CI or another
+prepared build environment.
+
+For macOS artifacts, verify both Intel and Apple Silicon archives on macOS
+runners or machines:
+
+```bash
+triginta --version
+triginta --help
+TRIGINTA_DATA_DIR=/tmp/triginta-release-smoke triginta
+```
+
+Confirm the app launches in an interactive terminal, creates isolated data/log
+files, and exits cleanly.
+
 To cut the release, tag the reviewed release commit and push the tag:
 
 ```bash

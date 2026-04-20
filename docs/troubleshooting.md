@@ -27,6 +27,16 @@ If the layout looks broken:
 - Check whether your terminal font supports the glyphs you selected.
 - Use ASCII mode when connecting through limited remote terminals.
 
+## Runtime Dependencies
+
+Linux release artifacts are built as musl targets and are intended not to
+require system SQLite or OpenSSL libraries. If a Linux release binary fails with
+missing `libsqlite3`, `libssl`, or `libcrypto`, report it as a release artifact
+bug.
+
+Triginta still needs a compatible interactive terminal. Font support is a UI
+concern only: Nerd Font glyphs are optional, and ASCII mode is the fallback.
+
 ## Config File Conflicts
 
 Triginta supports exactly one app config file at a time:
