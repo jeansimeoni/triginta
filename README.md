@@ -1,229 +1,137 @@
 # Triginta
 
-Triginta is a local-first Rust TUI for Pomodoro tracking and task management.
+[![CI](https://github.com/jeansimeoni/triginta/actions/workflows/ci.yml/badge.svg)](https://github.com/jeansimeoni/triginta/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/jeansimeoni/triginta?sort=semver)](https://github.com/jeansimeoni/triginta/releases)
+[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 
-The application is designed to stay fully usable offline. SQLite is the source
-of truth, and Todoist sync is being built behind an explicit integration
-boundary instead of driving core app behavior.
+Triginta is a local-first terminal app for Pomodoro tracking and task
+management. It keeps your tasks, projects, tags, filters, timer sessions, and
+history in a local SQLite database so the app remains useful offline.
 
-## Status
+Todoist sync support is being built behind explicit integration boundaries, but
+local SQLite remains the source of truth.
 
-Current implementation includes:
+## Screenshot
 
-- `ratatui` + `crossterm` TUI with multi-panel navigation
-- Working Pomodoro timer with focus/break/session history flows
-- Local task management with projects, sections, tags, filters, and subtasks
-- SQLite bootstrap with first-run empty-state behavior
-- Todoist sync foundations:
-  - provider boundary with startup + periodic sync triggers
-  - local sync state and outbox tables
-  - local mutation tracking for syncable entities
-  - debounced mutation sync scheduling + adaptive polling
-  - outbox retry metadata with backoff scheduling
-  - Todoist token configuration via env var or strict command execution
-  - outbound Todoist REST transport for create/update/delete operations
-  - downstream Todoist pull + local merge for core entities
-- Unit and bootstrap tests around app state, storage, and configuration
+A screenshot or short GIF will live under `docs/assets/` once a release-ready
+capture is available.
 
-Still in progress:
+## Features
 
-- Live Todoist pull/push with conflict resolution against the remote API
+- Pomodoro timer with focus, short break, long break, and session history flows
+- Local task management with projects, sections, tags, filters, subtasks, and favorites
+- Keyboard-first `ratatui` interface with in-app help via `?`
+- Configurable timer lengths, themes, glyph mode, sorting, and Todoist token source
+- Local SQLite persistence with empty first-run behavior
+- File-based logs for troubleshooting
 
-## Tech Stack
+## Platform Support
 
-- Rust 2024 edition
-- `ratatui` for terminal rendering
-- `crossterm` for terminal input/output
-- `rusqlite` with bundled SQLite
-- `chrono` for timestamps
-- `tracing` for file-based logging
-- `mise` for toolchain management
+Triginta targets modern Linux and macOS terminals. It should run in any terminal
+that supports raw mode and alternate-screen TUI applications.
 
-## Prerequisites
+The default UI uses Nerd Font glyphs. If symbols render incorrectly, set
+`ui.glyph_mode = "ascii"` in the config file.
 
-- `mise`
-- A working Rust toolchain managed by `mise`
+Windows paths are handled by the app directory resolver, but Windows terminal
+usage is not a primary release target yet.
 
-If `mise` is installed, the repository will use the toolchain declared in [`mise.toml`](/home/jeansimeoni/Projects/triginta/mise.toml).
+## Install
 
-## Getting Started
-
-Install the configured toolchain if needed:
+The currently available install paths are source-based:
 
 ```bash
+git clone https://github.com/jeansimeoni/triginta.git
+cd triginta
 mise install
-```
-
-Build the project:
-
-```bash
-mise exec -- cargo build
-```
-
-Run the TUI:
-
-```bash
-mise exec -- cargo run
-```
-
-Show release-safe CLI help:
-
-```bash
-mise exec -- cargo run -- --help
-```
-
-Show the application version:
-
-```bash
-mise exec -- cargo run -- --version
-```
-
-Run the test suite:
-
-```bash
-mise exec -- cargo test
-```
-
-Build an optimized release binary:
-
-```bash
 mise exec -- cargo build --release
+./target/release/triginta
 ```
 
-## Running The App
+For manual binary placement after building from source:
 
-Launch the app with:
+```bash
+install -Dm755 target/release/triginta ~/.local/bin/triginta
+triginta --version
+```
+
+Package-manager and shell-installer methods are documented as unavailable until
+published. See [Install](docs/install.md) for details and uninstall steps.
+
+## Quick Start
+
+Launch Triginta:
+
+```bash
+triginta
+```
+
+If you are running from a checkout instead of an installed binary:
 
 ```bash
 mise exec -- cargo run
 ```
 
-Core key bindings:
+Useful commands:
 
-- `Tab`, `l`, or `Right Arrow`: next right-side tab
-- `Shift+Tab`, `h`, or `Left Arrow`: previous right-side tab
-- `1` through `8`: focus a panel/tab target
+```bash
+triginta --help
+triginta --version
+```
+
+Core keys:
+
+- `1-8`: focus a panel
+- `Tab` / `Shift+Tab`: move focus
+- `?`: open keyboard help
+- `c`: create a task
 - `s`, `Space`, or `Enter`: start or resume the timer when the timer panel is focused
-- `p`: pause the timer when the timer panel is focused
-- `x` or `Esc`: void the current timer when the timer panel is focused
+- `p`: pause the timer
 - `q`: quit
 
-Current layout:
+## Documentation
 
-- Left column: timer, daily history, navigation, favorites
-- Right column: tasks/details tab or statistics tab
+- [Install](docs/install.md)
+- [User Guide](docs/user-guide.md)
+- [Configuration](docs/configuration.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [NLP Locale Packs](docs/nlp-locales.md)
 
-Navigation sidebar tabs:
+## Data And Logs
 
-- `[3]` Navigation
-- `[4]` Projects
-- `[5]` Tags
-- `[6]` Filters
+Triginta stores data in platform-standard app directories by default. You can
+isolate a run with `TRIGINTA_DATA_DIR`:
 
-## Data And Logging
+```bash
+TRIGINTA_DATA_DIR=/tmp/triginta-test triginta
+```
 
-On startup, Triginta creates its local directories, initializes SQLite if needed, and writes logs to disk.
-
-By default, application paths are resolved through the platform-specific
-standard app directories for `triginta`.
-
-On macOS, Triginta also checks `~/.config/triginta/config.toml` or YAML
-equivalent for the app config file.
-
-The app also supports overriding the data location with `TRIGINTA_DATA_DIR`.
-
-When `TRIGINTA_DATA_DIR` is set, Triginta uses this layout:
+With `TRIGINTA_DATA_DIR` set, Triginta uses:
 
 - Data directory: `$TRIGINTA_DATA_DIR`
 - Config directory: `$TRIGINTA_DATA_DIR/config`
-- App config file: `$TRIGINTA_DATA_DIR/config/config.toml` or YAML equivalent
-- SQLite database (release builds): `$TRIGINTA_DATA_DIR/triginta.sqlite3`
-- SQLite database (debug builds): `$TRIGINTA_DATA_DIR/triginta-dbg.sqlite3`
+- Release database: `$TRIGINTA_DATA_DIR/triginta.sqlite3`
+- Debug database: `$TRIGINTA_DATA_DIR/triginta-dbg.sqlite3`
 - Log file: `$TRIGINTA_DATA_DIR/logs/triginta.log`
 
-Example:
+See [Troubleshooting](docs/troubleshooting.md) for default platform paths and
+common terminal issues.
+
+## Development
+
+This repository is a single Rust package pinned to the Rust toolchain in
+`rust-toolchain.toml` and `mise.toml`.
+
+Run the release quality gates locally:
 
 ```bash
-TRIGINTA_DATA_DIR=/tmp/triginta-dev mise exec -- cargo run
+mise exec -- cargo fmt --check
+mise exec -- cargo clippy --all-targets -- -D warnings
+mise exec -- cargo test --locked
+cargo deny check
 ```
-
-This is useful for local development and for keeping test data isolated from your normal app state.
-
-## Configuration
-
-Triginta uses a single application configuration file with sectioned settings
-such as `ui`, `timer`, `stats`, and `integrations.todoist`.
-
-Supported formats:
-
-- `config.toml`
-- `config.yaml`
-- `config.yml`
-
-Documentation:
-
-- [Configuration Guide](/home/jeansimeoni/Projects/triginta/docs/configuration.md)
-
-Themes:
-
-- `ui.theme = "catppuccin-mocha"` is the default
-- built-in themes currently include the Catppuccin variants
-- custom themes can be added as `toml` or `yaml` files under the per-user
-  `themes/` directory inside the app config directory
-
-Release-safe CLI flags:
-
-- `--help`: print CLI usage information
-- `--version`: print the Triginta version
-
-Developer-only debug overrides:
-
-- `--ascii`: force ASCII glyphs regardless of config
-- `--short-timer`: force `30s/10s/20s` timer lengths for testing
-- `--reset-data`: delete local debug SQLite data files before startup
-- `--dry-run-sync`: run sync cycles in preview mode without writing to Todoist
-
-## Project Layout
-
-```text
-src/
-  app/           application state and event loop
-  config/        path resolution and tracing setup
-  domain/        core domain types
-  integrations/  sync provider boundaries
-  storage/       SQLite bootstrap and repositories
-  ui/            ratatui rendering
-tests/
-  bootstrap.rs   fresh-install database bootstrap coverage
-```
-
-## Testing
-
-The current tests focus on the parts that matter for a stable local-first base:
-
-- App state transitions between screens
-- Quit behavior
-- In-memory database bootstrap
-- Fresh database file creation on disk
-
-Run them with:
-
-```bash
-mise exec -- cargo test
-```
-
-## Development Notes
-
-- The repository is intentionally a single Cargo package for now.
-- SQLite remains the local source of truth.
-- Empty-state behavior is intentional and should continue to work on a fresh database.
-- Full sync is wired for core entities (outbound + downstream merge) while keeping local SQLite as source of truth.
 
 ## License
 
 Triginta is licensed under the GNU General Public License version 3 only
-(`GPL-3.0-only`).
-
-Redistribution and modification are allowed under GPL v3 terms. Copies and
-modified versions must preserve the GPL v3 license terms and the copyright
-notices included with the project.
+(`GPL-3.0-only`). See [LICENSE](LICENSE).

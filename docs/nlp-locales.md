@@ -19,7 +19,7 @@ Current built-in locales:
 
 ## How to add a new locale
 
-1. Edit [`src/task_nlp/locales.rs`](/home/jeansimeoni/Projects/triginta/src/task_nlp/locales.rs).
+1. Edit [`src/task_nlp/locales.rs`](../src/task_nlp/locales.rs).
 2. Add a new `NlpLocale` variant and `code()` value.
 3. Extend `from_language_hint` so Todoist/user language hints map to the locale.
 4. Add the locale to `default_locale_priority()`.

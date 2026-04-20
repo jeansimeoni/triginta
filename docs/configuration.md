@@ -113,7 +113,7 @@ Default:
 
 - `catppuccin-mocha`
 
-`ui.task_list_sort` controls the default sort order used in panel 5.
+`ui.task_list_sort` controls the default sort order used in the task list panel.
 
 Allowed values:
 
@@ -142,8 +142,7 @@ Default:
 
 - `true`
 
-`ui.project_list_sort` controls the default project-tree ordering used in panel
-5 (Projects tab in the Navigation panel).
+`ui.project_list_sort` controls the default project-tree ordering used in the Projects panel.
 
 Allowed values:
 
@@ -171,8 +170,7 @@ Default:
 
 - `false`
 
-`ui.tag_list_sort` controls the default tag-list ordering used in panel 5
-(Tags tab in the Navigation panel).
+`ui.tag_list_sort` controls the default tag-list ordering used in the Tags panel.
 
 Allowed values:
 
@@ -200,8 +198,7 @@ Default:
 
 - `false`
 
-`ui.filter_list_sort` controls the default filter-list ordering used in panel 6
-(Filters tab in the Navigation panel).
+`ui.filter_list_sort` controls the default filter-list ordering used in the Filters panel.
 
 Allowed values:
 
@@ -231,7 +228,7 @@ Default:
 
 ## Stats
 
-`stats.daily_target` sets the daily focus-time goal used by panel 8 statistics.
+`stats.daily_target` sets the daily focus-time goal used by the statistics panel.
 This target is compared against completed focus sessions for the current day.
 
 Allowed values:
