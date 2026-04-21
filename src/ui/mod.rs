@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -41,21 +41,78 @@ use crate::{
 use chrono::{Datelike, Local, NaiveDate};
 use symbols::Symbols;
 
+const MIN_TERMINAL_WIDTH: u16 = 80;
+const MIN_TERMINAL_HEIGHT: u16 = 24;
+
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let symbols = Symbols::new(app.glyph_mode());
     let palette = app.theme();
+    let area = frame.area();
     frame.render_widget(
         Block::default().style(Style::default().bg(palette.background)),
-        frame.area(),
+        area,
     );
+
+    if terminal_too_small(area) {
+        render_terminal_size_warning(frame, area, palette);
+        return;
+    }
+
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(2)])
-        .split(frame.area());
+        .split(area);
 
     render_body(frame, app, layout[0], symbols, palette);
     render_status_bar(frame, app, layout[1], symbols, palette);
     render_task_overlay(frame, app, symbols, palette);
+}
+
+fn terminal_too_small(area: Rect) -> bool {
+    area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT
+}
+
+fn render_terminal_size_warning(frame: &mut Frame<'_>, area: Rect, palette: ThemePalette) {
+    let width_style = if area.width < MIN_TERMINAL_WIDTH {
+        Style::default().fg(palette.error)
+    } else {
+        Style::default().fg(palette.success)
+    };
+    let height_style = if area.height < MIN_TERMINAL_HEIGHT {
+        Style::default().fg(palette.error)
+    } else {
+        Style::default().fg(palette.success)
+    };
+    let lines = vec![
+        Line::from("Terminal size too small:"),
+        Line::from(vec![
+            Span::raw("Width = "),
+            Span::styled(area.width.to_string(), width_style),
+            Span::raw(" Height = "),
+            Span::styled(area.height.to_string(), height_style),
+        ]),
+        Line::from(""),
+        Line::from("Needed for current config:"),
+        Line::from(vec![
+            Span::raw("Width = "),
+            Span::styled(
+                MIN_TERMINAL_WIDTH.to_string(),
+                Style::default().fg(palette.text),
+            ),
+            Span::raw(" Height = "),
+            Span::styled(
+                MIN_TERMINAL_HEIGHT.to_string(),
+                Style::default().fg(palette.text),
+            ),
+        ]),
+    ];
+    let message_area = centered_rect(area, 44, 5);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(palette.text).bg(palette.background)),
+        message_area,
+    );
 }
 
 fn render_body(
@@ -6542,13 +6599,13 @@ fn set_single_line_input_cursor(frame: &mut Frame<'_>, area: Rect, cursor_col: u
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        FormPreviewPanelView, PreviewLineView, STATUS_BAR_GLOBAL_SHORTCUTS, TaskTagRowSegment,
-        footer_with_filter_indicator, format_compact_history_duration, format_task_tags_for_row,
-        history_footer_hints, input_window_view, is_status_bar_global_focus_tip,
-        markdown_first_plain_line, markdown_inline_spans, markdown_inline_tokens,
-        navigation_group_status_bar_tips, preview_panel_lines, preview_panel_required_height,
-        statistics_footer_hints, status_bar_keys_label, task_details_footer_hints,
-        timer_footer_hints,
+        FormPreviewPanelView, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, PreviewLineView,
+        STATUS_BAR_GLOBAL_SHORTCUTS, TaskTagRowSegment, footer_with_filter_indicator,
+        format_compact_history_duration, format_task_tags_for_row, history_footer_hints,
+        input_window_view, is_status_bar_global_focus_tip, markdown_first_plain_line,
+        markdown_inline_spans, markdown_inline_tokens, navigation_group_status_bar_tips,
+        preview_panel_lines, preview_panel_required_height, statistics_footer_hints,
+        status_bar_keys_label, task_details_footer_hints, terminal_too_small, timer_footer_hints,
     };
     use crate::app::{ShortcutTip, SidebarTab};
     use crate::config::GlyphMode;
@@ -6609,6 +6666,32 @@ mod tests {
         let view = input_window_view("hello", 2, 10);
         assert_eq!(view.text, "hello");
         assert_eq!(view.cursor_col, 2);
+    }
+
+    #[test]
+    fn terminal_size_guard_allows_minimum_supported_area() {
+        assert!(!terminal_too_small(super::Rect::new(
+            0,
+            0,
+            MIN_TERMINAL_WIDTH,
+            MIN_TERMINAL_HEIGHT
+        )));
+    }
+
+    #[test]
+    fn terminal_size_guard_rejects_narrow_or_short_area() {
+        assert!(terminal_too_small(super::Rect::new(
+            0,
+            0,
+            MIN_TERMINAL_WIDTH - 1,
+            MIN_TERMINAL_HEIGHT
+        )));
+        assert!(terminal_too_small(super::Rect::new(
+            0,
+            0,
+            MIN_TERMINAL_WIDTH,
+            MIN_TERMINAL_HEIGHT - 1
+        )));
     }
 
     #[test]
