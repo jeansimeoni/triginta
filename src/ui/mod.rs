@@ -1790,9 +1790,9 @@ fn render_statistics_chart_grid(
 ) {
     let charts = [
         StatisticsChart::FocusTrend,
+        StatisticsChart::HourDistribution,
         StatisticsChart::Last7Days,
         StatisticsChart::WeekdayAverage,
-        StatisticsChart::HourDistribution,
     ];
     let start = scroll.min(charts.len().saturating_sub(1));
     let mut y = area.y;
@@ -1850,11 +1850,23 @@ enum StatisticsChart {
 impl StatisticsChart {
     fn preferred_height(self) -> u16 {
         match self {
-            Self::FocusTrend => 10,
-            Self::Last7Days | Self::WeekdayAverage => 8,
-            Self::HourDistribution => 9,
+            Self::FocusTrend => 20,
+            Self::Last7Days | Self::WeekdayAverage => 16,
+            Self::HourDistribution => 18,
         }
     }
+}
+
+fn responsive_bar_width(area_width: u16, bar_count: usize, bar_gap: u16, max_width: u16) -> u16 {
+    if bar_count == 0 {
+        return 1;
+    }
+    let content_width = usize::from(area_width.saturating_sub(2));
+    let total_gap_width = usize::from(bar_gap).saturating_mul(bar_count.saturating_sub(1));
+    let available_bar_width = content_width.saturating_sub(total_gap_width);
+    ((available_bar_width / bar_count) as u16)
+        .max(1)
+        .min(max_width)
 }
 
 fn render_last_7_days_bars(
@@ -1894,7 +1906,7 @@ fn render_last_7_days_bars(
                 .title("Last 7 Days"),
         )
         .data(BarGroup::default().bars(&bars))
-        .bar_width(3)
+        .bar_width(responsive_bar_width(area.width, bars.len(), 1, 10))
         .bar_gap(1)
         .max(max);
     frame.render_widget(chart, area);
@@ -1951,7 +1963,7 @@ fn render_weekday_average_bars(
                 .title("Weekday Avg (30d)"),
         )
         .data(BarGroup::default().bars(&bars))
-        .bar_width(3)
+        .bar_width(responsive_bar_width(area.width, bars.len(), 1, 10))
         .bar_gap(1)
         .max(max);
     frame.render_widget(chart, area);
@@ -1964,8 +1976,8 @@ fn render_hourly_bars(frame: &mut Frame<'_>, area: Rect, data: &ScreenData, pale
         totals[index] = bucket.focus_seconds.div_ceil(60);
     }
 
-    let content_width = area.width.saturating_sub(2);
-    let bar_width = if content_width >= 48 { 2 } else { 1 };
+    let bar_gap = if area.width >= 80 { 1 } else { 0 };
+    let bar_width = responsive_bar_width(area.width, 24, bar_gap, 4);
     let bars = (0..24)
         .map(|hour| {
             let label = if bar_width >= 2 && hour % 3 == 0 {
@@ -1996,7 +2008,7 @@ fn render_hourly_bars(frame: &mut Frame<'_>, area: Rect, data: &ScreenData, pale
         )
         .data(BarGroup::default().bars(&bars))
         .bar_width(bar_width)
-        .bar_gap(0)
+        .bar_gap(bar_gap)
         .max(max);
     frame.render_widget(chart, area);
 }
@@ -6645,8 +6657,9 @@ mod tests {
         format_compact_history_duration, format_task_tags_for_row, history_footer_hints,
         input_window_view, is_status_bar_global_focus_tip, markdown_first_plain_line,
         markdown_inline_spans, markdown_inline_tokens, navigation_group_status_bar_tips,
-        preview_panel_lines, preview_panel_required_height, statistics_footer_hints,
-        status_bar_keys_label, task_details_footer_hints, terminal_too_small, timer_footer_hints,
+        preview_panel_lines, preview_panel_required_height, responsive_bar_width,
+        statistics_footer_hints, status_bar_keys_label, task_details_footer_hints,
+        terminal_too_small, timer_footer_hints,
     };
     use crate::app::{ShortcutTip, SidebarTab};
     use crate::config::GlyphMode;
@@ -6733,6 +6746,14 @@ mod tests {
             MIN_TERMINAL_WIDTH,
             MIN_TERMINAL_HEIGHT - 1
         )));
+    }
+
+    #[test]
+    fn responsive_bar_width_uses_available_chart_width_with_cap() {
+        assert_eq!(responsive_bar_width(80, 7, 1, 10), 10);
+        assert_eq!(responsive_bar_width(32, 7, 1, 10), 3);
+        assert_eq!(responsive_bar_width(20, 24, 0, 4), 1);
+        assert_eq!(responsive_bar_width(140, 24, 1, 4), 4);
     }
 
     #[test]
