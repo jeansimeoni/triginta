@@ -1722,7 +1722,7 @@ fn render_statistics_chart_grid(
     data: &ScreenData,
     palette: ThemePalette,
 ) {
-    if area.height < 10 || area.width < 100 {
+    if area.height < 14 || area.width < 56 {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
