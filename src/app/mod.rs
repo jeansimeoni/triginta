@@ -1786,10 +1786,22 @@ const TASKS_SHORTCUTS_NO_REORDER: &[ShortcutTip] = &[
     },
 ];
 
-const STATISTICS_SHORTCUTS: &[ShortcutTip] = &[ShortcutTip {
-    keys: "h/l or ←/→",
-    description: "switch tab",
-}];
+const STATISTICS_SHORTCUTS: &[ShortcutTip] = &[
+    ShortcutTip {
+        keys: "h/l or ←/→",
+        description: "switch tab",
+    },
+    ShortcutTip {
+        keys: "j/k or ↑/↓",
+        description: "scroll charts",
+    },
+    ShortcutTip {
+        keys: "Home/End",
+        description: "jump",
+    },
+];
+
+const STATISTICS_CHART_COUNT: usize = 4;
 
 const INPUT_POPUP_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
@@ -2145,6 +2157,7 @@ pub struct App {
     theme: ThemePalette,
     timer: TimerState,
     history_scroll: usize,
+    statistics_scroll: usize,
     selected_task_id: Option<TaskId>,
     selected_project_id: Option<ProjectId>,
     selected_section_id: Option<SectionId>,
@@ -2396,6 +2409,7 @@ impl App {
             theme,
             timer: TimerState::new(long_break_interval),
             history_scroll: 0,
+            statistics_scroll: 0,
             selected_task_id: None,
             selected_project_id: None,
             selected_section_id: None,
@@ -2792,6 +2806,10 @@ impl App {
         self.task_details_scroll
     }
 
+    pub fn statistics_scroll(&self) -> usize {
+        self.statistics_scroll
+    }
+
     pub fn consume_full_redraw_request(&mut self) -> bool {
         let requested = self.needs_full_redraw;
         self.needs_full_redraw = false;
@@ -2809,6 +2827,21 @@ impl App {
                 .saturating_sub(amount.unsigned_abs());
         } else {
             self.task_details_scroll = self.task_details_scroll.saturating_add(amount as usize);
+        }
+    }
+
+    fn max_statistics_scroll(&self) -> usize {
+        STATISTICS_CHART_COUNT.saturating_sub(1)
+    }
+
+    fn scroll_statistics(&mut self, amount: isize) {
+        if amount.is_negative() {
+            self.statistics_scroll = self.statistics_scroll.saturating_sub(amount.unsigned_abs());
+        } else {
+            self.statistics_scroll = self
+                .statistics_scroll
+                .saturating_add(amount as usize)
+                .min(self.max_statistics_scroll());
         }
     }
 
@@ -11235,6 +11268,42 @@ impl App {
             {
                 self.scroll_task_details(-8);
             }
+            KeyCode::Char('j') | KeyCode::Down
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Statistics =>
+            {
+                self.scroll_statistics(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Statistics =>
+            {
+                self.scroll_statistics(-1);
+            }
+            KeyCode::PageDown
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Statistics =>
+            {
+                self.scroll_statistics(2);
+            }
+            KeyCode::PageUp
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Statistics =>
+            {
+                self.scroll_statistics(-2);
+            }
+            KeyCode::Home
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Statistics =>
+            {
+                self.statistics_scroll = 0;
+            }
+            KeyCode::End
+                if self.focused_panel == PanelFocus::RightPane
+                    && self.active_right_panel_tab == RightPanelTab::Statistics =>
+            {
+                self.statistics_scroll = self.max_statistics_scroll();
+            }
             KeyCode::Char('e')
                 if self.focused_panel == PanelFocus::RightPane
                     && self.active_right_panel_tab == RightPanelTab::Tasks =>
@@ -13026,6 +13095,33 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Left)
             .expect("right panel tab should switch back");
         assert_eq!(app.active_right_panel_tab(), RightPanelTab::Tasks);
+    }
+
+    #[test]
+    fn statistics_panel_scrolls_chart_column() {
+        let mut app = test_app();
+        app.focused_panel = PanelFocus::RightPane;
+        app.active_right_panel_tab = RightPanelTab::Statistics;
+
+        app.handle_key(crossterm::event::KeyCode::Char('j'))
+            .expect("statistics chart column should scroll down");
+        assert_eq!(app.statistics_scroll(), 1);
+
+        app.handle_key(crossterm::event::KeyCode::PageDown)
+            .expect("statistics chart column should page down");
+        assert_eq!(app.statistics_scroll(), 3);
+
+        app.handle_key(crossterm::event::KeyCode::Char('k'))
+            .expect("statistics chart column should scroll up");
+        assert_eq!(app.statistics_scroll(), 2);
+
+        app.handle_key(crossterm::event::KeyCode::Home)
+            .expect("statistics chart column should jump top");
+        assert_eq!(app.statistics_scroll(), 0);
+
+        app.handle_key(crossterm::event::KeyCode::End)
+            .expect("statistics chart column should jump bottom");
+        assert_eq!(app.statistics_scroll(), 3);
     }
 
     #[test]

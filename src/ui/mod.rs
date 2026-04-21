@@ -1059,9 +1059,16 @@ fn statistics_footer_hints(
     }
 
     let tab_keys = if symbols.is_ascii() { "h/l" } else { "←/→" };
+    let scroll_keys = if symbols.is_ascii() {
+        "j/k"
+    } else {
+        symbols.move_hint
+    };
     Line::from(vec![
         Span::styled(tab_keys, Style::default().fg(palette.accent)),
-        Span::styled(" tab", Style::default().fg(palette.subtle_text)),
+        Span::styled(" tab  ", Style::default().fg(palette.subtle_text)),
+        Span::styled(scroll_keys, Style::default().fg(palette.accent)),
+        Span::styled(" scroll", Style::default().fg(palette.subtle_text)),
     ])
     .right_aligned()
 }
@@ -1618,6 +1625,7 @@ fn render_statistics_panel(
         focus_30.as_slice(),
         daily_target_minutes,
         data,
+        app.statistics_scroll(),
         palette,
     );
 }
@@ -1777,43 +1785,76 @@ fn render_statistics_chart_grid(
     focus_30: &[(NaiveDate, u32)],
     daily_target_minutes: u32,
     data: &ScreenData,
+    scroll: usize,
     palette: ThemePalette,
 ) {
-    if area.height < 14 || area.width < 70 {
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-            ])
-            .split(area);
-
-        render_focus_trend_chart(frame, sections[0], focus_30, daily_target_minutes, palette);
-        render_last_7_days_bars(frame, sections[1], focus_30, palette);
-        render_weekday_average_bars(frame, sections[2], focus_30, palette);
-        render_hourly_bars(frame, sections[3], data, palette);
-        return;
+    let charts = [
+        StatisticsChart::FocusTrend,
+        StatisticsChart::Last7Days,
+        StatisticsChart::WeekdayAverage,
+        StatisticsChart::HourDistribution,
+    ];
+    let start = scroll.min(charts.len().saturating_sub(1));
+    let mut y = area.y;
+    let mut rendered_count = 0_usize;
+    for chart in charts.iter().skip(start) {
+        if y >= area.bottom() {
+            break;
+        }
+        let remaining_height = area.bottom().saturating_sub(y);
+        if remaining_height < 5 {
+            break;
+        }
+        let desired_height = chart.preferred_height();
+        let height = desired_height.min(remaining_height);
+        let chart_area = Rect::new(area.x, y, area.width, height);
+        match chart {
+            StatisticsChart::FocusTrend => {
+                render_focus_trend_chart(frame, chart_area, focus_30, daily_target_minutes, palette)
+            }
+            StatisticsChart::Last7Days => {
+                render_last_7_days_bars(frame, chart_area, focus_30, palette)
+            }
+            StatisticsChart::WeekdayAverage => {
+                render_weekday_average_bars(frame, chart_area, focus_30, palette)
+            }
+            StatisticsChart::HourDistribution => {
+                render_hourly_bars(frame, chart_area, data, palette)
+            }
+        }
+        y = y.saturating_add(height);
+        rendered_count += 1;
     }
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(area);
-    let bottom = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(24),
-            Constraint::Percentage(24),
-            Constraint::Percentage(52),
-        ])
-        .split(rows[1]);
+    if start > 0 || start + rendered_count < charts.len() {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(charts.len())
+            .viewport_content_length(rendered_count.max(1))
+            .position(start);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .style(Style::default().fg(palette.border))
+            .thumb_style(Style::default().fg(palette.accent));
+        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
+}
 
-    render_focus_trend_chart(frame, rows[0], focus_30, daily_target_minutes, palette);
-    render_last_7_days_bars(frame, bottom[0], focus_30, palette);
-    render_weekday_average_bars(frame, bottom[1], focus_30, palette);
-    render_hourly_bars(frame, bottom[2], data, palette);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatisticsChart {
+    FocusTrend,
+    Last7Days,
+    WeekdayAverage,
+    HourDistribution,
+}
+
+impl StatisticsChart {
+    fn preferred_height(self) -> u16 {
+        match self {
+            Self::FocusTrend => 10,
+            Self::Last7Days | Self::WeekdayAverage => 8,
+            Self::HourDistribution => 9,
+        }
+    }
 }
 
 fn render_last_7_days_bars(
