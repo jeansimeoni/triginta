@@ -464,3 +464,13 @@ This removes the local debug SQLite files before startup:
 - `triginta-dbg.sqlite3`
 - `triginta-dbg.sqlite3-wal`
 - `triginta-dbg.sqlite3-shm`
+
+### Local-only debug mode
+
+```bash
+mise exec -- cargo run -- --local-only
+```
+
+This disables Todoist integration for the current debug run, including startup
+sync and the background sync worker. The app still uses the normal local SQLite
+database for the selected build profile.

@@ -51,6 +51,7 @@ pub struct RunOptions {
     pub force_short_timer: bool,
     pub reset_data: bool,
     pub dry_run_sync: bool,
+    pub local_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12065,6 +12066,10 @@ fn apply_debug_overrides(config: &mut AppConfig, options: RunOptions) {
     if options.force_short_timer {
         config.timer = TimerSettings::short_timer_preset();
     }
+    if options.local_only {
+        config.integrations.todoist.enabled = false;
+        config.integrations.todoist.sync_on_startup = false;
+    }
 }
 
 fn debug_dry_run_sync_enabled() -> bool {
@@ -17516,9 +17521,31 @@ mod tests {
                 force_short_timer: true,
                 reset_data: false,
                 dry_run_sync: false,
+                local_only: false,
             },
         );
 
         assert_eq!(config.timer, TimerSettings::short_timer_preset());
+    }
+
+    #[test]
+    fn debug_local_only_override_disables_todoist_integration() {
+        let mut config = AppConfig::default();
+        config.integrations.todoist.enabled = true;
+        config.integrations.todoist.sync_on_startup = true;
+
+        apply_debug_overrides(
+            &mut config,
+            RunOptions {
+                force_ascii: false,
+                force_short_timer: false,
+                reset_data: false,
+                dry_run_sync: false,
+                local_only: true,
+            },
+        );
+
+        assert!(!config.integrations.todoist.enabled);
+        assert!(!config.integrations.todoist.sync_on_startup);
     }
 }

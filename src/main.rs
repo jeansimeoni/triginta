@@ -51,6 +51,7 @@ where
                 force_short_timer: matches.get_flag("short-timer"),
                 reset_data: matches.get_flag("reset-data"),
                 dry_run_sync: matches.get_flag("dry-run-sync"),
+                local_only: matches.get_flag("local-only"),
             }))
         }
         Err(error)
@@ -77,7 +78,8 @@ fn cli_command(include_debug_flags: bool) -> Command {
             .arg(hidden_debug_flag("ascii"))
             .arg(hidden_debug_flag("short-timer"))
             .arg(hidden_debug_flag("reset-data"))
-            .arg(hidden_debug_flag("dry-run-sync"));
+            .arg(hidden_debug_flag("dry-run-sync"))
+            .arg(hidden_debug_flag("local-only"));
     }
 
     command
@@ -138,6 +140,7 @@ mod tests {
                 "--short-timer",
                 "--reset-data",
                 "--dry-run-sync",
+                "--local-only",
             ],
             true,
         )
@@ -151,6 +154,7 @@ mod tests {
         assert!(options.force_short_timer);
         assert!(options.reset_data);
         assert!(options.dry_run_sync);
+        assert!(options.local_only);
     }
 
     #[test]
@@ -166,13 +170,22 @@ mod tests {
         assert!(!options.force_short_timer);
         assert!(!options.reset_data);
         assert!(!options.dry_run_sync);
+        assert!(!options.local_only);
     }
 
     #[test]
     fn debug_flags_are_rejected_when_disabled() {
-        let error = parse_cli_action_with_debug_flags(["triginta", "--ascii"], false)
-            .expect_err("debug flags should fail in release-style mode");
+        for flag in [
+            "--ascii",
+            "--short-timer",
+            "--reset-data",
+            "--dry-run-sync",
+            "--local-only",
+        ] {
+            let error = parse_cli_action_with_debug_flags(["triginta", flag], false)
+                .expect_err("debug flags should fail in release-style mode");
 
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+            assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+        }
     }
 }

@@ -131,6 +131,6 @@ triginta --help
 triginta --version
 ```
 
-Developer-only flags such as `--ascii`, `--short-timer`, `--reset-data`, and
-`--dry-run-sync` are accepted only in debug builds and are hidden from release
-help output.
+Developer-only flags such as `--ascii`, `--short-timer`, `--reset-data`,
+`--dry-run-sync`, and `--local-only` are accepted only in debug builds and are
+hidden from release help output.
