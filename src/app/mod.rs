@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::{collections::HashMap, collections::HashSet, env, fs, process::Command, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone, Utc, Weekday,
 };
@@ -26,7 +26,7 @@ use crate::{
         DayHistorySummary, Filter, FilterColor, FilterId, FilterUpdate, FocusDaySummary,
         FocusHourSummary, HistoryStats, Project, ProjectColor, ProjectId, ProjectUpdate, Section,
         SectionId, SectionUpdate, SessionEntry, SessionKind, SessionOutcome, Tag, TagColor, TagId,
-        TagUpdate, Task, TaskId, TaskPriority, TaskStatus, TaskUpdate,
+        TagUpdate, Task, TaskDue, TaskId, TaskPriority, TaskStatus, TaskUpdate,
     },
     filters,
     integrations::{SyncReport, SyncTrigger, TaskSyncProvider, TodoistSyncProvider},
@@ -52,6 +52,7 @@ pub struct RunOptions {
     pub reset_data: bool,
     pub dry_run_sync: bool,
     pub local_only: bool,
+    pub seed_showcase_data: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11907,6 +11908,11 @@ pub fn run(options: RunOptions) -> Result<()> {
     info!("starting triginta");
 
     let database = Database::open(&paths.db_path)?;
+    #[cfg(debug_assertions)]
+    {
+        seed_showcase_data_if_requested(&database, options)?;
+        apply_showcase_database_network_guard(&database, &mut config)?;
+    }
     let now = Local::now();
     let (started_at, ended_at) = today_bounds(now);
     let (weekly_started_at, weekly_ended_at) = last_7_days_bounds(now);
@@ -12059,6 +12065,632 @@ fn reset_data_if_requested(_paths: &AppPaths, _options: RunOptions) -> Result<()
     Ok(())
 }
 
+#[cfg(debug_assertions)]
+fn seed_showcase_data_if_requested(database: &Database, options: RunOptions) -> Result<()> {
+    if !options.seed_showcase_data {
+        return Ok(());
+    }
+    if database.debug_showcase_seeded()? {
+        info!("debug showcase data already seeded");
+        return Ok(());
+    }
+    if debug_database_has_user_data(database)? {
+        bail!("--seed-showcase-data requires an empty debug database; run it with --reset-data");
+    }
+
+    seed_showcase_data(database)?;
+    database.mark_debug_showcase_seeded()?;
+    database.clear_debug_sync_artifacts()?;
+    info!("seeded debug showcase data");
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn apply_showcase_database_network_guard(
+    database: &Database,
+    config: &mut AppConfig,
+) -> Result<()> {
+    if database.debug_showcase_seeded()? {
+        config.integrations.todoist.enabled = false;
+        config.integrations.todoist.sync_on_startup = false;
+    }
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn debug_database_has_user_data(database: &Database) -> Result<bool> {
+    let projects = database.project_repository().list_all()?;
+    Ok(projects
+        .iter()
+        .any(|project| !project.is_inbox && project.deleted_at.is_none())
+        || database
+            .task_repository()
+            .list_all()?
+            .iter()
+            .any(|task| task.deleted_at.is_none())
+        || database
+            .section_repository()
+            .list_all()?
+            .iter()
+            .any(|section| section.deleted_at.is_none())
+        || database
+            .tag_repository()
+            .list_all()?
+            .iter()
+            .any(|tag| tag.deleted_at.is_none())
+        || database
+            .filter_repository()
+            .list_all()?
+            .iter()
+            .any(|filter| filter.deleted_at.is_none()))
+}
+
+#[cfg(debug_assertions)]
+fn seed_showcase_data(database: &Database) -> Result<()> {
+    let now = Local::now();
+    let today = now.date_naive();
+
+    let product = database.project_repository().create(
+        "Product",
+        None,
+        ProjectColor::Blue,
+        true,
+        now - ChronoDuration::days(22),
+    )?;
+    let website = database.project_repository().create(
+        "Website",
+        Some(product.id),
+        ProjectColor::Teal,
+        true,
+        now - ChronoDuration::days(18),
+    )?;
+    let release = database.project_repository().create(
+        "Release",
+        Some(product.id),
+        ProjectColor::Orange,
+        false,
+        now - ChronoDuration::days(15),
+    )?;
+    let systems = database.project_repository().create(
+        "Personal Systems",
+        None,
+        ProjectColor::LimeGreen,
+        true,
+        now - ChronoDuration::days(30),
+    )?;
+    let operations = database.project_repository().create(
+        "Operations",
+        None,
+        ProjectColor::Violet,
+        false,
+        now - ChronoDuration::days(12),
+    )?;
+    let learning = database.project_repository().create(
+        "Learning",
+        None,
+        ProjectColor::Grape,
+        false,
+        now - ChronoDuration::days(9),
+    )?;
+
+    let product_backlog = database.section_repository().create(
+        product.id,
+        "Backlog",
+        now - ChronoDuration::days(21),
+    )?;
+    let product_progress = database.section_repository().create(
+        product.id,
+        "In Progress",
+        now - ChronoDuration::days(20),
+    )?;
+    let product_review = database.section_repository().create(
+        product.id,
+        "Review",
+        now - ChronoDuration::days(19),
+    )?;
+    let website_content = database.section_repository().create(
+        website.id,
+        "Content",
+        now - ChronoDuration::days(18),
+    )?;
+    let _website_launch = database.section_repository().create(
+        website.id,
+        "Launch",
+        now - ChronoDuration::days(17),
+    )?;
+    let release_checklist = database.section_repository().create(
+        release.id,
+        "Checklist",
+        now - ChronoDuration::days(17),
+    )?;
+    let systems_routines = database.section_repository().create(
+        systems.id,
+        "Routines",
+        now - ChronoDuration::days(16),
+    )?;
+    let operations_waiting = database.section_repository().create(
+        operations.id,
+        "Waiting",
+        now - ChronoDuration::days(14),
+    )?;
+
+    let mut tags = HashMap::new();
+    for (name, color, favorite) in [
+        ("Next Action", TagColor::Green, true),
+        ("Deep Work", TagColor::Blue, true),
+        ("Waiting For", TagColor::Yellow, true),
+        ("Writing", TagColor::Teal, false),
+        ("Bug", TagColor::Red, false),
+        ("Design", TagColor::Magenta, false),
+        ("Errand", TagColor::Orange, false),
+        ("Recurring", TagColor::LimeGreen, true),
+        ("Screenshots", TagColor::Violet, false),
+        ("Someday", TagColor::Grey, false),
+    ] {
+        let tag = database.tag_repository().create(
+            name,
+            color,
+            favorite,
+            now - ChronoDuration::days(13),
+        )?;
+        tags.insert(name, tag.id);
+    }
+
+    for (name, query, color, favorite) in [
+        ("Today focus", "today AND active", FilterColor::Green, true),
+        (
+            "Next actions",
+            "@Next Action AND active",
+            FilterColor::Blue,
+            true,
+        ),
+        (
+            "Waiting for",
+            "@Waiting For AND active",
+            FilterColor::Yellow,
+            true,
+        ),
+        ("High priority", "p1 AND active", FilterColor::Red, true),
+        (
+            "Website launch",
+            "##Website AND active",
+            FilterColor::Teal,
+            false,
+        ),
+        (
+            "Recurring routines",
+            "@Recurring AND active",
+            FilterColor::LimeGreen,
+            false,
+        ),
+        ("Subtasks", "subtask AND active", FilterColor::Grape, false),
+        ("Completed", "completed", FilterColor::Grey, false),
+    ] {
+        database.filter_repository().create(
+            name,
+            query,
+            color,
+            favorite,
+            now - ChronoDuration::days(11),
+        )?;
+    }
+
+    let storyboard = create_showcase_task(
+        database,
+        "Prepare README GIF storyboard",
+        website.id,
+        Some(website_content.id),
+        None,
+        TaskPriority::P1,
+        Some(showcase_due(today, Some((10, 0)), "today at 10:00", false)),
+        r#"## Capture plan
+- Start on the task list with favorites visible
+- Open statistics after a completed focus block
+- End on markdown notes for the current session"#,
+        now - ChronoDuration::days(4),
+        None,
+    )?;
+    tag_showcase_task(
+        database,
+        storyboard.id,
+        &tags,
+        &["Next Action", "Deep Work", "Screenshots"],
+    )?;
+
+    let website_copy = create_showcase_task(
+        database,
+        "Polish website hero copy",
+        website.id,
+        Some(website_content.id),
+        None,
+        TaskPriority::P2,
+        Some(showcase_due(
+            offset_date(today, 1),
+            Some((14, 30)),
+            "tomorrow at 14:30",
+            false,
+        )),
+        "Tighten the product promise and keep the terminal-first positioning clear.",
+        now - ChronoDuration::days(3),
+        None,
+    )?;
+    tag_showcase_task(
+        database,
+        website_copy.id,
+        &tags,
+        &["Writing", "Design", "Next Action"],
+    )?;
+
+    let launch = create_showcase_task(
+        database,
+        "Launch public beta",
+        release.id,
+        Some(release_checklist.id),
+        None,
+        TaskPriority::P1,
+        Some(showcase_due(
+            offset_date(today, 5),
+            None,
+            "next Monday",
+            false,
+        )),
+        "Parent task used to showcase nested tasks and release checklist work.",
+        now - ChronoDuration::days(6),
+        None,
+    )?;
+    tag_showcase_task(database, launch.id, &tags, &["Next Action"])?;
+
+    let installer_docs = create_showcase_task(
+        database,
+        "Verify installer docs against rc.1 assets",
+        release.id,
+        Some(release_checklist.id),
+        Some(launch.id),
+        TaskPriority::P1,
+        Some(showcase_due(today, Some((16, 0)), "today at 16:00", false)),
+        "Confirm Linux and macOS install snippets before recording the release flow.",
+        now - ChronoDuration::days(2),
+        None,
+    )?;
+    tag_showcase_task(database, installer_docs.id, &tags, &["Next Action"])?;
+
+    let checksum = create_showcase_task(
+        database,
+        "Publish checksum table",
+        release.id,
+        Some(release_checklist.id),
+        Some(launch.id),
+        TaskPriority::P2,
+        Some(showcase_due(
+            offset_date(today, 2),
+            None,
+            "in two days",
+            false,
+        )),
+        "Use the release artifact verification output as the source of truth.",
+        now - ChronoDuration::days(2),
+        None,
+    )?;
+    tag_showcase_task(database, checksum.id, &tags, &["Screenshots"])?;
+
+    let triage = create_showcase_task(
+        database,
+        "Triage beta feedback from terminal users",
+        product.id,
+        Some(product_progress.id),
+        None,
+        TaskPriority::P2,
+        Some(showcase_due(
+            offset_date(today, -1),
+            None,
+            "yesterday",
+            false,
+        )),
+        "Group feedback into rendering, onboarding, and sync integration buckets.",
+        now - ChronoDuration::days(7),
+        None,
+    )?;
+    tag_showcase_task(database, triage.id, &tags, &["Bug", "Next Action"])?;
+
+    let recurring_capture = create_showcase_task(
+        database,
+        "Record daily planning session",
+        systems.id,
+        Some(systems_routines.id),
+        None,
+        TaskPriority::P3,
+        Some(showcase_due(
+            today,
+            Some((9, 0)),
+            "every weekday at 09:00",
+            true,
+        )),
+        "Recurring task used to demonstrate natural-language due dates.",
+        now - ChronoDuration::days(20),
+        None,
+    )?;
+    tag_showcase_task(
+        database,
+        recurring_capture.id,
+        &tags,
+        &["Recurring", "Next Action"],
+    )?;
+
+    let weekly_review = create_showcase_task(
+        database,
+        "Weekly review and next-action cleanup",
+        systems.id,
+        Some(systems_routines.id),
+        None,
+        TaskPriority::P2,
+        Some(showcase_due(
+            offset_date(today, 3),
+            Some((17, 30)),
+            "every Friday at 17:30",
+            true,
+        )),
+        r#"Review checklist:
+- Clear waiting-for tasks
+- Pick the next release slice
+- Archive stale someday items"#,
+        now - ChronoDuration::days(8),
+        None,
+    )?;
+    tag_showcase_task(database, weekly_review.id, &tags, &["Recurring"])?;
+
+    let waiting = create_showcase_task(
+        database,
+        "Wait for logo export from designer",
+        operations.id,
+        Some(operations_waiting.id),
+        None,
+        TaskPriority::P3,
+        Some(showcase_due(
+            offset_date(today, 4),
+            None,
+            "next week",
+            false,
+        )),
+        "Blocked until the square mark and wordmark are exported in light and dark variants.",
+        now - ChronoDuration::days(5),
+        None,
+    )?;
+    tag_showcase_task(database, waiting.id, &tags, &["Waiting For", "Design"])?;
+
+    let dependency_review = create_showcase_task(
+        database,
+        "Review GPL dependency notes",
+        product.id,
+        Some(product_review.id),
+        None,
+        TaskPriority::P1,
+        None,
+        "Confirmed pinned crates and GPL-3.0-only compatibility for the release candidate.",
+        now - ChronoDuration::days(10),
+        Some(now - ChronoDuration::days(1)),
+    )?;
+    tag_showcase_task(database, dependency_review.id, &tags, &["Deep Work"])?;
+
+    let changelog = create_showcase_task(
+        database,
+        "Read ratatui changelog for layout regressions",
+        learning.id,
+        None,
+        None,
+        TaskPriority::P4,
+        None,
+        "Low-priority research item kept without a due date for the no-date filter.",
+        now - ChronoDuration::days(12),
+        None,
+    )?;
+    tag_showcase_task(database, changelog.id, &tags, &["Someday"])?;
+
+    let command_palette = create_showcase_task(
+        database,
+        "Sketch command palette ideas",
+        product.id,
+        Some(product_backlog.id),
+        None,
+        TaskPriority::P4,
+        None,
+        "Someday/backlog item kept in a project section for screenshots of grouped task lists.",
+        now - ChronoDuration::days(6),
+        None,
+    )?;
+    tag_showcase_task(database, command_palette.id, &tags, &["Someday", "Design"])?;
+
+    let completed_launch_note = create_showcase_task(
+        database,
+        "Draft README feature bullets",
+        website.id,
+        Some(website_content.id),
+        None,
+        TaskPriority::P2,
+        None,
+        "Completed task included so the history and completed filters have visible data.",
+        now - ChronoDuration::days(9),
+        Some(now - ChronoDuration::days(2)),
+    )?;
+    tag_showcase_task(database, completed_launch_note.id, &tags, &["Writing"])?;
+
+    seed_showcase_sessions(
+        database,
+        &[
+            storyboard.id,
+            website_copy.id,
+            installer_docs.id,
+            recurring_capture.id,
+            weekly_review.id,
+            triage.id,
+        ],
+        today,
+    )?;
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+#[allow(clippy::too_many_arguments)]
+fn create_showcase_task(
+    database: &Database,
+    title: &str,
+    project_id: ProjectId,
+    section_id: Option<SectionId>,
+    parent_task_id: Option<TaskId>,
+    priority: TaskPriority,
+    due: Option<TaskDue>,
+    description: &str,
+    created_at: DateTime<Local>,
+    completed_at: Option<DateTime<Local>>,
+) -> Result<Task> {
+    let created = database
+        .task_repository()
+        .create(title, project_id, due.as_ref(), created_at)?;
+    let updated = database.task_repository().update(
+        created.id,
+        &TaskUpdate {
+            title: title.to_string(),
+            description: description.to_string(),
+            project_id,
+            section_id,
+            parent_task_id,
+            priority,
+            due,
+        },
+    )?;
+    if let Some(completed_at) = completed_at {
+        database
+            .task_repository()
+            .update_status(updated.id, TaskStatus::Done, Some(completed_at))
+    } else {
+        Ok(updated)
+    }
+}
+
+#[cfg(debug_assertions)]
+fn tag_showcase_task(
+    database: &Database,
+    task_id: TaskId,
+    tags: &HashMap<&'static str, TagId>,
+    names: &[&'static str],
+) -> Result<()> {
+    let tag_ids = names
+        .iter()
+        .filter_map(|name| tags.get(name).copied())
+        .collect::<Vec<_>>();
+    database
+        .tag_repository()
+        .replace_task_tags(task_id, tag_ids.as_slice())
+}
+
+#[cfg(debug_assertions)]
+fn seed_showcase_sessions(
+    database: &Database,
+    task_ids: &[TaskId],
+    today: NaiveDate,
+) -> Result<()> {
+    let pomodoros = database.pomodoro_repository();
+    for day_index in 0..30 {
+        let date = offset_date(today, day_index as i64 - 29);
+        let completed_sessions = 1 + (day_index % 5);
+        for session_index in 0..completed_sessions {
+            let started_at = showcase_local_at(
+                date,
+                8 + ((session_index * 2 + day_index) % 8) as u32,
+                if session_index % 2 == 0 { 15 } else { 45 },
+            );
+            let ended_at = started_at + ChronoDuration::minutes(25);
+            let break_kind = if session_index == 3 {
+                SessionKind::LongBreak
+            } else {
+                SessionKind::ShortBreak
+            };
+            let task_id = task_ids[(day_index + session_index) % task_ids.len()];
+            let notes = if day_index == 29 && session_index == 0 {
+                r#"## Session notes
+- Captured the task list, favorites, and statistics panels
+- Kept Todoist disabled for the showcase database
+- Next shot: open the markdown note viewer"#
+            } else if session_index == 0 {
+                "Focused on the next visible release task."
+            } else {
+                ""
+            };
+            pomodoros.create(
+                Some(task_id),
+                notes,
+                Some(break_kind.clone()),
+                started_at,
+                ended_at,
+                25,
+            )?;
+
+            let break_started_at = ended_at;
+            let break_duration = if break_kind == SessionKind::LongBreak {
+                15
+            } else {
+                5
+            };
+            pomodoros.record_session_entry(
+                Some(task_id),
+                "",
+                break_kind,
+                SessionOutcome::Completed,
+                None,
+                break_started_at,
+                break_started_at + ChronoDuration::minutes(break_duration),
+                break_duration as u32 * 60,
+            )?;
+        }
+
+        if day_index % 7 == 3 {
+            let started_at = showcase_local_at(date, 16, 10);
+            pomodoros.record_session_entry(
+                Some(task_ids[day_index % task_ids.len()]),
+                "Voided: interruption logged to make the weekly stats more realistic.",
+                SessionKind::Focus,
+                SessionOutcome::Voided,
+                None,
+                started_at,
+                started_at + ChronoDuration::minutes(7),
+                7 * 60,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn showcase_due(
+    date: NaiveDate,
+    time: Option<(u32, u32)>,
+    string: &str,
+    is_recurring: bool,
+) -> TaskDue {
+    TaskDue {
+        date,
+        datetime: time
+            .map(|(hour, minute)| showcase_local_at(date, hour, minute).with_timezone(&Utc)),
+        timezone: time.map(|_| "America/Sao_Paulo".to_string()),
+        string: string.to_string(),
+        due_lang: Some("en".to_string()),
+        is_recurring,
+    }
+}
+
+#[cfg(debug_assertions)]
+fn offset_date(date: NaiveDate, days: i64) -> NaiveDate {
+    date.checked_add_signed(ChronoDuration::days(days))
+        .expect("showcase date offset should be representable")
+}
+
+#[cfg(debug_assertions)]
+fn showcase_local_at(date: NaiveDate, hour: u32, minute: u32) -> DateTime<Local> {
+    Local
+        .with_ymd_and_hms(date.year(), date.month(), date.day(), hour, minute, 0)
+        .single()
+        .expect("showcase local timestamp should be representable")
+}
+
 fn apply_debug_overrides(config: &mut AppConfig, options: RunOptions) {
     if options.force_ascii {
         config.ui.glyph_mode = GlyphMode::Ascii;
@@ -12066,7 +12698,7 @@ fn apply_debug_overrides(config: &mut AppConfig, options: RunOptions) {
     if options.force_short_timer {
         config.timer = TimerSettings::short_timer_preset();
     }
-    if options.local_only {
+    if options.local_only || options.seed_showcase_data {
         config.integrations.todoist.enabled = false;
         config.integrations.todoist.sync_on_startup = false;
     }
@@ -12175,8 +12807,8 @@ mod tests {
         TaskUpdate,
     };
     use crate::storage::{
-        Database, FilterRepository, ProjectRepository, SectionRepository, SyncRepository,
-        TagRepository, TaskRepository,
+        Database, FilterRepository, PomodoroRepository, ProjectRepository, SectionRepository,
+        SyncRepository, TagRepository, TaskRepository,
     };
     use crate::task_nlp::{locale_priority_with_hint, parse_due_input_with_locales};
     use crate::theme::ThemePalette;
@@ -12188,7 +12820,8 @@ mod tests {
         SORT_POPUP_SHORTCUTS, ScreenData, ShortcutTip, SidebarTab, TAGS_SHORTCUTS, TaskEditorField,
         TaskEditorState, TaskListBreadcrumbSegmentKind, TaskListBreadcrumbSegmentView,
         TaskListBreadcrumbView, TaskView, TimerPhase, TimerRunState, apply_debug_overrides,
-        chrono_duration, duration_to_stored_minutes,
+        apply_showcase_database_network_guard, chrono_duration, duration_to_stored_minutes,
+        seed_showcase_data_if_requested,
     };
 
     fn assert_key_value_preview_line(
@@ -17522,6 +18155,7 @@ mod tests {
                 reset_data: false,
                 dry_run_sync: false,
                 local_only: false,
+                seed_showcase_data: false,
             },
         );
 
@@ -17542,9 +18176,82 @@ mod tests {
                 reset_data: false,
                 dry_run_sync: false,
                 local_only: true,
+                seed_showcase_data: false,
             },
         );
 
+        assert!(!config.integrations.todoist.enabled);
+        assert!(!config.integrations.todoist.sync_on_startup);
+    }
+
+    #[test]
+    fn debug_showcase_seed_populates_empty_database_and_marks_it_local_only() {
+        let database = Database::open_in_memory().expect("database should open");
+        seed_showcase_data_if_requested(
+            &database,
+            RunOptions {
+                force_ascii: false,
+                force_short_timer: false,
+                reset_data: false,
+                dry_run_sync: false,
+                local_only: false,
+                seed_showcase_data: true,
+            },
+        )
+        .expect("showcase seed should succeed");
+
+        let tasks = database
+            .task_repository()
+            .list_all()
+            .expect("tasks should load");
+        let projects = database
+            .project_repository()
+            .list_all()
+            .expect("projects should load");
+        let tags = database
+            .tag_repository()
+            .list_all()
+            .expect("tags should load");
+        let filters = database
+            .filter_repository()
+            .list_all()
+            .expect("filters should load");
+        let sessions = database
+            .pomodoro_repository()
+            .summarize_completed_focus_days(
+                Local::now() - ChronoDuration::days(31),
+                Local::now() + ChronoDuration::days(1),
+            )
+            .expect("focus summaries should load");
+
+        assert!(
+            database
+                .debug_showcase_seeded()
+                .expect("seed marker should load")
+        );
+        assert!(projects.iter().any(|project| project.name == "Product"));
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task.due.as_ref().is_some_and(|due| due.is_recurring))
+        );
+        assert!(tasks.iter().any(|task| task.parent_task_id.is_some()));
+        assert!(tags.iter().any(|tag| tag.name == "Next Action"));
+        assert!(filters.iter().any(|filter| filter.name == "Today focus"));
+        assert!(sessions.len() >= 30);
+        assert!(
+            database
+                .sync_repository()
+                .list_outbox("todoist", 100)
+                .expect("outbox should load")
+                .is_empty()
+        );
+
+        let mut config = AppConfig::default();
+        config.integrations.todoist.enabled = true;
+        config.integrations.todoist.sync_on_startup = true;
+        apply_showcase_database_network_guard(&database, &mut config)
+            .expect("network guard should apply");
         assert!(!config.integrations.todoist.enabled);
         assert!(!config.integrations.todoist.sync_on_startup);
     }

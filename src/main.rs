@@ -52,6 +52,7 @@ where
                 reset_data: matches.get_flag("reset-data"),
                 dry_run_sync: matches.get_flag("dry-run-sync"),
                 local_only: matches.get_flag("local-only"),
+                seed_showcase_data: matches.get_flag("seed-showcase-data"),
             }))
         }
         Err(error)
@@ -79,7 +80,8 @@ fn cli_command(include_debug_flags: bool) -> Command {
             .arg(hidden_debug_flag("short-timer"))
             .arg(hidden_debug_flag("reset-data"))
             .arg(hidden_debug_flag("dry-run-sync"))
-            .arg(hidden_debug_flag("local-only"));
+            .arg(hidden_debug_flag("local-only"))
+            .arg(hidden_debug_flag("seed-showcase-data"));
     }
 
     command
@@ -141,6 +143,7 @@ mod tests {
                 "--reset-data",
                 "--dry-run-sync",
                 "--local-only",
+                "--seed-showcase-data",
             ],
             true,
         )
@@ -155,6 +158,7 @@ mod tests {
         assert!(options.reset_data);
         assert!(options.dry_run_sync);
         assert!(options.local_only);
+        assert!(options.seed_showcase_data);
     }
 
     #[test]
@@ -171,6 +175,7 @@ mod tests {
         assert!(!options.reset_data);
         assert!(!options.dry_run_sync);
         assert!(!options.local_only);
+        assert!(!options.seed_showcase_data);
     }
 
     #[test]
@@ -181,6 +186,7 @@ mod tests {
             "--reset-data",
             "--dry-run-sync",
             "--local-only",
+            "--seed-showcase-data",
         ] {
             let error = parse_cli_action_with_debug_flags(["triginta", flag], false)
                 .expect_err("debug flags should fail in release-style mode");

@@ -474,3 +474,17 @@ mise exec -- cargo run -- --local-only
 This disables Todoist integration for the current debug run, including startup
 sync and the background sync worker. The app still uses the normal local SQLite
 database for the selected build profile.
+
+### Showcase debug data
+
+```bash
+mise exec -- cargo run -- --reset-data --seed-showcase-data
+```
+
+This replaces the debug SQLite database and seeds local-only mock data for
+README GIFs, screenshots, and website captures. The seed includes projects,
+sections, nested tasks, priorities, recurring due dates, tags, favorite filters,
+completed tasks, and 30 days of Pomodoro history with markdown session notes.
+
+The seeded database is marked as showcase data, so Todoist integration remains
+disabled for later debug runs against that database.

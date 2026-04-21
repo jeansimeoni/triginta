@@ -979,6 +979,44 @@ impl Database {
         }
     }
 
+    #[cfg(debug_assertions)]
+    pub fn debug_showcase_seeded(&self) -> Result<bool> {
+        let value = self
+            .connection
+            .query_row(
+                "SELECT value FROM app_metadata WHERE key = 'debug_showcase_seeded'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("failed to read debug showcase seed marker")?;
+        Ok(value.as_deref() == Some("1"))
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn mark_debug_showcase_seeded(&self) -> Result<()> {
+        self.connection
+            .execute(
+                "INSERT INTO app_metadata(key, value)
+                 VALUES ('debug_showcase_seeded', '1')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [],
+            )
+            .context("failed to mark debug showcase seed")?;
+        Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn clear_debug_sync_artifacts(&self) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM sync_outbox", [])
+            .context("failed to clear debug sync outbox")?;
+        self.connection
+            .execute("DELETE FROM sync_state", [])
+            .context("failed to clear debug sync state")?;
+        Ok(())
+    }
+
     fn ensure_inbox_project(&self) -> Result<ProjectId> {
         if let Some(project_id) = self
             .connection
