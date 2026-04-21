@@ -1779,7 +1779,7 @@ fn render_statistics_chart_grid(
     data: &ScreenData,
     palette: ThemePalette,
 ) {
-    if area.height < 14 || area.width < 56 {
+    if area.height < 14 || area.width < 70 {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1799,21 +1799,21 @@ fn render_statistics_chart_grid(
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(area);
-    let top = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[0]);
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(24),
+            Constraint::Percentage(24),
+            Constraint::Percentage(52),
+        ])
         .split(rows[1]);
 
-    render_focus_trend_chart(frame, top[0], focus_30, daily_target_minutes, palette);
-    render_last_7_days_bars(frame, top[1], focus_30, palette);
-    render_weekday_average_bars(frame, bottom[0], focus_30, palette);
-    render_hourly_bars(frame, bottom[1], data, palette);
+    render_focus_trend_chart(frame, rows[0], focus_30, daily_target_minutes, palette);
+    render_last_7_days_bars(frame, bottom[0], focus_30, palette);
+    render_weekday_average_bars(frame, bottom[1], focus_30, palette);
+    render_hourly_bars(frame, bottom[2], data, palette);
 }
 
 fn render_last_7_days_bars(
