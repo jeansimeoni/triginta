@@ -10268,21 +10268,15 @@ impl App {
                     Self::focus_editor_field(&mut editor, TaskEditorField::Parent);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::Down | KeyCode::Char('j')
-                    if editor.focused_field == TaskEditorField::Description =>
-                {
+                KeyCode::Down if editor.focused_field == TaskEditorField::Description => {
                     Self::move_editor_description_cursor_vertical(&mut editor, 1);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::Up | KeyCode::Char('k')
-                    if editor.focused_field == TaskEditorField::Description =>
-                {
+                KeyCode::Up if editor.focused_field == TaskEditorField::Description => {
                     Self::move_editor_description_cursor_vertical(&mut editor, -1);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::Down | KeyCode::Char('j')
-                    if editor.focused_field == TaskEditorField::Project =>
-                {
+                KeyCode::Down if editor.focused_field == TaskEditorField::Project => {
                     let last_index = self
                         .project_token_suggestions(editor.project_input.as_str())
                         .len()
@@ -10290,9 +10284,7 @@ impl App {
                     editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::Up | KeyCode::Char('k')
-                    if editor.focused_field == TaskEditorField::Project =>
-                {
+                KeyCode::Up if editor.focused_field == TaskEditorField::Project => {
                     editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
                     self.task_editor = Some(editor);
                 }
@@ -10372,9 +10364,7 @@ impl App {
                     editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::Down | KeyCode::Char('j')
-                    if editor.focused_field == TaskEditorField::Parent =>
-                {
+                KeyCode::Down if editor.focused_field == TaskEditorField::Parent => {
                     let last_index = self
                         .parent_task_suggestions(
                             editor.parent_input.as_str(),
@@ -10386,9 +10376,7 @@ impl App {
                     editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
                     self.task_editor = Some(editor);
                 }
-                KeyCode::Up | KeyCode::Char('k')
-                    if editor.focused_field == TaskEditorField::Parent =>
-                {
+                KeyCode::Up if editor.focused_field == TaskEditorField::Parent => {
                     editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
                     self.task_editor = Some(editor);
                 }
@@ -14068,6 +14056,52 @@ mod tests {
             .expect("edit should submit");
 
         assert_eq!(app.selected_task().expect("task should exist").title, "abd");
+    }
+
+    #[test]
+    fn task_editor_text_fields_insert_j_and_k() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Task".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should create");
+
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        app.handle_key(crossterm::event::KeyCode::F(2))
+            .expect("focus should switch to description");
+        for character in "joke\nk".chars() {
+            if character == '\n' {
+                app.handle_key(crossterm::event::KeyCode::Enter)
+                    .expect("newline should insert");
+            } else {
+                app.handle_key(crossterm::event::KeyCode::Char(character))
+                    .expect("description typing should succeed");
+            }
+        }
+        app.handle_key(crossterm::event::KeyCode::F(3))
+            .expect("focus should switch to project");
+        for character in "jk".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("project typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::F(9))
+            .expect("focus should switch to parent");
+        for character in "jk".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("parent typing should succeed");
+        }
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_eq!(editor.description_value, "joke\nk");
+        assert_eq!(editor.project_value, "Inboxjk");
+        assert_eq!(editor.parent_value, "jk");
     }
 
     #[test]
