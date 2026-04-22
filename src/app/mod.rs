@@ -2633,18 +2633,14 @@ impl App {
             .unwrap_or_default();
 
         let mut rows = Vec::new();
-        let keep_expanded_descendants = self.active_sidebar_tab == SidebarTab::Projects
-            || (self.active_sidebar_tab == SidebarTab::Navigation
-                && self.active_task_view == TaskView::All);
         for root in visible_roots {
             self.append_visible_task_row(
                 &mut rows,
                 root,
                 0,
-                &scoped_visible_ids,
                 &children_by_parent,
                 &mut branch_cache,
-                keep_expanded_descendants,
+                false,
             );
         }
         rows
@@ -2655,13 +2651,20 @@ impl App {
         matching_ids: &HashSet<TaskId>,
     ) -> Vec<(usize, &'a Task)> {
         let mut task_by_id: HashMap<TaskId, &Task> = HashMap::new();
+        let mut children_by_parent: HashMap<Option<TaskId>, Vec<&Task>> = HashMap::new();
         for task in self
             .screen_data
             .tasks
             .iter()
-            .filter(|task| self.task_is_active(task) && matching_ids.contains(&task.id))
+            .filter(|task| self.task_is_visible_as_expanded_descendant(task))
         {
-            task_by_id.insert(task.id, task);
+            children_by_parent
+                .entry(task.parent_task_id)
+                .or_default()
+                .push(task);
+            if matching_ids.contains(&task.id) {
+                task_by_id.insert(task.id, task);
+            }
         }
         if task_by_id.is_empty() {
             return Vec::new();
@@ -2692,16 +2695,22 @@ impl App {
                     .then_with(|| left.id.0.cmp(&right.id.0))
             });
         }
+        for (parent, children) in children_by_parent.iter_mut() {
+            if parent.is_none() {
+                continue;
+            }
+            children.sort_by(|left, right| {
+                left.child_order
+                    .cmp(&right.child_order)
+                    .then_with(|| left.created_at.cmp(&right.created_at))
+                    .then_with(|| left.id.0.cmp(&right.id.0))
+            });
+        }
 
         let mut rows = Vec::new();
         if let Some(roots) = matched_children_by_parent.get(&None) {
             for root in roots.iter().copied() {
-                self.append_visible_task_row_filters_mode(
-                    &mut rows,
-                    root,
-                    0,
-                    &matched_children_by_parent,
-                );
+                self.append_visible_task_row_filters_mode(&mut rows, root, 0, &children_by_parent);
             }
         }
         rows
@@ -2712,7 +2721,7 @@ impl App {
         rows: &mut Vec<(usize, &'a Task)>,
         task: &'a Task,
         depth: usize,
-        matched_children_by_parent: &HashMap<Option<TaskId>, Vec<&'a Task>>,
+        children_by_parent: &HashMap<Option<TaskId>, Vec<&'a Task>>,
     ) {
         rows.push((depth, task));
         let should_expand = self.expanded_task_ids.contains(&task.id)
@@ -2720,17 +2729,12 @@ impl App {
         if !should_expand {
             return;
         }
-        let children = matched_children_by_parent
+        let children = children_by_parent
             .get(&Some(task.id))
             .cloned()
             .unwrap_or_default();
         for child in children {
-            self.append_visible_task_row_filters_mode(
-                rows,
-                child,
-                depth + 1,
-                matched_children_by_parent,
-            );
+            self.append_visible_task_row_filters_mode(rows, child, depth + 1, children_by_parent);
         }
     }
 
@@ -2741,14 +2745,13 @@ impl App {
         rows: &mut Vec<(usize, &'a Task)>,
         task: &'a Task,
         depth: usize,
-        scoped_visible_ids: &HashSet<TaskId>,
         children_by_parent: &HashMap<Option<TaskId>, Vec<&'a Task>>,
         branch_cache: &mut HashMap<TaskId, bool>,
         include_unmatched_descendants: bool,
     ) {
         let task_has_match = branch_cache.get(&task.id).copied().unwrap_or(false);
         let allow_unmatched_task =
-            include_unmatched_descendants && scoped_visible_ids.contains(&task.id);
+            include_unmatched_descendants && self.task_is_visible_as_expanded_descendant(task);
         if !task_has_match && !allow_unmatched_task {
             return;
         }
@@ -2767,10 +2770,9 @@ impl App {
                 rows,
                 child,
                 depth + 1,
-                scoped_visible_ids,
                 children_by_parent,
                 branch_cache,
-                include_unmatched_descendants || self.active_sidebar_tab == SidebarTab::Projects,
+                true,
             );
         }
     }
@@ -4576,6 +4578,12 @@ impl App {
             && self.task_matches_selected_tag(task)
             && self.task_matches_selected_filter(task)
             && self.task_matches_selected_favorite(task)
+            && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
+    }
+
+    fn task_is_visible_as_expanded_descendant(&self, task: &Task) -> bool {
+        self.task_is_active(task)
+            && self.task_matches_selected_project(task)
             && (!self.config.ui.hide_completed_tasks || task.status != TaskStatus::Done)
     }
 
@@ -15413,6 +15421,250 @@ mod tests {
             titles.contains(&"Child"),
             "expanded child should remain visible in Navigation->All"
         );
+    }
+
+    #[test]
+    fn navigation_today_expanding_parent_shows_children_outside_today() {
+        let mut app = test_app();
+        let inbox_project_id = app.inbox_project_id();
+        let tasks = app.database.task_repository();
+        let now = Local::now();
+        let parent = tasks
+            .create(
+                "Parent",
+                inbox_project_id,
+                Some(&TaskDue {
+                    date: app.today(),
+                    datetime: None,
+                    timezone: None,
+                    string: "today".to_string(),
+                    due_lang: None,
+                    is_recurring: false,
+                }),
+                now,
+            )
+            .expect("parent should create");
+        let child = tasks
+            .create("Child", inbox_project_id, None, now)
+            .expect("child should create");
+        tasks
+            .update(
+                child.id,
+                &TaskUpdate {
+                    title: "Child".to_string(),
+                    description: String::new(),
+                    project_id: inbox_project_id,
+                    section_id: None,
+                    parent_task_id: Some(parent.id),
+                    priority: TaskPriority::P4,
+                    due: None,
+                },
+            )
+            .expect("child should update");
+
+        app.refresh_tasks().expect("tasks should refresh");
+        app.active_sidebar_tab = SidebarTab::Navigation;
+        app.active_task_view = TaskView::Today;
+        app.selected_task_id = Some(parent.id);
+
+        let collapsed_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(collapsed_titles, vec!["Parent"]);
+
+        app.expand_selected_task();
+        let expanded_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(expanded_titles, vec!["Parent", "Child"]);
+    }
+
+    #[test]
+    fn projects_tab_today_expanding_parent_shows_children_outside_today() {
+        let mut app = test_app();
+        let project = app
+            .database
+            .project_repository()
+            .create("Work", None, ProjectColor::Blue, false, Local::now())
+            .expect("project should create");
+        let tasks = app.database.task_repository();
+        let now = Local::now();
+        let parent = tasks
+            .create(
+                "Parent",
+                project.id,
+                Some(&TaskDue {
+                    date: app.today(),
+                    datetime: None,
+                    timezone: None,
+                    string: "today".to_string(),
+                    due_lang: None,
+                    is_recurring: false,
+                }),
+                now,
+            )
+            .expect("parent should create");
+        let child = tasks
+            .create("Child", project.id, None, now)
+            .expect("child should create");
+        tasks
+            .update(
+                child.id,
+                &TaskUpdate {
+                    title: "Child".to_string(),
+                    description: String::new(),
+                    project_id: project.id,
+                    section_id: None,
+                    parent_task_id: Some(parent.id),
+                    priority: TaskPriority::P4,
+                    due: None,
+                },
+            )
+            .expect("child should update");
+
+        app.refresh_tasks().expect("tasks should refresh");
+        app.active_sidebar_tab = SidebarTab::Projects;
+        app.active_task_view = TaskView::Today;
+        app.selected_project_id = Some(project.id);
+        app.selected_section_id = None;
+        app.selected_task_id = Some(parent.id);
+
+        let collapsed_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(collapsed_titles, vec!["Parent"]);
+
+        app.expand_selected_task();
+        let expanded_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(expanded_titles, vec!["Parent", "Child"]);
+    }
+
+    #[test]
+    fn tags_tab_matching_parent_can_be_manually_expanded_to_show_untagged_child() {
+        let mut app = test_app();
+        let inbox_project_id = app.inbox_project_id();
+        let tasks = app.database.task_repository();
+        let tags = app.database.tag_repository();
+
+        let parent = tasks
+            .create("Parent", inbox_project_id, None, Local::now())
+            .expect("parent should create");
+        let child = tasks
+            .create("Child", inbox_project_id, None, Local::now())
+            .expect("child should create");
+        tasks
+            .update(
+                child.id,
+                &TaskUpdate {
+                    title: "Child".to_string(),
+                    description: String::new(),
+                    project_id: inbox_project_id,
+                    section_id: None,
+                    parent_task_id: Some(parent.id),
+                    priority: TaskPriority::P4,
+                    due: None,
+                },
+            )
+            .expect("child should update");
+        let work = tags
+            .create("Work", TagColor::Blue, false, Local::now())
+            .expect("tag should create");
+        tags.replace_task_tags(parent.id, &[work.id])
+            .expect("parent tag should link");
+
+        app.refresh_tasks().expect("tasks should refresh");
+        app.active_sidebar_tab = SidebarTab::Tags;
+        app.selected_tag_id = Some(work.id);
+        app.selected_task_id = Some(parent.id);
+
+        let collapsed_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(collapsed_titles, vec!["Parent"]);
+
+        app.expand_selected_task();
+        let expanded_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(expanded_titles, vec!["Parent", "Child"]);
+    }
+
+    #[test]
+    fn filters_tab_matching_parent_can_be_manually_expanded_to_show_unmatched_child() {
+        let mut app = test_app();
+        let inbox_project_id = app.inbox_project_id();
+        let tasks = app.database.task_repository();
+        let tags = app.database.tag_repository();
+        let filters = app.database.filter_repository();
+
+        let parent = tasks
+            .create("Parent", inbox_project_id, None, Local::now())
+            .expect("parent should create");
+        let child = tasks
+            .create("Child", inbox_project_id, None, Local::now())
+            .expect("child should create");
+        tasks
+            .update(
+                child.id,
+                &TaskUpdate {
+                    title: "Child".to_string(),
+                    description: String::new(),
+                    project_id: inbox_project_id,
+                    section_id: None,
+                    parent_task_id: Some(parent.id),
+                    priority: TaskPriority::P4,
+                    due: None,
+                },
+            )
+            .expect("child should update");
+        let work = tags
+            .create("Work", TagColor::Blue, false, Local::now())
+            .expect("tag should create");
+        tags.replace_task_tags(parent.id, &[work.id])
+            .expect("parent tag should link");
+        let filter = filters
+            .create(
+                "Work Only",
+                "@Work",
+                FilterColor::Green,
+                false,
+                Local::now(),
+            )
+            .expect("filter should create");
+
+        app.refresh_tasks().expect("tasks should refresh");
+        app.active_sidebar_tab = SidebarTab::Filters;
+        app.selected_filter_id = Some(filter.id);
+        app.selected_task_id = Some(parent.id);
+
+        let collapsed_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(collapsed_titles, vec!["Parent"]);
+
+        app.expand_selected_task();
+        let expanded_titles = app
+            .visible_tasks()
+            .into_iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(expanded_titles, vec!["Parent", "Child"]);
     }
 
     #[test]
