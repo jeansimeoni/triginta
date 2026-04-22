@@ -1891,7 +1891,7 @@ const SEARCH_POPUP_SHORTCUTS: &[ShortcutTip] = &[
         description: "cancel",
     },
     ShortcutTip {
-        keys: "j/k or ↑/↓",
+        keys: "↑/↓",
         description: "move result",
     },
     ShortcutTip {
@@ -1938,7 +1938,7 @@ const SESSION_NOTE_EDITOR_SHORTCUTS: &[ShortcutTip] = &[
         description: "delete char",
     },
     ShortcutTip {
-        keys: "j/k or ↑/↓",
+        keys: "↑/↓",
         description: "move line",
     },
 ];
@@ -9033,11 +9033,11 @@ impl App {
                     Self::move_session_note_cursor_right(&mut editor);
                     self.session_note_editor = Some(editor);
                 }
-                KeyCode::Char('j') | KeyCode::Down => {
+                KeyCode::Down => {
                     Self::move_session_note_cursor_vertical(&mut editor, 1);
                     self.session_note_editor = Some(editor);
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
+                KeyCode::Up => {
                     Self::move_session_note_cursor_vertical(&mut editor, -1);
                     self.session_note_editor = Some(editor);
                 }
@@ -9212,7 +9212,7 @@ impl App {
                         self.task_search = Some(search);
                     }
                 }
-                KeyCode::Char('j') | KeyCode::Down => {
+                KeyCode::Down => {
                     let last_index = self
                         .searchable_tasks(search.query.as_str())
                         .len()
@@ -9220,7 +9220,7 @@ impl App {
                     search.selected_index = (search.selected_index + 1).min(last_index);
                     self.task_search = Some(search);
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
+                KeyCode::Up => {
                     search.selected_index = search.selected_index.saturating_sub(1);
                     self.task_search = Some(search);
                 }
@@ -18088,6 +18088,23 @@ mod tests {
     }
 
     #[test]
+    fn task_search_inserts_j_and_k_in_query() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('1'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("search should open");
+        for character in "jk".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        let search = app.task_search_view().expect("search should stay open");
+        assert_eq!(search.query, "jk");
+        assert_eq!(search.cursor, 2);
+    }
+
+    #[test]
     fn history_panel_can_assign_and_clear_selected_session_task() {
         let mut app = test_app();
         let now = Local::now();
@@ -18182,6 +18199,28 @@ mod tests {
 
         assert_eq!(app.screen_data.history_entries[0].notes, "");
         assert_eq!(app.screen_data.history_entries[1].notes, "Carry forward");
+    }
+
+    #[test]
+    fn session_note_editor_inserts_j_and_k() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('n'))
+            .expect("note editor should open");
+        for character in "joke\nk".chars() {
+            if character == '\n' {
+                app.handle_key(crossterm::event::KeyCode::Enter)
+                    .expect("newline should insert");
+            } else {
+                app.handle_key(crossterm::event::KeyCode::Char(character))
+                    .expect("typing should work");
+            }
+        }
+
+        let editor = app
+            .session_note_editor_view()
+            .expect("note editor should stay open");
+        assert_eq!(editor.value, "joke\nk");
+        assert_eq!(editor.cursor, "joke\nk".len());
     }
 
     #[test]
