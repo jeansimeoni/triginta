@@ -12980,6 +12980,18 @@ mod tests {
         )
     }
 
+    fn local_noon_today() -> chrono::DateTime<Local> {
+        let noon = Local::now()
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .expect("noon should be valid");
+        Local
+            .from_local_datetime(&noon)
+            .single()
+            .or_else(|| Local.from_local_datetime(&noon).earliest())
+            .expect("local noon should resolve")
+    }
+
     #[test]
     fn app_starts_running() {
         let app = test_app();
@@ -18470,14 +18482,14 @@ mod tests {
     #[test]
     fn completed_pomodoro_transitions_to_break_without_completing_cycle() {
         let mut app = test_app();
-        let started_at = Local::now() - chrono_duration(app.timer_settings.pomodoro_length);
+        let now = local_noon_today();
+        let started_at = now - chrono_duration(app.timer_settings.pomodoro_length);
         app.timer.phase = TimerPhase::Focus;
         app.timer.run_state = TimerRunState::Running;
         app.timer.current_phase_started_at = Some(started_at);
         app.timer.running_since = Some(started_at);
 
-        app.on_tick_at(Local::now())
-            .expect("tick should complete phase");
+        app.on_tick_at(now).expect("tick should complete phase");
 
         assert_eq!(app.timer.phase, TimerPhase::ShortBreak);
         assert_eq!(app.timer.run_state, TimerRunState::Running);
@@ -18531,15 +18543,15 @@ mod tests {
     #[test]
     fn voiding_during_break_completes_cycle_without_adding_extra_slot() {
         let mut app = test_app();
-        let focus_started_at = Local::now() - chrono_duration(app.timer_settings.pomodoro_length);
+        let now = local_noon_today();
+        let focus_started_at = now - chrono_duration(app.timer_settings.pomodoro_length);
         app.timer.phase = TimerPhase::Focus;
         app.timer.run_state = TimerRunState::Running;
         app.timer.current_phase_started_at = Some(focus_started_at);
         app.timer.running_since = Some(focus_started_at);
-        app.on_tick_at(Local::now())
-            .expect("tick should complete focus");
+        app.on_tick_at(now).expect("tick should complete focus");
 
-        let break_now = Local::now();
+        let break_now = now + ChronoDuration::seconds(10);
         let break_started_at = break_now - ChronoDuration::seconds(10);
         app.timer.phase = TimerPhase::ShortBreak;
         app.timer.run_state = TimerRunState::Running;
