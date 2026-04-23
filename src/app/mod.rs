@@ -5133,6 +5133,13 @@ impl App {
         if start > 0 && !raw[..start].chars().last().is_some_and(char::is_whitespace) {
             return (raw.trim().to_string(), fallback_project_id);
         }
+        if raw[start + 1..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        {
+            return (raw.trim().to_string(), fallback_project_id);
+        }
         let query = raw[start + 1..].trim();
         if query.is_empty() {
             return (raw.trim().to_string(), fallback_project_id);
@@ -5162,6 +5169,13 @@ impl App {
             return (raw.trim().to_string(), fallback_project_id, None);
         };
         if start > 0 && !raw[..start].chars().last().is_some_and(char::is_whitespace) {
+            return (raw.trim().to_string(), fallback_project_id, None);
+        }
+        if raw[start + 1..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        {
             return (raw.trim().to_string(), fallback_project_id, None);
         }
         let query = raw[start + 1..].trim();
@@ -5644,6 +5658,11 @@ impl App {
         while let Some((start, end, query)) = Self::next_tag_reference(raw.as_str(), cursor) {
             cleaned.push_str(&raw[cursor..start]);
             let segment = &raw[start + 1..end];
+            if segment.chars().next().is_some_and(char::is_whitespace) {
+                cleaned.push_str(&raw[start..end]);
+                cursor = end;
+                continue;
+            }
             let leading_whitespace = segment.len().saturating_sub(segment.trim_start().len());
             let trimmed = segment.trim_start().trim_end();
             let (normalized, consume_end) =
@@ -7361,7 +7380,7 @@ impl App {
             }
             TaskEditorField::Description => {}
             TaskEditorField::Project => {
-                Self::sync_editor_title_from_project_field(editor);
+                self.sync_editor_title_from_project_field(editor);
             }
             TaskEditorField::Tags => {}
             TaskEditorField::Priority => {
@@ -7613,9 +7632,9 @@ impl App {
         editor.priority_cursor = editor.priority_input.len();
     }
 
-    fn sync_editor_title_from_project_field(editor: &mut TaskEditorState) {
+    fn sync_editor_title_from_project_field(&self, editor: &mut TaskEditorState) {
         let (cleaned_title, _) =
-            Self::extract_project_reference_for_title_cleanup(editor.title_input.as_str());
+            self.extract_project_reference_for_title_cleanup(editor.title_input.as_str());
         if cleaned_title == editor.title_input {
             return;
         }
@@ -7637,20 +7656,30 @@ impl App {
         self.sync_editor_due_from_title(editor, reference_date);
     }
 
-    fn extract_project_reference_for_title_cleanup(raw: &str) -> (String, Option<String>) {
+    fn extract_project_reference_for_title_cleanup(&self, raw: &str) -> (String, Option<String>) {
         let Some(start) = raw.rfind('#') else {
             return (raw.trim().to_string(), None);
         };
         if start > 0 && !raw[..start].chars().last().is_some_and(char::is_whitespace) {
             return (raw.trim().to_string(), None);
         }
+        if raw[start + 1..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        {
+            return (raw.trim().to_string(), None);
+        }
         let query = raw[start + 1..].trim();
         if query.is_empty() {
             return (raw.trim().to_string(), None);
         }
+        let Some((project, _)) = self.matched_project_prefix(query, None) else {
+            return (raw.trim().to_string(), None);
+        };
 
         let cleaned = raw[..start].trim_end().to_string();
-        (cleaned, Some(query.to_string()))
+        (cleaned, Some(project.name.clone()))
     }
 
     fn sync_editor_due_from_recurrence(
@@ -14637,6 +14666,31 @@ mod tests {
     }
 
     #[test]
+    fn task_editor_project_field_edit_keeps_literal_hash_in_title() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Remove the # symbol".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("submit should succeed");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+
+        app.handle_key(crossterm::event::KeyCode::F(3))
+            .expect("focus should switch to project");
+        app.handle_key(crossterm::event::KeyCode::Backspace)
+            .expect("project edit should succeed");
+
+        let editor = app.task_editor_view().expect("editor should be visible");
+        assert_eq!(editor.title_value, "Remove the # symbol");
+    }
+
+    #[test]
     fn task_editor_title_hash_query_shows_project_suggestions() {
         let mut app = test_app();
         app.database
@@ -15025,6 +15079,26 @@ mod tests {
             task_tags,
             vec!["Work".to_string(), "Next Action".to_string()]
         );
+    }
+
+    #[test]
+    fn create_popup_keeps_literal_hash_and_at_symbols_in_title() {
+        let mut app = test_app();
+
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in "Remove the # symbol and the @ sign in the UI".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should submit task");
+
+        let task = app.selected_task().expect("task should be selected");
+        assert_eq!(task.title, "Remove the # symbol and the @ sign in the UI");
+        assert!(app.task_tags(task.id).is_empty());
+        assert_eq!(task.project_id, app.inbox_project_id());
     }
 
     #[test]
