@@ -7,6 +7,10 @@ a valid first-run state.
 Open in-app help with `?` at any time. The footer also shows shortcuts for the
 currently focused panel.
 
+## Demo
+
+![Triginta screen recording](assets/triginta.gif)
+
 ## Layout
 
 The TUI is organized into focused panels:

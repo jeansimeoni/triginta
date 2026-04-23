@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/triginta-logo.png" alt="Triginta logo" width="384">
+</p>
+
 # Triginta
 
 [![CI](https://github.com/jeansimeoni/triginta/actions/workflows/ci.yml/badge.svg)](https://github.com/jeansimeoni/triginta/actions/workflows/ci.yml)
@@ -11,10 +15,12 @@ history in a local SQLite database so the app remains useful offline.
 Todoist sync support is being built behind explicit integration boundaries, but
 local SQLite remains the source of truth.
 
-## Screenshot
+## Demo
 
-A screenshot or short GIF will live under `docs/assets/` once a release-ready
-capture is available.
+![Triginta screen recording](docs/assets/triginta.gif)
+
+The full-size logo and app icon live under `docs/assets/` for README, release,
+and website usage.
 
 ## Features
 
