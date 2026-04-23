@@ -1330,10 +1330,16 @@ const GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
         description: "sync status",
     },
     ShortcutTip {
+        keys: "Shift+D",
+        description: "donate",
+    },
+    ShortcutTip {
         keys: "q",
         description: "quit",
     },
 ];
+
+const DONATE_URL: &str = "https://github.com/jeansimeoni/triginta#donate";
 
 const TIMER_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
@@ -3992,6 +3998,10 @@ impl App {
 
     pub fn donate_label(&self) -> &'static str {
         "Donate"
+    }
+
+    pub fn donate_url(&self) -> &'static str {
+        DONATE_URL
     }
 
     pub fn sync_status_line(&self) -> Option<&str> {
@@ -7950,6 +7960,41 @@ impl App {
         Ok(())
     }
 
+    fn open_external_url(&mut self, url: &str) -> Result<()> {
+        let mut stdout = std::io::stdout();
+        disable_raw_mode().context("failed to disable raw mode before opening URL")?;
+        execute!(stdout, LeaveAlternateScreen)
+            .context("failed to leave alternate screen before opening URL")?;
+
+        let launch_result = {
+            #[cfg(target_os = "macos")]
+            {
+                Command::new("open").arg(url).status()
+            }
+            #[cfg(target_os = "windows")]
+            {
+                Command::new("cmd").args(["/C", "start", "", url]).status()
+            }
+            #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+            {
+                Command::new("xdg-open").arg(url).status()
+            }
+        }
+        .context("failed to launch browser for external URL");
+
+        execute!(stdout, EnterAlternateScreen)
+            .context("failed to re-enter alternate screen after opening URL")?;
+        enable_raw_mode().context("failed to enable raw mode after opening URL")?;
+
+        let status = launch_result?;
+        if !status.success() {
+            anyhow::bail!("external URL opener exited with status {status}");
+        }
+
+        self.needs_full_redraw = true;
+        Ok(())
+    }
+
     fn edit_description_in_external_editor(&mut self, editor: &mut TaskEditorState) -> Result<()> {
         self.edit_markdown_in_external_editor(
             &mut editor.description_input,
@@ -10904,6 +10949,9 @@ impl App {
                 if self.todoist_sync.is_some() {
                     self.sync_status_panel_open = !self.sync_status_panel_open;
                 }
+            }
+            KeyCode::Char('D') => {
+                self.open_external_url(self.donate_url())?;
             }
             KeyCode::Char('3') => {
                 self.focused_panel = PanelFocus::Navigation;
@@ -18480,6 +18528,7 @@ mod tests {
         }
 
         assert!(has_tip(GLOBAL_SHORTCUTS, "c", "new task"));
+        assert!(has_tip(GLOBAL_SHORTCUTS, "Shift+D", "donate"));
         assert!(has_tip(HISTORY_SHORTCUTS, "Home/End", "jump first/last"));
         assert!(has_tip(TAGS_SHORTCUTS, "PgUp/PgDn", "page"));
         assert!(has_tip(TAGS_SHORTCUTS, "Home/End", "jump first/last"));
@@ -18489,6 +18538,15 @@ mod tests {
         assert!(has_tip(FAVORITES_SHORTCUTS, "Enter", "open task list"));
         assert!(has_tip(INPUT_POPUP_SHORTCUTS, "Tab", "accept suggestion"));
         assert!(has_tip(SORT_POPUP_SHORTCUTS, "Esc/o", "cancel"));
+    }
+
+    #[test]
+    fn app_exposes_readme_donate_url() {
+        let app = test_app();
+        assert_eq!(
+            app.donate_url(),
+            "https://github.com/jeansimeoni/triginta#donate"
+        );
     }
 
     #[test]

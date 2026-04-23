@@ -2093,6 +2093,13 @@ fn render_status_bar(
         app.donate_label(),
         Style::default().fg(palette.accent),
     ));
+    right_spans.push(Span::raw(" "));
+    right_spans.push(Span::styled(
+        "[D]",
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
     right_spans.push(Span::raw("  "));
     right_spans.push(Span::styled(
         app.app_version(),
@@ -3493,6 +3500,10 @@ const STATUS_BAR_GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
     ShortcutTip {
         keys: "?",
         description: "help",
+    },
+    ShortcutTip {
+        keys: "D",
+        description: "donate",
     },
     ShortcutTip {
         keys: "q",
@@ -6964,6 +6975,11 @@ mod tests {
     fn status_bar_global_shortcuts_use_compact_focus_tip() {
         assert_eq!(STATUS_BAR_GLOBAL_SHORTCUTS[0].keys, "1-8/Tab");
         assert_eq!(STATUS_BAR_GLOBAL_SHORTCUTS[0].description, "focus panel");
+        assert!(
+            STATUS_BAR_GLOBAL_SHORTCUTS
+                .iter()
+                .any(|tip| tip.keys == "D" && tip.description == "donate")
+        );
     }
 
     #[test]
