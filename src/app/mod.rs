@@ -6021,6 +6021,38 @@ impl App {
             .map(|task| task.id)
     }
 
+    fn accept_task_editor_parent_suggestion(&self, editor: &mut TaskEditorState) -> bool {
+        let suggestions = self.parent_task_suggestions(
+            editor.parent_input.as_str(),
+            editor.task_id,
+            editor.project_id,
+        );
+        let Some(parent_task) = suggestions
+            .get(
+                editor
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        else {
+            return false;
+        };
+        let already_selected = editor.parent_task_id == Some(parent_task.id)
+            && editor
+                .parent_input
+                .trim()
+                .eq_ignore_ascii_case(parent_task.title.as_str());
+        if already_selected {
+            return false;
+        }
+
+        editor.parent_task_id = Some(parent_task.id);
+        editor.parent_input = parent_task.title.clone();
+        editor.parent_cursor = editor.parent_input.len();
+        editor.suggestion_index = 0;
+        true
+    }
+
     fn task_is_descendant_of(&self, task_id: TaskId, potential_ancestor: TaskId) -> bool {
         let mut current = self
             .screen_data
@@ -10115,21 +10147,8 @@ impl App {
                         return Ok(true);
                     }
                     if editor.focused_field == TaskEditorField::Parent
-                        && let Some(parent_task_id) = self.resolve_parent_task_input(
-                            editor.parent_input.as_str(),
-                            editor.task_id,
-                            editor.project_id,
-                        )
-                        && let Some(parent_task) = self
-                            .screen_data
-                            .tasks
-                            .iter()
-                            .find(|task| task.id == parent_task_id)
+                        && self.accept_task_editor_parent_suggestion(&mut editor)
                     {
-                        editor.parent_task_id = Some(parent_task_id);
-                        editor.parent_input = parent_task.title.clone();
-                        editor.parent_cursor = editor.parent_input.len();
-                        editor.suggestion_index = 0;
                         self.task_editor = Some(editor);
                         return Ok(true);
                     }
@@ -10199,21 +10218,8 @@ impl App {
                         return Ok(true);
                     }
                     if editor.focused_field == TaskEditorField::Parent
-                        && let Some(parent_task_id) = self.resolve_parent_task_input(
-                            editor.parent_input.as_str(),
-                            editor.task_id,
-                            editor.project_id,
-                        )
-                        && let Some(parent_task) = self
-                            .screen_data
-                            .tasks
-                            .iter()
-                            .find(|task| task.id == parent_task_id)
+                        && self.accept_task_editor_parent_suggestion(&mut editor)
                     {
-                        editor.parent_task_id = Some(parent_task_id);
-                        editor.parent_input = parent_task.title.clone();
-                        editor.parent_cursor = editor.parent_input.len();
-                        editor.suggestion_index = 0;
                         self.task_editor = Some(editor);
                         return Ok(true);
                     }
@@ -16328,6 +16334,74 @@ mod tests {
             app.selected_task().expect("task should exist").project_id,
             target.id
         );
+    }
+
+    #[test]
+    fn task_editor_parent_field_enter_accepts_suggestion_then_saves() {
+        let mut app = test_app();
+        let inbox_project_id = app.inbox_project_id();
+        let now = Local::now();
+        let repository = app.database.task_repository();
+        let alpha_parent = repository
+            .create("Alpha Parent", inbox_project_id, None, now)
+            .expect("alpha parent should create");
+        let beta_parent = repository
+            .create("Beta Parent", inbox_project_id, None, now)
+            .expect("beta parent should create");
+        let child = repository
+            .create("Child Task", inbox_project_id, None, now)
+            .expect("child task should create");
+        repository
+            .update(
+                child.id,
+                &TaskUpdate {
+                    title: "Child Task".to_string(),
+                    description: String::new(),
+                    project_id: inbox_project_id,
+                    section_id: None,
+                    parent_task_id: Some(alpha_parent.id),
+                    priority: TaskPriority::P4,
+                    due: None,
+                },
+            )
+            .expect("child should be assigned to parent");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.focused_panel = PanelFocus::RightPane;
+        app.active_right_panel_tab = RightPanelTab::Tasks;
+        app.selected_task_id = Some(alpha_parent.id);
+        app.expand_selected_task();
+        app.selected_task_id = Some(child.id);
+        app.open_edit_task_popup();
+        assert!(app.task_editor_view().is_some());
+
+        app.handle_key(crossterm::event::KeyCode::F(9))
+            .expect("parent field should focus");
+        for _ in 0.."Alpha Parent".len() {
+            app.handle_key(crossterm::event::KeyCode::Backspace)
+                .expect("parent field should clear");
+        }
+        for character in "Bet".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("parent field typing should work");
+        }
+        let editor = app.task_editor_view().expect("editor should stay open");
+        assert_eq!(editor.parent_suggestions, vec!["Beta Parent"]);
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should accept parent suggestion");
+        let editor = app.task_editor_view().expect("editor should stay open");
+        assert_eq!(editor.parent_value, "Beta Parent");
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should save after accepting parent");
+        assert!(app.task_editor_view().is_none());
+        let updated_child = app
+            .screen_data
+            .tasks
+            .iter()
+            .find(|task| task.id == child.id)
+            .expect("child task should exist");
+        assert_eq!(updated_child.parent_task_id, Some(beta_parent.id));
     }
 
     #[test]
