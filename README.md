@@ -104,7 +104,7 @@ documentation work.
 
 - ![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-EA4AAA?logo=githubsponsors&logoColor=white) [GitHub Sponsors](https://github.com/sponsors/jeansimeoni)
 - ![PayPal](https://img.shields.io/badge/PayPal-003087?logo=paypal&logoColor=white) [PayPal](https://www.paypal.com/donate/?business=AVKKMCJ3P77HG&no_recurring=0&item_name=Help+the+development+of+Triginta&currency_code=BRL)
-- ![Bitcoin](https://img.shields.io/badge/Bitcoin-F7931A?logo=bitcoin&logoColor=white) [Bitcoin](bitcoin:166SB7XLCgoZM75paAag5XGgjuHTdxFBgY) `166SB7XLCgoZM75paAag5XGgjuHTdxFBgY` *BTC network only.*
+- ![Bitcoin](https://img.shields.io/badge/Bitcoin-F7931A?logo=bitcoin&logoColor=white) [Bitcoin](bitcoin:166SB7XLCgoZM75paAag5XGgjuHTdxFBgY) `166SB7XLCgoZM75paAag5XGgjuHTdxFBgY` _BTC network only._
 
 ## Documentation
 
