@@ -2110,6 +2110,7 @@ struct TodoistSyncUiState {
     preferred_language: Option<String>,
     pending_push_at: Option<DateTime<Local>>,
     queued_trigger: Option<SyncTrigger>,
+    in_flight_trigger: Option<SyncTrigger>,
     next_poll_at: DateTime<Local>,
     poll_interval: Duration,
     last_seen_outbox_len: usize,
@@ -2372,6 +2373,7 @@ impl App {
                 preferred_language: None,
                 pending_push_at: None,
                 queued_trigger: None,
+                in_flight_trigger: None,
                 next_poll_at: Local::now(),
                 poll_interval: poll_min,
                 last_seen_outbox_len: 0,
@@ -11698,11 +11700,22 @@ impl App {
                 return;
             }
             sync.is_running = true;
+            sync.in_flight_trigger = Some(trigger);
             sync.activity_until = Some(now + ChronoDuration::seconds(3));
         }
 
+        if self.todoist_sync_worker.is_none() {
+            self.todoist_sync_worker = self.config_paths.as_ref().map(|paths| {
+                Self::spawn_todoist_sync_worker(
+                    paths.db_path.clone(),
+                    self.config.integrations.todoist.clone(),
+                    debug_dry_run_sync_enabled(),
+                )
+            });
+        }
+
         let Some(worker) = self.todoist_sync_worker.as_ref() else {
-            self.run_todoist_sync_inline(trigger, now);
+            self.apply_todoist_sync_error(trigger, now, "sync worker unavailable");
             return;
         };
 
@@ -11712,7 +11725,7 @@ impl App {
             .is_err()
         {
             self.todoist_sync_worker = None;
-            self.run_todoist_sync_inline(trigger, now);
+            self.apply_todoist_sync_error(trigger, now, "failed to dispatch sync to worker");
         }
     }
 
@@ -11735,26 +11748,22 @@ impl App {
                 }
                 Err(TryRecvError::Empty) => return Ok(()),
                 Err(TryRecvError::Disconnected) => {
+                    if let Some(trigger) = self
+                        .todoist_sync
+                        .as_ref()
+                        .and_then(|sync| sync.in_flight_trigger)
+                    {
+                        self.apply_todoist_sync_error(
+                            trigger,
+                            Local::now(),
+                            "sync worker disconnected",
+                        );
+                    }
                     self.todoist_sync_worker = None;
                     return Ok(());
                 }
             }
         }
-    }
-
-    fn run_todoist_sync_inline(&mut self, trigger: SyncTrigger, now: DateTime<Local>) {
-        let Some(sync) = self.todoist_sync.as_ref() else {
-            return;
-        };
-        let provider = sync.provider.clone();
-        let sync_result = provider.sync(&self.database.sync_repository(), trigger);
-
-        self.finish_todoist_sync_cycle(
-            trigger,
-            sync_result.map_err(|error| error.to_string()),
-            now,
-        )
-        .ok();
     }
 
     fn finish_todoist_sync_cycle(
@@ -11809,6 +11818,7 @@ impl App {
         sync.latest_status_line = format!("sync error [{}]: {}", trigger.as_str(), error);
         sync.last_status = "error".to_string();
         sync.last_trigger = Some(trigger);
+        sync.in_flight_trigger = None;
         sync.last_error = Some(error.to_string());
         sync.last_sync_at = Some(now);
         sync.pending_outbox = sync.last_seen_outbox_len;
@@ -11874,6 +11884,7 @@ impl App {
         };
         sync.last_status = report.status.clone();
         sync.last_trigger = Some(report.trigger);
+        sync.in_flight_trigger = None;
         sync.last_error = report.last_error.clone();
         if report.preferred_language.is_some() {
             sync.preferred_language = report.preferred_language.clone();
@@ -12099,32 +12110,12 @@ pub fn run(options: RunOptions) -> Result<()> {
         configured = provider.is_configured(),
         "integration boundary initialized"
     );
-    if config.integrations.todoist.sync_on_startup {
-        match provider.sync(&database.sync_repository(), SyncTrigger::Startup) {
-            Ok(report) => {
-                info!(
-                    provider = report.provider,
-                    configured = report.configured,
-                    trigger = report.trigger.as_str(),
-                    status = report.status,
-                    pending_outbox = report.pending_outbox,
-                    delivered_outbox = report.delivered_outbox,
-                    failed_outbox = report.failed_outbox,
-                    "startup sync finished"
-                );
-            }
-            Err(error) => {
-                warn!(
-                    provider = provider.provider_name(),
-                    error = %error,
-                    "startup sync failed"
-                );
-            }
-        }
-    }
 
     let mut app = App::new(screen_data, config, Some(paths.clone()), theme, database);
     let mut terminal = setup_terminal()?;
+    if app.config.integrations.todoist.sync_on_startup && app.todoist_sync.is_some() {
+        app.dispatch_todoist_sync(SyncTrigger::Startup, Local::now());
+    }
 
     let result = run_event_loop(&mut terminal, &mut app);
     // Terminal state must be restored even if the event loop returned an error.
