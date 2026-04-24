@@ -1095,45 +1095,64 @@ impl TodoistRestClient {
     }
 
     fn post_json<T: DeserializeOwned>(&self, path: &str, body: &Value) -> Result<T> {
-        let response = self
-            .request_builder("POST", path)
+        let mut response = self
+            .post_request(path)
             .send_json(body)
             .map_err(map_ureq_error)?;
-        response.into_json::<T>().map_err(|error| anyhow!(error))
+        ensure_success_status(&mut response)?;
+        response
+            .body_mut()
+            .read_json::<T>()
+            .map_err(|error| anyhow!(error))
     }
 
     fn post_no_content(&self, path: &str, body: &Value) -> Result<()> {
-        self.request_builder("POST", path)
+        let mut response = self
+            .post_request(path)
             .send_json(body)
             .map_err(map_ureq_error)?;
+        ensure_success_status(&mut response)?;
         Ok(())
     }
 
     fn post_empty(&self, path: &str) -> Result<()> {
-        self.request_builder("POST", path)
-            .call()
+        let mut response = self
+            .post_request(path)
+            .send_empty()
             .map_err(map_ureq_error)?;
+        ensure_success_status(&mut response)?;
         Ok(())
     }
 
     fn delete(&self, path: &str) -> Result<()> {
-        self.request_builder("DELETE", path)
-            .call()
-            .map_err(map_ureq_error)?;
+        let mut response = self.delete_request(path).call().map_err(map_ureq_error)?;
+        ensure_success_status(&mut response)?;
         Ok(())
     }
 
-    fn request_builder(&self, method: &str, path: &str) -> ureq::Request {
+    fn post_request(&self, path: &str) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
         let url = format!("{TODOIST_API_BASE}{path}");
-        ureq::request(method, url.as_str())
-            .set("Authorization", format!("Bearer {}", self.token).as_str())
-            .set("X-Request-Id", self.correlation_id.as_str())
+        self.configure_request(ureq::post(url.as_str()))
+    }
+
+    fn delete_request(&self, path: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+        let url = format!("{TODOIST_API_BASE}{path}");
+        self.configure_request(ureq::delete(url.as_str()))
+    }
+
+    fn configure_request<B>(&self, request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+        request
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .header("Authorization", format!("Bearer {}", self.token).as_str())
+            .header("X-Request-Id", self.correlation_id.as_str())
     }
 
     fn sync_resources(&self, sync_token: &str) -> Result<TodoistSyncResponse> {
-        let response = self
-            .request_builder("POST", "/sync")
-            .send_form(&[
+        let mut response = self
+            .post_request("/sync")
+            .send_form([
                 ("sync_token", sync_token),
                 (
                     "resource_types",
@@ -1141,8 +1160,10 @@ impl TodoistRestClient {
                 ),
             ])
             .map_err(map_ureq_error)?;
+        ensure_success_status(&mut response)?;
         response
-            .into_json::<TodoistSyncResponse>()
+            .body_mut()
+            .read_json::<TodoistSyncResponse>()
             .map_err(|error| anyhow!(error))
     }
 }
@@ -1172,16 +1193,21 @@ fn value_id_as_string(value: &Value) -> Option<String> {
     })
 }
 
-fn map_ureq_error(error: ureq::Error) -> anyhow::Error {
-    match error {
-        ureq::Error::Status(status, response) => {
-            let body = response
-                .into_string()
-                .unwrap_or_else(|_| "<body unavailable>".to_string());
-            anyhow!("todoist API status {}: {}", status, body)
-        }
-        ureq::Error::Transport(transport) => anyhow!("todoist transport error: {}", transport),
+fn ensure_success_status(response: &mut ureq::http::Response<ureq::Body>) -> Result<()> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
     }
+
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .unwrap_or_else(|_| "<body unavailable>".to_string());
+    bail!("todoist API status {}: {}", status.as_u16(), body);
+}
+
+fn map_ureq_error(error: ureq::Error) -> anyhow::Error {
+    anyhow!("todoist transport error: {}", error)
 }
 
 fn read_token_from_command(program: &str, args: &[String], timeout: Duration) -> Result<String> {
