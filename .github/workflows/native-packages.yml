@@ -1,0 +1,65 @@
+name: Native Linux Packages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag or version to package, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  package-native-linux:
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - id: resolve
+        name: Resolve tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            tag="${{ github.event.release.tag_name }}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+
+          if [[ "$tag" != v* ]]; then
+            tag="v$tag"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Download Linux release archives
+        run: |
+          mkdir -p target/distrib
+          gh release download "${{ steps.resolve.outputs.tag }}" \
+            --dir target/distrib \
+            --pattern 'triginta-*-unknown-linux-musl.tar.xz'
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+
+      - name: Build .deb and .rpm packages
+        run: |
+          scripts/package-linux-native-artifacts.sh --version "${{ steps.resolve.outputs.tag }}" --artifact-dir target/distrib --output-dir target/distrib
+
+      - name: Verify .deb and .rpm packages
+        run: |
+          scripts/verify-native-linux-packages.sh target/distrib
+
+      - name: Upload native Linux packages to release
+        shell: bash
+        run: |
+          mapfile -t rpm_files < <(find target/distrib -type f -name '*.rpm' | sort)
+          gh release upload "${{ steps.resolve.outputs.tag }}" target/distrib/*.deb "${rpm_files[@]}" --clobber

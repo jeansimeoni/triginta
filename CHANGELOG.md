@@ -12,10 +12,15 @@ once public releases begin.
 
 - GPL v3 project license and public release metadata.
 - Security policy for pre-1.0 vulnerability reporting.
+- Homebrew tap publishing configuration for stable releases.
+- AUR packaging automation and maintainer bootstrap workflow for `triginta-bin`.
+- Native Linux `.deb` and `.rpm` packaging workflows attached to GitHub Releases.
+- Debian and Fedora container smoke-test workflow for downloadable native Linux packages.
 
 ### Changed
 
 - Package license metadata changed from MIT to `GPL-3.0-only`.
+- Installation docs and release runbooks now cover shell, Homebrew, AUR, and downloadable native Linux package flows.
 
 ## [0.1.0] - Unreleased
 
@@ -27,6 +32,7 @@ once public releases begin.
 - Todoist sync foundations behind explicit integration boundaries.
 - GitHub Release automation for prebuilt Linux/macOS archives, checksums,
   source archives, and a shell installer.
+- Downloadable Linux `.deb` and `.rpm` package artifacts built from the verified musl release archives.
 
 ### License
 

@@ -54,3 +54,9 @@ jobs:
 
       - name: Check dependency policy
         run: cargo deny check
+
+      - name: Check AUR packaging generation
+        run: scripts/check-aur-packaging.sh
+
+      - name: Check native package scripts
+        run: bash -n scripts/package-linux-native-artifacts.sh scripts/verify-native-linux-packages.sh

@@ -61,6 +61,12 @@ and duplicate-version impact before merging.
 Releases are maintainer-controlled and are published by the generated `dist`
 workflow from protected version tags such as `v0.1.0`.
 
+Stable package-manager publishing is layered on top of that release flow:
+
+- Homebrew formulas are published to `jeansimeoni/homebrew-tap`.
+- AUR metadata is published to `triginta-bin` on `aur.archlinux.org`.
+- Pre-release tags are not published to Homebrew or AUR.
+
 Before tagging a release:
 
 - Ensure `Cargo.toml` has the intended version.
@@ -103,6 +109,11 @@ The verification script checks archive contents, Linux musl linkage, and
 host-compatible `--version`/`--help` execution. Linux artifacts must not depend
 on system `libsqlite3`, `libssl`, or `libcrypto`.
 
+Downloadable `.deb` and `.rpm` packages are attached by the separate `Native
+Linux Packages` workflow after a GitHub Release is published. Prefer verifying
+that workflow in CI or from disposable containers instead of installing Debian
+or RPM packaging tools onto your main development machine.
+
 Local Linux-to-musl artifact builds require the cross-compilation tools reported
 by `dist`, such as `cargo-zigbuild` and Zig. If those tools are unavailable
 locally, run this artifact build and verification step in release CI or another
@@ -127,12 +138,49 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-After the workflow completes, verify that the GitHub Release contains archives,
-checksums, the source tarball, and the shell installer. Then test the installer
-from the published release URL.
+After the `Release` workflow completes, verify that the GitHub Release contains
+archives, checksums, the source tarball, and the shell installer. Then wait for
+the `Native Linux Packages` workflow to attach the `.deb` and `.rpm` artifacts.
+After both workflows succeed, test the installer from the published release
+URL, then run the manual `Native Package Smoke` workflow to validate x86_64
+`.deb` and `.rpm` installs in Debian and Fedora containers.
 
 Repository settings should protect `v*` tags so only maintainers can create or
 move release tags.
+
+Package-manager prerequisites:
+
+- Create the public GitHub repository `jeansimeoni/homebrew-tap`.
+- Add `HOMEBREW_TAP_TOKEN` to the `triginta` repository secrets with write
+  access to that tap repository.
+- Create a dedicated AUR SSH key for GitHub Actions and add the public key to
+  your AUR account.
+- Add `AUR_SSH_PRIVATE_KEY` and `AUR_KNOWN_HOSTS` to the `triginta` repository
+  secrets.
+- Optionally set repository variables `AUR_PACKAGER_NAME` and
+  `AUR_PACKAGER_EMAIL` to control the Git identity used for AUR commits.
+
+First AUR bootstrap:
+
+1. Generate `PKGBUILD` and `.SRCINFO` from the release `sha256.sum` file with
+   `scripts/generate-aur-triginta-bin.sh`.
+2. Clone `ssh://aur@aur.archlinux.org/triginta-bin.git`.
+3. Copy in the generated `PKGBUILD` and `.SRCINFO`, commit, and push once.
+
+After the first stable release completes:
+
+- Verify Homebrew installation with `brew install jeansimeoni/tap/triginta`.
+- Verify AUR installation with `yay -S triginta-bin`.
+- If the AUR publish workflow fails after the GitHub Release succeeds, fix the
+  packaging issue or secret configuration and rerun the `AUR` workflow with the
+  target stable tag and `publish=true`.
+
+Downloadable Linux package artifacts:
+
+- GitHub Releases now include `.deb` and `.rpm` packages built from the
+  release-ready Linux musl archives.
+- These are direct download artifacts only. Do not document apt or dnf
+  repositories until signed repository hosting exists and is tested.
 
 ## Private Tooling Policy
 

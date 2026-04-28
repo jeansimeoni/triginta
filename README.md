@@ -61,9 +61,11 @@ install -Dm755 target/release/triginta ~/.local/bin/triginta
 triginta --version
 ```
 
-The shell installer is available after a GitHub Release exists. Package-manager
-methods are not published yet. See [Install](docs/install.md) for details and
-uninstall steps.
+GitHub Releases provide prebuilt archives, a shell installer, and downloadable
+Linux `.deb`/`.rpm` packages. Stable Homebrew and AUR publishing are wired into
+the release process but require maintainer bootstrap before those
+package-manager commands become available. See [Install](docs/install.md) for
+the exact commands, current availability, and uninstall steps.
 
 ## Quick Start
 

@@ -1,8 +1,9 @@
 # Install
 
-Triginta can be built from source today. After the first GitHub Release is
-published, the release page will also provide prebuilt archives, checksums, and
-a shell installer.
+Triginta can be built from source today. GitHub Releases provide prebuilt
+archives, checksums, and a shell installer. Stable Homebrew and AUR publishing
+are configured from the same release artifacts once the maintainer-side tap and
+AUR bootstrap steps are complete.
 
 ## Requirements
 
@@ -75,15 +76,57 @@ methods above.
 Release archives include checksums. Verify downloaded archives against the
 corresponding `.sha256` file or `sha256.sum` from the GitHub Release.
 
+## Downloadable .deb And .rpm Packages
+
+GitHub Releases also include downloadable Linux packages built from the same
+musl release archives used by the shell installer.
+
+On Debian, Ubuntu, or compatible systems, install the matching `.deb` file:
+
+```bash
+sudo dpkg -i triginta_VERSION_ARCH.deb
+```
+
+On Fedora, RHEL, or other RPM-based systems, install the matching `.rpm` file:
+
+```bash
+sudo dnf install ./triginta-VERSION-RELEASE.ARCH.rpm
+```
+
+These are standalone downloadable packages, not apt or dnf repository feeds.
+There is no signed apt or dnf repository yet.
+
 ## Homebrew
 
-A Homebrew formula is not published yet. Until it exists, use the source or
+Stable releases can be published to Homebrew through
+`jeansimeoni/homebrew-tap`. Once that tap has been bootstrapped and a stable
+release has completed successfully, install with:
+
+```bash
+brew install jeansimeoni/tap/triginta
+```
+
+Homebrew publication is stable-only. Pre-release tags such as `-rc` are not
+published to the tap.
+
+If the formula is not available yet, use the shell installer, source build, or
 manual local install methods above.
 
 ## AUR And yay
 
-An Arch User Repository package is not published yet. Until it exists, use the
-source or manual local install methods above.
+Stable releases can also publish `triginta-bin` to the Arch User Repository.
+Once the package has been bootstrapped on AUR and the publish workflow has run
+successfully, install with:
+
+```bash
+yay -S triginta-bin
+```
+
+The AUR package installs the prebuilt Linux musl archive from the matching
+GitHub Release. Pre-release tags are not published automatically.
+
+If `triginta-bin` is not available yet, use the shell installer, source build,
+or manual local install methods above.
 
 ## Update
 
@@ -113,6 +156,30 @@ rm -f ~/.local/bin/triginta
 ```
 
 To remove the source checkout, delete the cloned repository directory.
+
+For Homebrew, uninstall with:
+
+```bash
+brew uninstall triginta
+```
+
+For AUR/yay, uninstall with:
+
+```bash
+yay -R triginta-bin
+```
+
+For `.deb` installs, uninstall with:
+
+```bash
+sudo apt remove triginta
+```
+
+For `.rpm` installs, uninstall with:
+
+```bash
+sudo dnf remove triginta
+```
 
 To remove local app data, delete the platform app data and config directories.
 If you used `TRIGINTA_DATA_DIR`, delete that directory instead. Be careful:
