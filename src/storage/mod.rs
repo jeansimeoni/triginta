@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 Jean Simeoni
 
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, NaiveDate, Utc};
@@ -549,6 +549,7 @@ impl Database {
         // handle lives at least as long as any repository borrowed from it.
         let connection = Connection::open(path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
+        Self::configure_connection(&connection, true)?;
         let database = Self { connection };
         database.initialize()?;
         Ok(database)
@@ -557,9 +558,28 @@ impl Database {
     pub fn open_in_memory() -> Result<Self> {
         let connection =
             Connection::open_in_memory().context("failed to open in-memory database")?;
+        Self::configure_connection(&connection, false)?;
         let database = Self { connection };
         database.initialize()?;
         Ok(database)
+    }
+
+    fn configure_connection(connection: &Connection, enable_wal: bool) -> Result<()> {
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .context("failed to configure SQLite busy timeout")?;
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .context("failed to enable SQLite foreign keys")?;
+        if enable_wal {
+            connection
+                .execute_batch(
+                    "PRAGMA journal_mode = WAL;
+                     PRAGMA synchronous = NORMAL;",
+                )
+                .context("failed to enable SQLite WAL mode")?;
+        }
+        Ok(())
     }
 
     fn initialize(&self) -> Result<()> {
@@ -4004,6 +4024,7 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
 mod tests {
     use anyhow::Result;
     use chrono::{Local, NaiveDate, Timelike, Utc};
+    use tempfile::tempdir;
 
     use crate::domain::{
         FilterColor, FilterUpdate, ProjectColor, ProjectUpdate, TagColor, TagUpdate, TaskDue,
@@ -4048,6 +4069,21 @@ mod tests {
         assert_eq!(stats.total_break_seconds, 0);
         assert_eq!(stats.completed_tasks, 0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn file_backed_database_uses_wal_journaling() -> Result<()> {
+        let tempdir = tempdir()?;
+        let database_path = tempdir.path().join("triginta.sqlite3");
+        let database = Database::open(database_path.as_path())?;
+
+        let journal_mode: String =
+            database
+                .connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+
+        assert_eq!(journal_mode.to_lowercase(), "wal");
         Ok(())
     }
 
