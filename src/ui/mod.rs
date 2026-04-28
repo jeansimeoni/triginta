@@ -2039,36 +2039,6 @@ fn render_status_bar(
     frame.render_widget(Paragraph::new(left), inner);
 
     let sync_indicator = app.sync_indicator_view();
-    let sync_label = sync_indicator.as_ref().map(|status| {
-        format!(
-            "{} {} [S]",
-            sync_indicator_glyph(status.state, symbols),
-            status.integration_name
-        )
-    });
-    let right_width = app
-        .donate_label()
-        .width()
-        .saturating_add(app.app_version().width())
-        .saturating_add(5)
-        .saturating_add(
-            sync_label
-                .as_ref()
-                .map(|label| label.width().saturating_add(2))
-                .unwrap_or(0),
-        ) as u16;
-    let left_width = app.app_name().width() as u16;
-    let gutter = 2u16;
-
-    let right_x = inner
-        .x
-        .saturating_add(inner.width.saturating_sub(right_width.min(inner.width)));
-    let right_area = Rect::new(
-        right_x,
-        inner.y,
-        inner.width.saturating_sub(right_x - inner.x),
-        1,
-    );
     let mut right_spans = Vec::new();
     if let Some(status) = sync_indicator {
         right_spans.push(Span::styled(
@@ -2105,6 +2075,19 @@ fn render_status_bar(
         app.app_version(),
         Style::default().fg(palette.subtle_text),
     ));
+    let right_width = status_bar_spans_width(right_spans.as_slice()) as u16;
+    let left_width = app.app_name().width() as u16;
+    let gutter = 2u16;
+
+    let right_x = inner
+        .x
+        .saturating_add(inner.width.saturating_sub(right_width.min(inner.width)));
+    let right_area = Rect::new(
+        right_x,
+        inner.y,
+        inner.width.saturating_sub(right_x - inner.x),
+        1,
+    );
     let right = Line::from(right_spans).right_aligned();
     frame.render_widget(Paragraph::new(right), right_area);
 
@@ -3450,6 +3433,10 @@ fn footer_shortcuts_line(app: &App, symbols: Symbols, width: usize) -> String {
     }
 
     fit_footer_parts(parts.as_slice(), width)
+}
+
+fn status_bar_spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| span.content.as_ref().width()).sum()
 }
 
 fn status_bar_panel_shortcuts(app: &App) -> Vec<ShortcutTip> {
@@ -6670,7 +6657,7 @@ mod tests {
         markdown_inline_spans, markdown_inline_tokens, navigation_group_status_bar_tips,
         preview_panel_lines, preview_panel_required_height, responsive_bar_width,
         statistics_footer_hints, status_bar_keys_label, task_details_footer_hints,
-        terminal_too_small, timer_footer_hints,
+        terminal_too_small, timer_footer_hints, status_bar_spans_width,
     };
     use crate::app::{ShortcutTip, SidebarTab};
     use crate::config::GlyphMode;
@@ -6678,7 +6665,7 @@ mod tests {
     use crate::theme::{ProjectColorPalette, ThemePalette};
     use crate::ui::symbols::Symbols;
     use ratatui::style::Color;
-    use ratatui::text::Line;
+    use ratatui::text::{Line, Span};
 
     fn test_palette() -> ThemePalette {
         ThemePalette {
@@ -7018,6 +7005,19 @@ mod tests {
         let line =
             footer_with_filter_indicator(Line::from(" sort manual "), true, symbols, palette);
         assert!(line.to_string().contains("f"));
+    }
+
+    #[test]
+    fn status_bar_spans_width_counts_donate_shortcut_and_rc_version() {
+        let spans = vec![
+            Span::raw("Donate"),
+            Span::raw(" "),
+            Span::raw("[D]"),
+            Span::raw("  "),
+            Span::raw("0.1.0-rc.4"),
+        ];
+
+        assert_eq!(status_bar_spans_width(spans.as_slice()), 22);
     }
 
     #[test]
