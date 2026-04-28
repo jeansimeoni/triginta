@@ -5,10 +5,13 @@ artifact_dir="target/distrib"
 output_dir="target/distrib"
 version=""
 formats="deb,rpm"
+target_filter=""
+deb_arch_filter=""
+rpm_arch_filter=""
 
 usage() {
     cat >&2 <<'EOF'
-usage: package-linux-native-artifacts.sh --version <version> [--artifact-dir <dir>] [--output-dir <dir>] [--formats deb,rpm]
+usage: package-linux-native-artifacts.sh --version <version> [--artifact-dir <dir>] [--output-dir <dir>] [--formats deb,rpm] [--target <rust-target>] [--deb-arch <deb-arch>] [--rpm-arch <rpm-arch>]
 EOF
     exit 1
 }
@@ -33,6 +36,21 @@ while [[ $# -gt 0 ]]; do
         --formats)
             [[ $# -ge 2 ]] || usage
             formats="$2"
+            shift 2
+            ;;
+        --target)
+            [[ $# -ge 2 ]] || usage
+            target_filter="$2"
+            shift 2
+            ;;
+        --deb-arch)
+            [[ $# -ge 2 ]] || usage
+            deb_arch_filter="$2"
+            shift 2
+            ;;
+        --rpm-arch)
+            [[ $# -ge 2 ]] || usage
+            rpm_arch_filter="$2"
             shift 2
             ;;
         *)
@@ -210,6 +228,17 @@ EOF
 
 for package_def in "${package_archives[@]}"; do
     IFS=':' read -r rust_target deb_arch rpm_arch <<<"$package_def"
+
+    if [[ -n "$target_filter" && "$rust_target" != "$target_filter" ]]; then
+        continue
+    fi
+    if [[ -n "$deb_arch_filter" && "$deb_arch" != "$deb_arch_filter" ]]; then
+        continue
+    fi
+    if [[ -n "$rpm_arch_filter" && "$rpm_arch" != "$rpm_arch_filter" ]]; then
+        continue
+    fi
+
     archive_path="$artifact_dir/triginta-$rust_target.tar.xz"
     [[ -f "$archive_path" ]] || {
         printf 'error: required release archive not found: %s\n' "$archive_path" >&2

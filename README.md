@@ -5,7 +5,7 @@
 # Triginta
 
 [![CI](https://github.com/jeansimeoni/triginta/actions/workflows/ci.yml/badge.svg)](https://github.com/jeansimeoni/triginta/actions/workflows/ci.yml)
-[![Latest Release](https://img.shields.io/github/v/release/jeansimeoni/triginta?sort=semver)](https://github.com/jeansimeoni/triginta/releases)
+[![Latest Release](https://img.shields.io/github/v/release/jeansimeoni/triginta?include_prereleases&sort=semver)](https://github.com/jeansimeoni/triginta/releases)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 
 Triginta is a local-first terminal app for Pomodoro tracking and task
