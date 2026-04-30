@@ -6656,8 +6656,8 @@ mod tests {
         input_window_view, is_status_bar_global_focus_tip, markdown_first_plain_line,
         markdown_inline_spans, markdown_inline_tokens, navigation_group_status_bar_tips,
         preview_panel_lines, preview_panel_required_height, responsive_bar_width,
-        statistics_footer_hints, status_bar_keys_label, task_details_footer_hints,
-        terminal_too_small, timer_footer_hints, status_bar_spans_width,
+        statistics_footer_hints, status_bar_keys_label, status_bar_spans_width,
+        task_details_footer_hints, terminal_too_small, timer_footer_hints,
     };
     use crate::app::{ShortcutTip, SidebarTab};
     use crate::config::GlyphMode;
@@ -7014,7 +7014,7 @@ mod tests {
             Span::raw(" "),
             Span::raw("[D]"),
             Span::raw("  "),
-            Span::raw("0.1.0-rc.4"),
+            Span::raw("0.1.0-rc.5"),
         ];
 
         assert_eq!(status_bar_spans_width(spans.as_slice()), 22);

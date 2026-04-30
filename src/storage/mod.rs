@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at TEXT NOT NULL,
     synced_at TEXT,
     todoist_id TEXT,
+    todoist_sync_id TEXT,
     completed_at TEXT,
     deleted_at TEXT,
     due_date TEXT,
@@ -147,6 +148,7 @@ CREATE TABLE IF NOT EXISTS app_metadata (
 CREATE TABLE IF NOT EXISTS sync_state (
     provider TEXT PRIMARY KEY,
     sync_token TEXT,
+    completed_tasks_synced_until TEXT,
     last_synced_at TEXT,
     last_status TEXT,
     last_error TEXT,
@@ -174,6 +176,7 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
 pub struct SyncStateRecord {
     pub provider: String,
     pub sync_token: Option<String>,
+    pub completed_tasks_synced_until: Option<String>,
     pub last_synced_at: Option<String>,
     pub last_status: Option<String>,
     pub last_error: Option<String>,
@@ -201,6 +204,7 @@ pub struct SyncOutboxEntry {
 pub struct SyncTaskSnapshot {
     pub local_id: i64,
     pub todoist_id: Option<String>,
+    pub todoist_sync_id: Option<String>,
     pub project_todoist_id: Option<String>,
     pub project_is_inbox: bool,
     pub section_todoist_id: Option<String>,
@@ -313,6 +317,7 @@ pub struct RemoteFilterRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteTaskRecord {
     pub todoist_id: String,
+    pub todoist_sync_id: Option<String>,
     pub project_todoist_id: Option<String>,
     pub section_todoist_id: Option<String>,
     pub parent_todoist_id: Option<String>,
@@ -462,6 +467,7 @@ pub trait PomodoroRepository {
 pub trait SyncRepository {
     fn get_state(&self, provider: &str) -> Result<Option<SyncStateRecord>>;
     fn upsert_state(&self, state: &SyncStateRecord) -> Result<()>;
+    fn latest_pending_outbox_id(&self, provider: &str) -> Result<Option<i64>>;
     fn list_outbox(&self, provider: &str, limit: i64) -> Result<Vec<SyncOutboxEntry>>;
     fn list_ready_outbox(
         &self,
@@ -635,6 +641,10 @@ impl Database {
         )?;
         self.ensure_tasks_column("synced_at", "ALTER TABLE tasks ADD COLUMN synced_at TEXT")?;
         self.ensure_tasks_column("todoist_id", "ALTER TABLE tasks ADD COLUMN todoist_id TEXT")?;
+        self.ensure_tasks_column(
+            "todoist_sync_id",
+            "ALTER TABLE tasks ADD COLUMN todoist_sync_id TEXT",
+        )?;
         self.ensure_projects_column(
             "updated_at",
             "ALTER TABLE projects ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
@@ -676,6 +686,10 @@ impl Database {
             "ALTER TABLE filters ADD COLUMN todoist_id TEXT",
         )?;
         self.ensure_sync_tables()?;
+        self.ensure_sync_state_column(
+            "completed_tasks_synced_until",
+            "ALTER TABLE sync_state ADD COLUMN completed_tasks_synced_until TEXT",
+        )?;
         self.ensure_sync_outbox_column(
             "error_code",
             "ALTER TABLE sync_outbox ADD COLUMN error_code TEXT",
@@ -729,6 +743,10 @@ impl Database {
 
     fn ensure_sync_outbox_column(&self, column_name: &str, alter_sql: &str) -> Result<()> {
         self.ensure_table_column("sync_outbox", column_name, alter_sql)
+    }
+
+    fn ensure_sync_state_column(&self, column_name: &str, alter_sql: &str) -> Result<()> {
+        self.ensure_table_column("sync_state", column_name, alter_sql)
     }
 
     fn ensure_table_column(
@@ -820,6 +838,12 @@ impl Database {
             [],
         )?;
         self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_todoist_sync_id_active
+             ON tasks(todoist_sync_id)
+             WHERE deleted_at IS NULL AND todoist_sync_id IS NOT NULL",
+            [],
+        )?;
+        self.connection.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_todoist_id_active
              ON tags(todoist_id)
              WHERE deleted_at IS NULL AND todoist_id IS NOT NULL",
@@ -844,6 +868,7 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS sync_state (
                 provider TEXT PRIMARY KEY,
                 sync_token TEXT,
+                completed_tasks_synced_until TEXT,
                 last_synced_at TEXT,
                 last_status TEXT,
                 last_error TEXT,
@@ -1115,7 +1140,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
     fn get_state(&self, provider: &str) -> Result<Option<SyncStateRecord>> {
         self.connection
             .query_row(
-                "SELECT provider, sync_token, last_synced_at, last_status, last_error, updated_at
+                "SELECT provider, sync_token, completed_tasks_synced_until,
+                        last_synced_at, last_status, last_error, updated_at
                  FROM sync_state
                  WHERE provider = ?1",
                 params![provider],
@@ -1123,10 +1149,11 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     Ok(SyncStateRecord {
                         provider: row.get(0)?,
                         sync_token: row.get(1)?,
-                        last_synced_at: row.get(2)?,
-                        last_status: row.get(3)?,
-                        last_error: row.get(4)?,
-                        updated_at: row.get(5)?,
+                        completed_tasks_synced_until: row.get(2)?,
+                        last_synced_at: row.get(3)?,
+                        last_status: row.get(4)?,
+                        last_error: row.get(5)?,
+                        updated_at: row.get(6)?,
                     })
                 },
             )
@@ -1136,10 +1163,14 @@ impl SyncRepository for SqliteSyncRepository<'_> {
 
     fn upsert_state(&self, state: &SyncStateRecord) -> Result<()> {
         self.connection.execute(
-            "INSERT INTO sync_state(provider, sync_token, last_synced_at, last_status, last_error, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO sync_state(
+                 provider, sync_token, completed_tasks_synced_until,
+                 last_synced_at, last_status, last_error, updated_at
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(provider) DO UPDATE SET
                sync_token = excluded.sync_token,
+               completed_tasks_synced_until = excluded.completed_tasks_synced_until,
                last_synced_at = excluded.last_synced_at,
                last_status = excluded.last_status,
                last_error = excluded.last_error,
@@ -1147,6 +1178,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             params![
                 state.provider,
                 state.sync_token,
+                state.completed_tasks_synced_until,
                 state.last_synced_at,
                 state.last_status,
                 state.last_error,
@@ -1154,6 +1186,20 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             ],
         )?;
         Ok(())
+    }
+
+    fn latest_pending_outbox_id(&self, provider: &str) -> Result<Option<i64>> {
+        self.connection
+            .query_row(
+                "SELECT MAX(id)
+                 FROM sync_outbox
+                 WHERE provider = ?1",
+                params![provider],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .context("failed to load latest sync outbox id")
     }
 
     fn list_outbox(&self, provider: &str, limit: i64) -> Result<Vec<SyncOutboxEntry>> {
@@ -1320,9 +1366,11 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                 let task = self
                     .connection
                     .query_row(
-                        "SELECT tasks.id, tasks.todoist_id, projects.todoist_id, sections.todoist_id, parent.todoist_id,
+                        "SELECT tasks.id, tasks.todoist_id, tasks.todoist_sync_id,
+                                projects.todoist_id, sections.todoist_id, parent.todoist_id,
                                 projects.is_inbox, tasks.title, tasks.description, tasks.priority,
-                                tasks.due_date, tasks.due_datetime_utc, tasks.due_timezone, tasks.due_string, tasks.due_lang, tasks.completed_at, tasks.deleted_at
+                                tasks.due_date, tasks.due_datetime_utc, tasks.due_timezone,
+                                tasks.due_string, tasks.due_lang, tasks.completed_at, tasks.deleted_at
                          FROM tasks
                          LEFT JOIN projects ON projects.id = tasks.project_id
                          LEFT JOIN sections ON sections.id = tasks.section_id
@@ -1333,20 +1381,21 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                             Ok(SyncTaskSnapshot {
                                 local_id: row.get(0)?,
                                 todoist_id: row.get(1)?,
-                                project_todoist_id: row.get(2)?,
-                                section_todoist_id: row.get(3)?,
-                                parent_todoist_id: row.get(4)?,
-                                project_is_inbox: row.get::<_, Option<i64>>(5)?.unwrap_or(0) != 0,
-                                title: row.get(6)?,
-                                description: row.get(7)?,
-                                priority: row.get(8)?,
-                                due_date: row.get(9)?,
-                                due_datetime_utc: row.get(10)?,
-                                due_timezone: row.get(11)?,
-                                due_string: row.get(12)?,
-                                due_lang: row.get(13)?,
-                                completed_at: row.get(14)?,
-                                deleted_at: row.get(15)?,
+                                todoist_sync_id: row.get(2)?,
+                                project_todoist_id: row.get(3)?,
+                                section_todoist_id: row.get(4)?,
+                                parent_todoist_id: row.get(5)?,
+                                project_is_inbox: row.get::<_, Option<i64>>(6)?.unwrap_or(0) != 0,
+                                title: row.get(7)?,
+                                description: row.get(8)?,
+                                priority: row.get(9)?,
+                                due_date: row.get(10)?,
+                                due_datetime_utc: row.get(11)?,
+                                due_timezone: row.get(12)?,
+                                due_string: row.get(13)?,
+                                due_lang: row.get(14)?,
+                                completed_at: row.get(15)?,
+                                deleted_at: row.get(16)?,
                                 labels: Vec::new(),
                             })
                         },
@@ -1569,7 +1618,13 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             .optional()?;
 
         if let Some((local_id, updated_at, local_synced_at)) = mapped {
-            if local_changed_since_sync(updated_at, local_synced_at.as_deref()) {
+            if self.local_entity_is_dirty(
+                "todoist",
+                "project",
+                local_id,
+                updated_at,
+                local_synced_at.as_deref(),
+            )? {
                 return Ok(SyncApplyOutcome::Skipped);
             }
             if dry_run {
@@ -1674,7 +1729,13 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             .optional()?;
 
         if let Some((local_id, updated_at, local_synced_at)) = mapped {
-            if local_changed_since_sync(updated_at, local_synced_at.as_deref()) {
+            if self.local_entity_is_dirty(
+                "todoist",
+                "section",
+                local_id,
+                updated_at,
+                local_synced_at.as_deref(),
+            )? {
                 return Ok(SyncApplyOutcome::Skipped);
             }
             if dry_run {
@@ -1741,7 +1802,13 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             .optional()?;
 
         if let Some((local_id, updated_at, local_synced_at)) = mapped {
-            if local_changed_since_sync(updated_at, local_synced_at.as_deref()) {
+            if self.local_entity_is_dirty(
+                "todoist",
+                "tag",
+                local_id,
+                updated_at,
+                local_synced_at.as_deref(),
+            )? {
                 return Ok(SyncApplyOutcome::Skipped);
             }
             if dry_run {
@@ -1833,7 +1900,13 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             .optional()?;
 
         if let Some((local_id, updated_at, local_synced_at)) = mapped {
-            if local_changed_since_sync(updated_at, local_synced_at.as_deref()) {
+            if self.local_entity_is_dirty(
+                "todoist",
+                "filter",
+                local_id,
+                updated_at,
+                local_synced_at.as_deref(),
+            )? {
                 return Ok(SyncApplyOutcome::Skipped);
             }
             if dry_run {
@@ -1929,8 +2002,43 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             )
             .optional()?;
 
+        let mapped = match mapped {
+            Some(mapped) => Some(mapped),
+            None => match remote.todoist_sync_id.as_deref() {
+                Some(todoist_sync_id) => {
+                    if let Some(local_id) = self.lookup_task_local_id_by_sync_id(todoist_sync_id)? {
+                        self.connection
+                            .query_row(
+                                "SELECT id, updated_at, synced_at
+                                 FROM tasks
+                                 WHERE id = ?1
+                                 LIMIT 1",
+                                params![local_id],
+                                |row| {
+                                    Ok((
+                                        row.get::<_, i64>(0)?,
+                                        row.get::<_, DateTime<Local>>(1)?,
+                                        row.get::<_, Option<String>>(2)?,
+                                    ))
+                                },
+                            )
+                            .optional()?
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            },
+        };
+
         if let Some((local_id, updated_at, local_synced_at)) = mapped {
-            if local_changed_since_sync(updated_at, local_synced_at.as_deref()) {
+            if self.local_entity_is_dirty(
+                "todoist",
+                "task",
+                local_id,
+                updated_at,
+                local_synced_at.as_deref(),
+            )? {
                 return Ok(SyncApplyOutcome::Skipped);
             }
             if dry_run {
@@ -1941,8 +2049,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                  SET project_id = ?1, section_id = ?2, parent_task_id = ?3,
                      title = ?4, description = ?5, status = ?6, completed_at = ?7, priority = ?8,
                      due_date = ?9, due_datetime_utc = ?10, due_timezone = ?11, due_string = ?12, due_lang = ?13, due_is_recurring = ?14,
-                     updated_at = ?15, synced_at = ?16, deleted_at = NULL
-                 WHERE id = ?17",
+                     todoist_id = ?15, todoist_sync_id = ?16, updated_at = ?17, synced_at = ?18, deleted_at = NULL
+                 WHERE id = ?19",
                 params![
                     project_local_id,
                     section_local_id,
@@ -1958,6 +2066,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     remote.due_string,
                     remote.due_lang,
                     if remote.due_is_recurring { 1_i64 } else { 0_i64 },
+                    remote.todoist_id,
+                    remote.todoist_sync_id,
                     now_local,
                     synced_at_utc,
                     local_id
@@ -1972,8 +2082,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         }
         let child_order = self.next_task_child_order(parent_local_id.map(TaskId))?;
         self.connection.execute(
-            "INSERT INTO tasks(project_id, section_id, parent_task_id, child_order, title, description, status, priority, created_at, updated_at, synced_at, todoist_id, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_lang, due_is_recurring)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?15, ?16, ?17, ?18, ?19)",
+            "INSERT INTO tasks(project_id, section_id, parent_task_id, child_order, title, description, status, priority, created_at, updated_at, synced_at, todoist_id, todoist_sync_id, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_lang, due_is_recurring)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 project_local_id,
                 section_local_id,
@@ -1987,6 +2097,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                 now_local,
                 synced_at_utc,
                 remote.todoist_id,
+                remote.todoist_sync_id,
                 remote.completed_at,
                 remote.due_date,
                 remote.due_datetime_utc,
@@ -2012,6 +2123,56 @@ impl SqliteSyncRepository<'_> {
             )
             .optional()
             .with_context(|| format!("failed to lookup local id in {table} by todoist id"))
+    }
+
+    fn lookup_task_local_id_by_sync_id(&self, todoist_sync_id: &str) -> Result<Option<i64>> {
+        self.connection
+            .query_row(
+                "SELECT id
+                 FROM tasks
+                 WHERE todoist_sync_id = ?1
+                   AND deleted_at IS NULL
+                 ORDER BY id
+                 LIMIT 1",
+                params![todoist_sync_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("failed to lookup local task by todoist sync id")
+    }
+
+    fn entity_has_pending_outbox(
+        &self,
+        provider: &str,
+        entity_type: &str,
+        entity_local_id: i64,
+    ) -> Result<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM sync_outbox
+                    WHERE provider = ?1
+                      AND entity_type = ?2
+                      AND entity_local_id = ?3
+                 )",
+                params![provider, entity_type, entity_local_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|exists| exists != 0)
+            .context("failed to check pending sync outbox entries")
+    }
+
+    fn local_entity_is_dirty(
+        &self,
+        provider: &str,
+        entity_type: &str,
+        entity_local_id: i64,
+        updated_at: DateTime<Local>,
+        synced_at_utc: Option<&str>,
+    ) -> Result<bool> {
+        Ok(local_changed_since_sync(updated_at, synced_at_utc)
+            || self.entity_has_pending_outbox(provider, entity_type, entity_local_id)?)
     }
 
     fn inbox_project_local_id(&self) -> Result<i64> {
@@ -4024,6 +4185,7 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
 mod tests {
     use anyhow::Result;
     use chrono::{Local, NaiveDate, Timelike, Utc};
+    use rusqlite::params;
     use tempfile::tempdir;
 
     use crate::domain::{
@@ -4033,8 +4195,8 @@ mod tests {
     use crate::domain::{SessionKind, SessionOutcome};
 
     use super::{
-        Database, FilterRepository, PomodoroRepository, ProjectRepository, SyncRepository,
-        SyncStateRecord, TagRepository, TaskRepository,
+        Database, FilterRepository, PomodoroRepository, ProjectRepository, RemoteTaskRecord,
+        SyncApplyOutcome, SyncRepository, SyncStateRecord, TagRepository, TaskRepository,
     };
 
     fn naive_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<Utc> {
@@ -4095,6 +4257,7 @@ mod tests {
         sync.upsert_state(&SyncStateRecord {
             provider: "todoist".to_string(),
             sync_token: Some("token-1".to_string()),
+            completed_tasks_synced_until: Some(now.clone()),
             last_synced_at: Some(now.clone()),
             last_status: Some("ok".to_string()),
             last_error: None,
@@ -4105,6 +4268,10 @@ mod tests {
             .get_state("todoist")?
             .expect("todoist state should exist");
         assert_eq!(state.sync_token.as_deref(), Some("token-1"));
+        assert_eq!(
+            state.completed_tasks_synced_until.as_deref(),
+            Some(now.as_str())
+        );
         assert_eq!(state.last_status.as_deref(), Some("ok"));
 
         let entry_id = sync.enqueue_outbox(
@@ -4138,6 +4305,160 @@ mod tests {
 
         sync.mark_outbox_delivered(entry_id)?;
         assert!(sync.list_outbox("todoist", 10)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn sync_repository_reports_latest_pending_outbox_id() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        assert_eq!(sync.latest_pending_outbox_id("todoist")?, None);
+
+        let first_id = sync.enqueue_outbox(
+            "todoist",
+            "task",
+            1,
+            "update",
+            "{}",
+            Utc::now().to_rfc3339().as_str(),
+        )?;
+        let second_id = sync.enqueue_outbox(
+            "todoist",
+            "task",
+            2,
+            "update",
+            "{}",
+            Utc::now().to_rfc3339().as_str(),
+        )?;
+
+        assert_eq!(sync.latest_pending_outbox_id("todoist")?, Some(second_id));
+        sync.mark_outbox_delivered(second_id)?;
+        assert_eq!(sync.latest_pending_outbox_id("todoist")?, Some(first_id));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_remote_task_matches_shared_task_by_sync_id() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let tasks = database.task_repository();
+        let inbox_project_id = database.project_repository().inbox_project_id()?;
+        let created = tasks.create("Buy milk", inbox_project_id, None, Local::now())?;
+
+        database.connection.execute(
+            "UPDATE tasks
+             SET todoist_id = ?1, todoist_sync_id = ?2, synced_at = ?3
+             WHERE id = ?4",
+            params![
+                "local-owner-task-id",
+                "shared-sync-id",
+                Utc::now().to_rfc3339(),
+                created.id.0
+            ],
+        )?;
+        database
+            .connection
+            .execute("DELETE FROM sync_outbox", [])
+            .expect("bootstrap outbox should clear for downstream test");
+
+        let remote = RemoteTaskRecord {
+            todoist_id: "collaborator-task-id".to_string(),
+            todoist_sync_id: Some("shared-sync-id".to_string()),
+            project_todoist_id: None,
+            section_todoist_id: None,
+            parent_todoist_id: None,
+            content: "Buy milk and eggs".to_string(),
+            description: String::new(),
+            priority: 4,
+            labels: Vec::new(),
+            due_date: None,
+            due_datetime_utc: None,
+            due_timezone: None,
+            due_string: None,
+            due_lang: None,
+            due_is_recurring: false,
+            completed_at: Some(Utc::now().to_rfc3339()),
+        };
+
+        let outcome = sync.apply_remote_task(&remote, Utc::now().to_rfc3339().as_str(), false)?;
+        assert_eq!(outcome, SyncApplyOutcome::Updated);
+
+        let refreshed = tasks
+            .list_all()?
+            .into_iter()
+            .find(|task| task.id == created.id)
+            .expect("task should still exist");
+        assert_eq!(refreshed.title, "Buy milk and eggs");
+        assert_eq!(refreshed.status, TaskStatus::Done);
+
+        let stored_ids = database.connection.query_row(
+            "SELECT todoist_id, todoist_sync_id
+             FROM tasks
+             WHERE id = ?1",
+            params![created.id.0],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )?;
+        assert_eq!(stored_ids.0.as_deref(), Some("collaborator-task-id"));
+        assert_eq!(stored_ids.1.as_deref(), Some("shared-sync-id"));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_remote_task_skips_remote_completion_when_local_outbox_is_pending() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let tasks = database.task_repository();
+        let inbox_project_id = database.project_repository().inbox_project_id()?;
+        let created = tasks.create("Buy milk", inbox_project_id, None, Local::now())?;
+        database.connection.execute(
+            "UPDATE tasks
+             SET todoist_id = ?1, synced_at = ?2
+             WHERE id = ?3",
+            params!["todoist-task-1", Utc::now().to_rfc3339(), created.id.0],
+        )?;
+        sync.enqueue_outbox(
+            "todoist",
+            "task",
+            created.id.0,
+            "update",
+            "{}",
+            Utc::now().to_rfc3339().as_str(),
+        )?;
+
+        let remote = RemoteTaskRecord {
+            todoist_id: "todoist-task-1".to_string(),
+            todoist_sync_id: None,
+            project_todoist_id: None,
+            section_todoist_id: None,
+            parent_todoist_id: None,
+            content: "Remote completion".to_string(),
+            description: String::new(),
+            priority: 4,
+            labels: Vec::new(),
+            due_date: None,
+            due_datetime_utc: None,
+            due_timezone: None,
+            due_string: None,
+            due_lang: None,
+            due_is_recurring: false,
+            completed_at: Some(Utc::now().to_rfc3339()),
+        };
+
+        let outcome = sync.apply_remote_task(&remote, Utc::now().to_rfc3339().as_str(), false)?;
+        assert_eq!(outcome, SyncApplyOutcome::Skipped);
+
+        let refreshed = tasks
+            .list_all()?
+            .into_iter()
+            .find(|task| task.id == created.id)
+            .expect("task should still exist");
+        assert_eq!(refreshed.title, "Buy milk");
+        assert_eq!(refreshed.status, TaskStatus::Todo);
         Ok(())
     }
 

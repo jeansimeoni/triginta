@@ -2113,7 +2113,7 @@ struct TodoistSyncUiState {
     in_flight_trigger: Option<SyncTrigger>,
     next_poll_at: DateTime<Local>,
     poll_interval: Duration,
-    last_seen_outbox_len: usize,
+    last_seen_outbox_id: Option<i64>,
     latest_status_line: String,
     last_trigger: Option<SyncTrigger>,
     last_status: String,
@@ -2376,7 +2376,7 @@ impl App {
                 in_flight_trigger: None,
                 next_poll_at: Local::now(),
                 poll_interval: poll_min,
-                last_seen_outbox_len: 0,
+                last_seen_outbox_id: None,
                 latest_status_line: "sync idle".to_string(),
                 last_trigger: None,
                 last_status: "idle".to_string(),
@@ -11608,20 +11608,25 @@ impl App {
             .sync_repository()
             .list_outbox("todoist", i64::MAX)?
             .len();
+        let latest_pending_outbox_id = self
+            .database
+            .sync_repository()
+            .latest_pending_outbox_id("todoist")?;
         let push_debounce = Duration::from_millis(
             self.config
                 .integrations
                 .todoist
                 .sync_runtime
                 .push_debounce_ms,
-        );
+        )
+        .min(Duration::from_millis(250));
 
         let mut trigger = None;
         if let Some(sync) = self.todoist_sync.as_mut() {
-            if pending_outbox_len > sync.last_seen_outbox_len {
+            if latest_pending_outbox_id != sync.last_seen_outbox_id {
                 sync.pending_push_at = Some(now + chrono_duration(push_debounce));
             }
-            sync.last_seen_outbox_len = pending_outbox_len;
+            sync.last_seen_outbox_id = latest_pending_outbox_id;
 
             if pending_outbox_len > 0
                 && sync
@@ -11821,7 +11826,12 @@ impl App {
         sync.in_flight_trigger = None;
         sync.last_error = Some(error.to_string());
         sync.last_sync_at = Some(now);
-        sync.pending_outbox = sync.last_seen_outbox_len;
+        sync.pending_outbox = self
+            .database
+            .sync_repository()
+            .list_outbox("todoist", i64::MAX)
+            .map(|entries| entries.len())
+            .unwrap_or(sync.pending_outbox);
         sync.delivered_outbox = 0;
         sync.failed_outbox = 0;
         sync.activity_until = Some(now + ChronoDuration::seconds(3));
@@ -11911,7 +11921,12 @@ impl App {
             sync.poll_interval = min_interval;
         }
 
-        sync.last_seen_outbox_len = report.pending_outbox;
+        sync.last_seen_outbox_id = self
+            .database
+            .sync_repository()
+            .latest_pending_outbox_id("todoist")
+            .ok()
+            .flatten();
         sync.next_poll_at = now + chrono_duration(sync.poll_interval);
     }
 
@@ -18039,6 +18054,63 @@ mod tests {
 
         assert_eq!(app.screen_data.tasks.len(), 1);
         assert_eq!(app.screen_data.tasks[0].status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn todoist_sync_tick_reschedules_push_when_outbox_entry_changes_without_growing_queue() {
+        let mut app = test_app_with_todoist_enabled();
+        let now = fixed_now();
+
+        let first_id = app
+            .database
+            .sync_repository()
+            .enqueue_outbox(
+                "todoist",
+                "task",
+                1,
+                "update",
+                "{}",
+                Utc::now().to_rfc3339().as_str(),
+            )
+            .expect("first outbox entry should enqueue");
+        app.handle_todoist_sync_tick(now)
+            .expect("tick should inspect sync state");
+
+        let first_pending_push_at = app
+            .todoist_sync
+            .as_ref()
+            .and_then(|state| state.pending_push_at)
+            .expect("first pending push should be scheduled");
+
+        app.database
+            .sync_repository()
+            .mark_outbox_delivered(first_id)
+            .expect("first outbox entry should be removable");
+        let second_id = app
+            .database
+            .sync_repository()
+            .enqueue_outbox(
+                "todoist",
+                "task",
+                2,
+                "update",
+                "{}",
+                Utc::now().to_rfc3339().as_str(),
+            )
+            .expect("second outbox entry should enqueue");
+
+        let next_tick_at = now + ChronoDuration::milliseconds(10);
+        app.handle_todoist_sync_tick(next_tick_at)
+            .expect("tick should reschedule push for replacement entry");
+
+        let sync_state = app.todoist_sync.as_ref().expect("sync should stay enabled");
+        assert_eq!(sync_state.last_seen_outbox_id, Some(second_id));
+        assert!(
+            sync_state
+                .pending_push_at
+                .expect("replacement push should stay scheduled")
+                > first_pending_push_at
+        );
     }
 
     #[test]

@@ -28,6 +28,9 @@ use crate::{
 };
 
 const TODOIST_API_BASE: &str = "https://api.todoist.com/api/v1";
+const TODOIST_COMPLETED_TASKS_BOOTSTRAP_LOOKBACK_DAYS: i64 = 90;
+const TODOIST_COMPLETED_TASKS_OVERLAP_SECONDS: i64 = 90;
+const TODOIST_COMPLETED_TASKS_PAGE_LIMIT: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncTrigger {
@@ -714,6 +717,100 @@ impl TodoistSyncProvider {
         client: &TodoistRestClient,
         synced_at_utc: &str,
         sync_token: &str,
+        previous_completed_tasks_synced_until: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<DownstreamApplyStats> {
+        let mut stats = self.pull_remote_completed_tasks(
+            sync_repository,
+            client,
+            synced_at_utc,
+            previous_completed_tasks_synced_until,
+            now,
+        )?;
+        let active_stats =
+            self.pull_remote_active_resources(sync_repository, client, synced_at_utc, sync_token)?;
+        stats.merge(active_stats);
+        Ok(stats)
+    }
+
+    fn pull_remote_completed_tasks(
+        &self,
+        sync_repository: &dyn SyncRepository,
+        client: &TodoistRestClient,
+        synced_at_utc: &str,
+        previous_completed_tasks_synced_until: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<DownstreamApplyStats> {
+        let completed_since = completed_tasks_since(previous_completed_tasks_synced_until, now);
+        let completed_until = now.to_rfc3339();
+        let mut cursor = None;
+        let mut stats = DownstreamApplyStats::default();
+
+        loop {
+            let response = client.get_completed_tasks_by_completion_date(
+                completed_since.as_str(),
+                completed_until.as_str(),
+                cursor.as_deref(),
+                TODOIST_COMPLETED_TASKS_PAGE_LIMIT,
+            )?;
+
+            for task in response.items {
+                let remote = RemoteTaskRecord {
+                    todoist_id: task.id,
+                    todoist_sync_id: task.sync_id,
+                    project_todoist_id: task.project_id,
+                    section_todoist_id: task.section_id,
+                    parent_todoist_id: task.parent_id,
+                    content: task.content,
+                    description: task.description.unwrap_or_default(),
+                    priority: Self::todoist_priority_to_local(task.priority.unwrap_or(1)),
+                    labels: task.labels.unwrap_or_default(),
+                    due_date: task
+                        .due
+                        .as_ref()
+                        .and_then(|due| due.date.as_deref())
+                        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()),
+                    due_datetime_utc: task
+                        .due
+                        .as_ref()
+                        .and_then(|due| due.datetime.as_ref().cloned()),
+                    due_timezone: task.due.as_ref().and_then(|due| due.timezone.clone()),
+                    due_string: task.due.as_ref().and_then(|due| due.string.clone()),
+                    due_lang: task.due.as_ref().and_then(|due| due.lang.clone()),
+                    due_is_recurring: task
+                        .due
+                        .as_ref()
+                        .and_then(|due| due.is_recurring)
+                        .unwrap_or(false),
+                    completed_at: task.completed_at.or_else(|| {
+                        if task.checked.unwrap_or(false) {
+                            Some(synced_at_utc.to_string())
+                        } else {
+                            None
+                        }
+                    }),
+                };
+                let outcome =
+                    sync_repository.apply_remote_task(&remote, synced_at_utc, self.dry_run)?;
+                stats.record("task", remote.todoist_id.as_str(), outcome, self.dry_run);
+            }
+
+            match response.next_cursor.filter(|cursor| !cursor.is_empty()) {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
+            }
+        }
+
+        stats.completed_tasks_synced_until = Some(completed_until);
+        Ok(stats)
+    }
+
+    fn pull_remote_active_resources(
+        &self,
+        sync_repository: &dyn SyncRepository,
+        client: &TodoistRestClient,
+        synced_at_utc: &str,
+        sync_token: &str,
     ) -> Result<DownstreamApplyStats> {
         let sync_response = client.sync_resources(sync_token)?;
         let mut preferred_language = sync_response
@@ -725,7 +822,6 @@ impl TodoistSyncProvider {
             .iter()
             .map(|label| (label.id.clone(), label.name.clone()))
             .collect::<HashMap<_, _>>();
-
         let mut stats = DownstreamApplyStats::default();
 
         for project in sync_response.projects {
@@ -793,6 +889,7 @@ impl TodoistSyncProvider {
             });
             let remote = RemoteTaskRecord {
                 todoist_id: task.id,
+                todoist_sync_id: task.sync_id,
                 project_todoist_id: task.project_id,
                 section_todoist_id: task.section_id,
                 parent_todoist_id: task.parent_id,
@@ -845,6 +942,7 @@ struct DownstreamApplyStats {
     updated: usize,
     skipped: usize,
     next_sync_token: Option<String>,
+    completed_tasks_synced_until: Option<String>,
     preferred_language: Option<String>,
 }
 
@@ -869,6 +967,21 @@ impl DownstreamApplyStats {
                 outcome = ?outcome,
                 "dry-run pull action"
             );
+        }
+    }
+
+    fn merge(&mut self, other: DownstreamApplyStats) {
+        self.created += other.created;
+        self.updated += other.updated;
+        self.skipped += other.skipped;
+        if other.next_sync_token.is_some() {
+            self.next_sync_token = other.next_sync_token;
+        }
+        if other.completed_tasks_synced_until.is_some() {
+            self.completed_tasks_synced_until = other.completed_tasks_synced_until;
+        }
+        if other.preferred_language.is_some() {
+            self.preferred_language = other.preferred_language;
         }
     }
 }
@@ -910,6 +1023,7 @@ struct TodoistFilter {
 #[derive(Debug, Clone, serde::Deserialize)]
 struct TodoistTask {
     id: String,
+    sync_id: Option<String>,
     project_id: Option<String>,
     section_id: Option<String>,
     parent_id: Option<String>,
@@ -996,6 +1110,9 @@ impl TaskSyncProvider for TodoistSyncProvider {
             .and_then(|state| state.sync_token.as_deref())
             .unwrap_or("*")
             .to_string();
+        let previous_completed_tasks_synced_until = previous
+            .as_ref()
+            .and_then(|state| state.completed_tasks_synced_until.clone());
         let mut downstream_error = None;
         let should_pull_downstream =
             !self.dry_run || !matches!(trigger, SyncTrigger::MutationDebounced);
@@ -1005,6 +1122,8 @@ impl TaskSyncProvider for TodoistSyncProvider {
                 &client,
                 now_rfc3339.as_str(),
                 next_sync_token_seed.as_str(),
+                previous_completed_tasks_synced_until.as_deref(),
+                now,
             ) {
                 Ok(stats) => Some(stats),
                 Err(error) => {
@@ -1027,14 +1146,24 @@ impl TaskSyncProvider for TodoistSyncProvider {
             .as_ref()
             .and_then(|stats| stats.next_sync_token.clone())
             .or(previous_sync_token.clone());
+        let next_completed_tasks_synced_until = downstream_stats
+            .as_ref()
+            .and_then(|stats| stats.completed_tasks_synced_until.clone())
+            .or(previous_completed_tasks_synced_until.clone());
         let persisted_sync_token = if self.dry_run {
             previous_sync_token
         } else {
             next_sync_token
         };
+        let persisted_completed_tasks_synced_until = if self.dry_run {
+            previous_completed_tasks_synced_until
+        } else {
+            next_completed_tasks_synced_until
+        };
         sync_repository.upsert_state(&SyncStateRecord {
             provider: self.provider_name().to_string(),
             sync_token: persisted_sync_token,
+            completed_tasks_synced_until: persisted_completed_tasks_synced_until,
             last_synced_at: Some(now_rfc3339.clone()),
             last_status: Some(if combined_error.is_some() {
                 "degraded".to_string()
@@ -1130,9 +1259,38 @@ impl TodoistRestClient {
         Ok(())
     }
 
+    fn get_completed_tasks_by_completion_date(
+        &self,
+        since: &str,
+        until: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<TodoistCompletedTasksResponse> {
+        let mut request = self
+            .get_request("/tasks/completed/by_completion_date")
+            .query("since", since)
+            .query("until", until)
+            .query("limit", limit.to_string());
+        if let Some(cursor) = cursor {
+            request = request.query("cursor", cursor);
+        }
+
+        let mut response = request.call().map_err(map_ureq_error)?;
+        ensure_success_status(&mut response)?;
+        response
+            .body_mut()
+            .read_json::<TodoistCompletedTasksResponse>()
+            .map_err(|error| anyhow!(error))
+    }
+
     fn post_request(&self, path: &str) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
         let url = format!("{TODOIST_API_BASE}{path}");
         self.configure_request(ureq::post(url.as_str()))
+    }
+
+    fn get_request(&self, path: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+        let url = format!("{TODOIST_API_BASE}{path}");
+        self.configure_request(ureq::get(url.as_str()))
     }
 
     fn delete_request(&self, path: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
@@ -1183,6 +1341,13 @@ struct TodoistSyncResponse {
     filters: Vec<TodoistFilter>,
     #[serde(default)]
     items: Vec<TodoistTask>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TodoistCompletedTasksResponse {
+    #[serde(default)]
+    items: Vec<TodoistTask>,
+    next_cursor: Option<String>,
 }
 
 fn value_id_as_string(value: &Value) -> Option<String> {
@@ -1250,6 +1415,19 @@ fn read_token_from_command(program: &str, args: &[String], timeout: Duration) ->
 
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn completed_tasks_since(
+    previous_completed_tasks_synced_until: Option<&str>,
+    now: DateTime<Utc>,
+) -> String {
+    let fallback = now - chrono::Duration::days(TODOIST_COMPLETED_TASKS_BOOTSTRAP_LOOKBACK_DAYS);
+    let overlap = chrono::Duration::seconds(TODOIST_COMPLETED_TASKS_OVERLAP_SECONDS);
+    previous_completed_tasks_synced_until
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc) - overlap)
+        .unwrap_or(fallback)
+        .to_rfc3339()
 }
 
 #[cfg(test)]
