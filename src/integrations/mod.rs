@@ -831,7 +831,7 @@ impl TodoistSyncProvider {
                 name: project.name,
                 color: project.color.unwrap_or_else(|| "charcoal".to_string()),
                 is_favorite: project.is_favorite.unwrap_or(false),
-                is_inbox: project.is_inbox_project.unwrap_or(false),
+                is_inbox: project.inbox_project.unwrap_or(false),
             };
             let outcome =
                 sync_repository.apply_remote_project(&remote, synced_at_utc, self.dry_run)?;
@@ -993,7 +993,8 @@ struct TodoistProject {
     parent_id: Option<String>,
     color: Option<String>,
     is_favorite: Option<bool>,
-    is_inbox_project: Option<bool>,
+    #[serde(alias = "is_inbox_project")]
+    inbox_project: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

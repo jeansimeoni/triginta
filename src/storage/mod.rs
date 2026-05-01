@@ -4195,8 +4195,9 @@ mod tests {
     use crate::domain::{SessionKind, SessionOutcome};
 
     use super::{
-        Database, FilterRepository, PomodoroRepository, ProjectRepository, RemoteTaskRecord,
-        SyncApplyOutcome, SyncRepository, SyncStateRecord, TagRepository, TaskRepository,
+        Database, FilterRepository, PomodoroRepository, ProjectRepository, RemoteProjectRecord,
+        RemoteTaskRecord, SyncApplyOutcome, SyncRepository, SyncStateRecord, TagRepository,
+        TaskRepository,
     };
 
     fn naive_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<Utc> {
@@ -4334,6 +4335,50 @@ mod tests {
         assert_eq!(sync.latest_pending_outbox_id("todoist")?, Some(second_id));
         sync.mark_outbox_delivered(second_id)?;
         assert_eq!(sync.latest_pending_outbox_id("todoist")?, Some(first_id));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_remote_inbox_project_reuses_bootstrapped_inbox_row() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+
+        let projects_before = database.project_repository().list_all()?;
+        assert_eq!(projects_before.len(), 1);
+        assert!(projects_before[0].is_inbox);
+        assert_eq!(projects_before[0].name, "Inbox");
+
+        let outcome = sync.apply_remote_project(
+            &RemoteProjectRecord {
+                todoist_id: "todoist-inbox-1".to_string(),
+                parent_todoist_id: None,
+                name: "Inbox".to_string(),
+                color: "grey".to_string(),
+                is_favorite: false,
+                is_inbox: true,
+            },
+            Utc::now().to_rfc3339().as_str(),
+            false,
+        )?;
+        assert_eq!(outcome, SyncApplyOutcome::Updated);
+
+        let projects_after = database.project_repository().list_all()?;
+        let inbox_projects = projects_after
+            .iter()
+            .filter(|project| project.name == "Inbox")
+            .collect::<Vec<_>>();
+        assert_eq!(inbox_projects.len(), 1);
+        assert!(inbox_projects[0].is_inbox);
+
+        let stored = database.connection.query_row(
+            "SELECT todoist_id, is_inbox
+             FROM projects
+             WHERE id = ?1",
+            params![inbox_projects[0].id.0],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)? != 0)),
+        )?;
+        assert_eq!(stored.0.as_deref(), Some("todoist-inbox-1"));
+        assert!(stored.1);
         Ok(())
     }
 
