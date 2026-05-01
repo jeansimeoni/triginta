@@ -4252,6 +4252,110 @@ fn render_editor_tag_suggestions(
     );
 }
 
+fn render_filter_editor_project_suggestions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &FilterEditorView,
+    palette: ThemePalette,
+) {
+    let content_width = area.width.saturating_sub(2) as usize;
+    let lines = editor
+        .project_suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let style = if index
+                == editor
+                    .selected_project_suggestion
+                    .min(editor.project_suggestions.len().saturating_sub(1))
+            {
+                Style::default()
+                    .fg(palette.text)
+                    .bg(palette.border)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            let value = ellipsize_end(suggestion, content_width);
+            let padding = " ".repeat(content_width.saturating_sub(value.width()));
+            Line::from(vec![Span::styled(format!("{value}{padding}"), style)])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        "Project",
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            )
+            .style(Style::default().bg(palette.background)),
+        area,
+    );
+}
+
+fn render_filter_editor_tag_suggestions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &FilterEditorView,
+    palette: ThemePalette,
+) {
+    let content_width = area.width.saturating_sub(2) as usize;
+    let lines = editor
+        .tag_suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let style = if index
+                == editor
+                    .selected_tag_suggestion
+                    .min(editor.tag_suggestions.len().saturating_sub(1))
+            {
+                Style::default()
+                    .fg(palette.text)
+                    .bg(palette.border)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            let value = ellipsize_end(suggestion, content_width);
+            let padding = " ".repeat(content_width.saturating_sub(value.width()));
+            Line::from(vec![Span::styled(format!("{value}{padding}"), style)])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        "Tag",
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            )
+            .style(Style::default().bg(palette.background)),
+        area,
+    );
+}
+
 fn render_editor_priority_suggestions(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -4936,6 +5040,36 @@ fn render_filter_editor_popup(
     );
 
     render_form_preview_panel(frame, sections[1], &editor.preview_panel, palette);
+
+    if editor.focus.query && !editor.project_suggestions.is_empty() {
+        let dropdown_height = editor.project_suggestions.len().min(4) as u16 + 2;
+        let visible_width = form_rows[1].width.saturating_sub(4) as usize;
+        let cursor_col =
+            editor_cursor_display_column(&editor.query_value, editor.query_cursor, visible_width);
+        let dropdown_area = project_parent_dropdown_rect(
+            frame.area(),
+            form_rows[1],
+            cursor_col as u16,
+            project_parent_dropdown_width(editor.project_suggestions.as_slice()),
+            dropdown_height,
+        );
+        render_filter_editor_project_suggestions(frame, dropdown_area, editor, palette);
+    }
+
+    if editor.focus.query && !editor.tag_suggestions.is_empty() {
+        let dropdown_height = editor.tag_suggestions.len().min(4) as u16 + 2;
+        let visible_width = form_rows[1].width.saturating_sub(4) as usize;
+        let cursor_col =
+            editor_cursor_display_column(&editor.query_value, editor.query_cursor, visible_width);
+        let dropdown_area = project_parent_dropdown_rect(
+            frame.area(),
+            form_rows[1],
+            cursor_col as u16,
+            project_parent_dropdown_width(editor.tag_suggestions.as_slice()),
+            dropdown_height,
+        );
+        render_filter_editor_tag_suggestions(frame, dropdown_area, editor, palette);
+    }
 }
 
 fn render_filter_delete_confirmation(

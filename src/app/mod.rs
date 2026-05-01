@@ -1219,6 +1219,7 @@ struct FilterEditorState {
     name_cursor: usize,
     query_input: String,
     query_cursor: usize,
+    suggestion_index: usize,
     color_index: usize,
     is_favorite: bool,
     focused_field: FilterEditorField,
@@ -1240,6 +1241,10 @@ pub struct FilterEditorView {
     pub name_cursor: usize,
     pub query_value: String,
     pub query_cursor: usize,
+    pub project_suggestions: Vec<String>,
+    pub selected_project_suggestion: usize,
+    pub tag_suggestions: Vec<String>,
+    pub selected_tag_suggestion: usize,
     pub color_label: String,
     pub color_value: FilterColor,
     pub is_favorite: bool,
@@ -3833,6 +3838,20 @@ impl App {
             .get(editor.color_index)
             .copied()
             .unwrap_or(FilterColor::Charcoal);
+        let project_suggestions = self
+            .active_project_query(editor.query_input.as_str(), editor.query_cursor)
+            .map(|(_, _, query)| self.project_token_suggestions(query.as_str()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|suggestion| suggestion.label)
+            .collect::<Vec<_>>();
+        let tag_suggestions = self
+            .active_tag_query(editor.query_input.as_str(), editor.query_cursor)
+            .map(|(_, _, query)| self.tag_suggestions(query.as_str()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
         Some(FilterEditorView {
             title: if editor.filter_id.is_some() {
                 "Edit Filter"
@@ -3843,6 +3862,14 @@ impl App {
             name_cursor: editor.name_cursor,
             query_value: editor.query_input.clone(),
             query_cursor: editor.query_cursor,
+            project_suggestions: project_suggestions.clone(),
+            selected_project_suggestion: editor
+                .suggestion_index
+                .min(project_suggestions.len().saturating_sub(1)),
+            tag_suggestions: tag_suggestions.clone(),
+            selected_tag_suggestion: editor
+                .suggestion_index
+                .min(tag_suggestions.len().saturating_sub(1)),
             color_label: color.label().to_string(),
             color_value: color,
             is_favorite: editor.is_favorite,
@@ -3860,9 +3887,10 @@ impl App {
                         "Type a short filter name".to_string(),
                         "Name is used in sidebar and Todoist sync mapping".to_string(),
                     ],
-                    FilterEditorField::Query => {
-                        vec!["Use Todoist-style syntax, for example: today & @work".to_string()]
-                    }
+                    FilterEditorField::Query => vec![
+                        "Use Todoist-style syntax, for example: today & @work".to_string(),
+                        "Type # or @ in the query to autocomplete projects and tags".to_string(),
+                    ],
                     FilterEditorField::Color => {
                         vec!["Use ←/→ or h/l to change the color".to_string()]
                     }
@@ -8515,6 +8543,7 @@ impl App {
             name_cursor: 0,
             query_input: String::new(),
             query_cursor: 0,
+            suggestion_index: 0,
             color_index: FilterColor::all()
                 .iter()
                 .position(|color| *color == FilterColor::Charcoal)
@@ -8542,6 +8571,7 @@ impl App {
             name_cursor: filter.name.len(),
             query_input: filter.query.clone(),
             query_cursor: filter.query.len(),
+            suggestion_index: 0,
             color_index,
             is_favorite: filter.is_favorite,
             focused_field: FilterEditorField::Name,
@@ -8660,6 +8690,75 @@ impl App {
         }
         self.refresh_tasks()?;
         Ok(())
+    }
+
+    fn accept_filter_editor_project_suggestion(&self, editor: &mut FilterEditorState) -> bool {
+        let Some((start, end, query)) =
+            self.active_project_query(editor.query_input.as_str(), editor.query_cursor)
+        else {
+            return false;
+        };
+        if let Some((_, matched_length)) = self.matched_project_prefix(query.as_str(), None) {
+            let remainder = query[matched_length..].trim_start();
+            if !remainder.is_empty() {
+                return false;
+            }
+        }
+        let suggestions = self.project_token_suggestions(query.as_str());
+        let Some(option) = suggestions
+            .get(
+                editor
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .cloned()
+        else {
+            return false;
+        };
+
+        editor
+            .query_input
+            .replace_range(start..end, format!("#{} ", option.label).as_str());
+        editor.query_cursor = (start + option.label.len() + 2).min(editor.query_input.len());
+        editor.suggestion_index = 0;
+        while editor.query_cursor < editor.query_input.len()
+            && editor.query_input[editor.query_cursor..].starts_with(' ')
+        {
+            editor.query_input.remove(editor.query_cursor);
+        }
+        true
+    }
+
+    fn accept_filter_editor_tag_suggestion(&self, editor: &mut FilterEditorState) -> bool {
+        let Some((start, end, query)) =
+            self.active_tag_query(editor.query_input.as_str(), editor.query_cursor)
+        else {
+            return false;
+        };
+        if let Some(matched_length) = self.matched_tag_prefix(query.as_str()) {
+            let remainder = query[matched_length..].trim_start();
+            if !remainder.is_empty() {
+                return false;
+            }
+        }
+        let suggestions = self.tag_suggestions(query.as_str());
+        let Some(tag) = suggestions
+            .get(
+                editor
+                    .suggestion_index
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+        else {
+            return false;
+        };
+
+        editor
+            .query_input
+            .replace_range(start..end, format!("@{} ", tag.name).as_str());
+        editor.query_cursor = (start + tag.name.len() + 2).min(editor.query_input.len());
+        editor.suggestion_index = 0;
+        true
     }
 
     fn toggle_selected_project_favorite(&mut self) -> Result<()> {
@@ -9565,9 +9664,37 @@ impl App {
             match code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => {
+                    if editor.focused_field == FilterEditorField::Query
+                        && self.accept_filter_editor_project_suggestion(&mut editor)
+                    {
+                        editor.validation_error = None;
+                        self.filter_editor = Some(editor);
+                        return Ok(true);
+                    }
+                    if editor.focused_field == FilterEditorField::Query
+                        && self.accept_filter_editor_tag_suggestion(&mut editor)
+                    {
+                        editor.validation_error = None;
+                        self.filter_editor = Some(editor);
+                        return Ok(true);
+                    }
                     self.submit_filter_editor(editor, now)?;
                 }
                 KeyCode::Tab => {
+                    if editor.focused_field == FilterEditorField::Query
+                        && self.accept_filter_editor_project_suggestion(&mut editor)
+                    {
+                        editor.validation_error = None;
+                        self.filter_editor = Some(editor);
+                        return Ok(true);
+                    }
+                    if editor.focused_field == FilterEditorField::Query
+                        && self.accept_filter_editor_tag_suggestion(&mut editor)
+                    {
+                        editor.validation_error = None;
+                        self.filter_editor = Some(editor);
+                        return Ok(true);
+                    }
                     editor.focused_field = editor.focused_field.next();
                     editor.validation_error = None;
                     self.filter_editor = Some(editor);
@@ -9622,6 +9749,7 @@ impl App {
                             .drain(previous_index..editor.query_cursor);
                         editor.query_cursor = previous_index;
                     }
+                    editor.suggestion_index = 0;
                     editor.validation_error = None;
                     self.filter_editor = Some(editor);
                 }
@@ -9646,6 +9774,7 @@ impl App {
                             .unwrap_or(editor.query_input.len());
                         editor.query_input.drain(editor.query_cursor..next_index);
                     }
+                    editor.suggestion_index = 0;
                     editor.validation_error = None;
                     self.filter_editor = Some(editor);
                 }
@@ -9655,6 +9784,7 @@ impl App {
                 }
                 KeyCode::Home if editor.focused_field == FilterEditorField::Query => {
                     editor.query_cursor = 0;
+                    editor.suggestion_index = 0;
                     self.filter_editor = Some(editor);
                 }
                 KeyCode::Left if editor.focused_field == FilterEditorField::Name => {
@@ -9675,6 +9805,7 @@ impl App {
                             .map(|(index, _)| index)
                             .unwrap_or(0);
                     }
+                    editor.suggestion_index = 0;
                     self.filter_editor = Some(editor);
                 }
                 KeyCode::Right if editor.focused_field == FilterEditorField::Name => {
@@ -9695,6 +9826,7 @@ impl App {
                             .map(|(offset, _)| editor.query_cursor + offset)
                             .unwrap_or(editor.query_input.len());
                     }
+                    editor.suggestion_index = 0;
                     self.filter_editor = Some(editor);
                 }
                 KeyCode::End if editor.focused_field == FilterEditorField::Name => {
@@ -9703,6 +9835,37 @@ impl App {
                 }
                 KeyCode::End if editor.focused_field == FilterEditorField::Query => {
                     editor.query_cursor = editor.query_input.len();
+                    editor.suggestion_index = 0;
+                    self.filter_editor = Some(editor);
+                }
+                KeyCode::Down if editor.focused_field == FilterEditorField::Query => {
+                    if let Some((_, _, query)) =
+                        self.active_project_query(editor.query_input.as_str(), editor.query_cursor)
+                    {
+                        let last_index = self
+                            .project_token_suggestions(query.as_str())
+                            .len()
+                            .saturating_sub(1);
+                        editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
+                    } else if let Some((_, _, query)) =
+                        self.active_tag_query(editor.query_input.as_str(), editor.query_cursor)
+                    {
+                        let last_index =
+                            self.tag_suggestions(query.as_str()).len().saturating_sub(1);
+                        editor.suggestion_index = (editor.suggestion_index + 1).min(last_index);
+                    }
+                    self.filter_editor = Some(editor);
+                }
+                KeyCode::Up if editor.focused_field == FilterEditorField::Query => {
+                    if self
+                        .active_project_query(editor.query_input.as_str(), editor.query_cursor)
+                        .is_some()
+                        || self
+                            .active_tag_query(editor.query_input.as_str(), editor.query_cursor)
+                            .is_some()
+                    {
+                        editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
+                    }
                     self.filter_editor = Some(editor);
                 }
                 KeyCode::Left | KeyCode::Char('h') | KeyCode::Up | KeyCode::Char('k')
@@ -9740,6 +9903,7 @@ impl App {
                 KeyCode::Char(character) if editor.focused_field == FilterEditorField::Query => {
                     editor.query_input.insert(editor.query_cursor, character);
                     editor.query_cursor += character.len_utf8();
+                    editor.suggestion_index = 0;
                     editor.validation_error = None;
                     self.filter_editor = Some(editor);
                 }
@@ -12391,33 +12555,33 @@ fn seed_showcase_data(database: &Database) -> Result<()> {
     }
 
     for (name, query, color, favorite) in [
-        ("Today focus", "today AND active", FilterColor::Green, true),
+        ("Today focus", "today & active", FilterColor::Green, true),
         (
             "Next actions",
-            "@Next Action AND active",
+            "@Next Action & active",
             FilterColor::Blue,
             true,
         ),
         (
             "Waiting for",
-            "@Waiting For AND active",
+            "@Waiting For & active",
             FilterColor::Yellow,
             true,
         ),
-        ("High priority", "p1 AND active", FilterColor::Red, true),
+        ("High priority", "p1 & active", FilterColor::Red, true),
         (
             "Website launch",
-            "##Website AND active",
+            "##Website & active",
             FilterColor::Teal,
             false,
         ),
         (
             "Recurring routines",
-            "@Recurring AND active",
+            "@Recurring & active",
             FilterColor::LimeGreen,
             false,
         ),
-        ("Subtasks", "subtask AND active", FilterColor::Grape, false),
+        ("Subtasks", "subtask & active", FilterColor::Grape, false),
         ("Completed", "completed", FilterColor::Grey, false),
     ] {
         database.filter_repository().create(
@@ -16274,6 +16438,84 @@ mod tests {
             .expect("editor should stay open on validation error");
         assert!(editor.validation_error.is_some());
         assert!(app.screen_data.filters.is_empty());
+    }
+
+    #[test]
+    fn filter_editor_query_autocompletes_project_tokens() {
+        let mut app = test_app();
+        app.database
+            .project_repository()
+            .create("Website", None, ProjectColor::Teal, false, Local::now())
+            .expect("project should create");
+        app.refresh_tasks().expect("app data should refresh");
+        app.handle_key(crossterm::event::KeyCode::Char('6'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("filter editor should open");
+
+        for character in "Launch".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should work");
+        }
+        app.handle_key(crossterm::event::KeyCode::Tab)
+            .expect("tab should move to query");
+        for character in "#web".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should work");
+        }
+
+        let editor = app
+            .filter_editor_view()
+            .expect("filter editor should stay visible");
+        assert!(!editor.project_suggestions.is_empty());
+
+        app.handle_key(crossterm::event::KeyCode::Tab)
+            .expect("tab should accept project suggestion");
+
+        let editor = app
+            .filter_editor_view()
+            .expect("filter editor should stay visible");
+        assert_eq!(editor.query_value, "#Website ");
+        assert!(editor.focus.query);
+    }
+
+    #[test]
+    fn filter_editor_query_autocompletes_tag_tokens() {
+        let mut app = test_app();
+        app.database
+            .tag_repository()
+            .create("Waiting For", TagColor::Yellow, false, Local::now())
+            .expect("tag should create");
+        app.refresh_tasks().expect("app data should refresh");
+        app.handle_key(crossterm::event::KeyCode::Char('6'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('C'))
+            .expect("filter editor should open");
+
+        for character in "Waiting".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should work");
+        }
+        app.handle_key(crossterm::event::KeyCode::Tab)
+            .expect("tab should move to query");
+        for character in "@wai".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should work");
+        }
+
+        let editor = app
+            .filter_editor_view()
+            .expect("filter editor should stay visible");
+        assert!(!editor.tag_suggestions.is_empty());
+
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("enter should accept tag suggestion");
+
+        let editor = app
+            .filter_editor_view()
+            .expect("filter editor should stay visible");
+        assert_eq!(editor.query_value, "@Waiting For ");
+        assert!(editor.focus.query);
     }
 
     #[test]
