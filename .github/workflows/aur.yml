@@ -83,9 +83,10 @@ jobs:
 
       - name: Download release checksums
         run: |
-          curl --proto '=https' --tlsv1.2 -LsSf \
-            "https://github.com/jeansimeoni/triginta/releases/download/${{ steps.resolve.outputs.tag }}/sha256.sum" \
-            -o sha256.sum
+          gh release download "${{ steps.resolve.outputs.tag }}" \
+            --repo jeansimeoni/triginta \
+            --pattern sha256.sum \
+            --dir .
 
       - name: Generate AUR packaging files
         run: |
