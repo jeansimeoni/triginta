@@ -3441,13 +3441,16 @@ fn status_bar_spans_width(spans: &[Span<'_>]) -> usize {
 
 fn status_bar_panel_shortcuts(app: &App) -> Vec<ShortcutTip> {
     if app.focused_panel() == PanelFocus::Navigation {
-        return navigation_group_status_bar_tips(app.active_sidebar_tab());
+        return navigation_group_status_bar_tips(app.active_sidebar_tab())
+            .into_iter()
+            .filter(|tip| !is_status_bar_suppressed_tip(tip))
+            .collect();
     }
 
     app.focused_panel_shortcuts()
         .iter()
         .copied()
-        .filter(|tip| !is_status_bar_global_focus_tip(tip))
+        .filter(|tip| !is_status_bar_global_focus_tip(tip) && !is_status_bar_suppressed_tip(tip))
         .collect()
 }
 
@@ -3489,10 +3492,6 @@ const STATUS_BAR_GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
         description: "help",
     },
     ShortcutTip {
-        keys: "D",
-        description: "donate",
-    },
-    ShortcutTip {
         keys: "q",
         description: "quit",
     },
@@ -3501,6 +3500,10 @@ const STATUS_BAR_GLOBAL_SHORTCUTS: &[ShortcutTip] = &[
 fn is_status_bar_global_focus_tip(tip: &ShortcutTip) -> bool {
     let compact = tip.keys.replace(' ', "").to_ascii_lowercase();
     compact.contains("1-8") && compact.contains("tab")
+}
+
+fn is_status_bar_suppressed_tip(tip: &ShortcutTip) -> bool {
+    matches!(tip.description, "donate" | "sync status")
 }
 
 fn footer_with_filter_indicator(
@@ -6787,11 +6790,11 @@ mod tests {
         FormPreviewPanelView, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, PreviewLineView,
         STATUS_BAR_GLOBAL_SHORTCUTS, TaskTagRowSegment, footer_with_filter_indicator,
         format_compact_history_duration, format_task_tags_for_row, history_footer_hints,
-        input_window_view, is_status_bar_global_focus_tip, markdown_first_plain_line,
-        markdown_inline_spans, markdown_inline_tokens, navigation_group_status_bar_tips,
-        preview_panel_lines, preview_panel_required_height, responsive_bar_width,
-        statistics_footer_hints, status_bar_keys_label, status_bar_spans_width,
-        task_details_footer_hints, terminal_too_small, timer_footer_hints,
+        input_window_view, is_status_bar_global_focus_tip, is_status_bar_suppressed_tip,
+        markdown_first_plain_line, markdown_inline_spans, markdown_inline_tokens,
+        navigation_group_status_bar_tips, preview_panel_lines, preview_panel_required_height,
+        responsive_bar_width, statistics_footer_hints, status_bar_keys_label,
+        status_bar_spans_width, task_details_footer_hints, terminal_too_small, timer_footer_hints,
     };
     use crate::app::{ShortcutTip, SidebarTab};
     use crate::config::GlyphMode;
@@ -7099,7 +7102,7 @@ mod tests {
         assert!(
             STATUS_BAR_GLOBAL_SHORTCUTS
                 .iter()
-                .any(|tip| tip.keys == "D" && tip.description == "donate")
+                .all(|tip| tip.description != "donate")
         );
     }
 
@@ -7110,6 +7113,22 @@ mod tests {
             description: "change focus",
         };
         assert!(is_status_bar_global_focus_tip(&tip));
+    }
+
+    #[test]
+    fn status_bar_suppressed_tip_filter_hides_donate_and_sync_helpers() {
+        assert!(is_status_bar_suppressed_tip(&ShortcutTip {
+            keys: "Shift+D",
+            description: "donate",
+        }));
+        assert!(is_status_bar_suppressed_tip(&ShortcutTip {
+            keys: "Shift+S",
+            description: "sync status",
+        }));
+        assert!(!is_status_bar_suppressed_tip(&ShortcutTip {
+            keys: "q",
+            description: "quit",
+        }));
     }
 
     #[test]
@@ -7142,8 +7161,14 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_spans_width_counts_donate_shortcut_and_rc_version() {
+    fn status_bar_spans_width_counts_sync_and_donate_badges_with_rc_version() {
         let spans = vec![
+            Span::raw("o"),
+            Span::raw(" "),
+            Span::raw("Todoist"),
+            Span::raw("  "),
+            Span::raw("[S]"),
+            Span::raw("  "),
             Span::raw("Donate"),
             Span::raw(" "),
             Span::raw("[D]"),
@@ -7151,7 +7176,7 @@ mod tests {
             Span::raw("0.1.0-rc.5"),
         ];
 
-        assert_eq!(status_bar_spans_width(spans.as_slice()), 22);
+        assert_eq!(status_bar_spans_width(spans.as_slice()), 38);
     }
 
     #[test]
