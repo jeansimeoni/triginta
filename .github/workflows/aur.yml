@@ -102,6 +102,7 @@ jobs:
         with:
           name: aur-package
           path: aur-package/
+          include-hidden-files: true
 
   validate:
     needs: prepare
