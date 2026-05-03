@@ -264,6 +264,7 @@ pub struct SyncFilterSnapshot {
     pub deleted_at: Option<String>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncEntitySnapshot {
     Task(SyncTaskSnapshot),
