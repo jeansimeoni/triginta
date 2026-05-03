@@ -15,8 +15,9 @@ on:
       - scripts/generate-aur-triginta-bin.sh
       - scripts/check-aur-packaging.sh
       - packaging/aur/**
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -44,7 +45,7 @@ jobs:
         run: scripts/check-aur-packaging.sh
 
   prepare:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'release' && !github.event.release.prerelease) }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'v')) }}
     runs-on: ubuntu-22.04
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
@@ -58,8 +59,8 @@ jobs:
         name: Resolve release inputs
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            tag="${{ github.event.release.tag_name }}"
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            tag="${{ github.event.workflow_run.head_branch }}"
             publish=true
           else
             tag="${{ inputs.tag }}"

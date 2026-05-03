@@ -1,8 +1,9 @@
 name: Homebrew
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -15,6 +16,7 @@ permissions:
 
 jobs:
   publish-homebrew-formula:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'v')) }}
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -29,8 +31,8 @@ jobs:
         name: Resolve tag
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            tag="${{ github.event.release.tag_name }}"
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            tag="${{ github.event.workflow_run.head_branch }}"
           else
             tag="${{ inputs.tag }}"
           fi
