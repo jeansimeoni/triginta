@@ -7161,7 +7161,7 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_spans_width_counts_sync_and_donate_badges_with_rc_version() {
+    fn status_bar_spans_width_counts_sync_and_donate_badges_with_stable_version() {
         let spans = vec![
             Span::raw("o"),
             Span::raw(" "),
@@ -7173,10 +7173,10 @@ mod tests {
             Span::raw(" "),
             Span::raw("[D]"),
             Span::raw("  "),
-            Span::raw("0.1.0-rc.5"),
+            Span::raw("0.1.0"),
         ];
 
-        assert_eq!(status_bar_spans_width(spans.as_slice()), 38);
+        assert_eq!(status_bar_spans_width(spans.as_slice()), 33);
     }
 
     #[test]

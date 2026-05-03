@@ -2,8 +2,8 @@
 
 ## Supported Versions
 
-Triginta has not published a stable release yet. Until formal releases begin,
-security fixes target the current `master` branch.
+Security fixes target the current stable `0.1.x` line and the current `main`
+branch.
 
 ## Reporting a Vulnerability
 

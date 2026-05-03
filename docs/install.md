@@ -1,9 +1,8 @@
 # Install
 
-Triginta can be built from source today. GitHub Releases provide prebuilt
-archives, checksums, and a shell installer. Stable Homebrew and AUR publishing
-are configured from the same release artifacts once the maintainer-side tap and
-AUR bootstrap steps are complete.
+Triginta `0.1.0` is available through GitHub Releases, the shell installer,
+Homebrew, downloadable Linux `.deb`/`.rpm` packages, the AUR `triginta-bin`
+package, and source builds.
 
 ## Requirements
 
@@ -21,6 +20,84 @@ or `libcrypto` to run the published Linux musl binaries.
 The UI still requires an interactive terminal. A Nerd Font is optional for
 enhanced glyphs; ASCII mode is available for terminals that do not render those
 glyphs correctly.
+
+## GitHub Releases
+
+All stable releases are published at:
+
+<https://github.com/jeansimeoni/triginta/releases>
+
+The `v0.1.0` release includes:
+
+- macOS archives for `x86_64` and `aarch64`
+- Linux musl archives for `x86_64` and `aarch64`
+- `sha256.sum`
+- `triginta-installer.sh`
+- downloadable `.deb` packages for `amd64` and `arm64`
+- downloadable `.rpm` packages for `x86_64` and `aarch64`
+
+If you prefer a manual archive install, download the asset for your platform,
+extract it, and place `triginta` somewhere on your `PATH`.
+
+## Shell Installer
+
+The shell installer downloads the matching release artifact and installs
+`triginta` into `${CARGO_HOME:-$HOME/.cargo}/bin`.
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/triginta/releases/download/v0.1.0/triginta-installer.sh | sh
+```
+
+Confirm the installed binary:
+
+```bash
+triginta --version
+```
+
+## Homebrew
+
+Install from the maintainer tap:
+
+```bash
+brew install jeansimeoni/tap/triginta
+```
+
+Upgrade later with:
+
+```bash
+brew upgrade jeansimeoni/tap/triginta
+```
+
+## AUR And yay
+
+Install the prebuilt binary package from AUR:
+
+```bash
+yay -S triginta-bin
+```
+
+The AUR package installs the same Linux musl release archives published on
+GitHub Releases.
+
+## Downloadable .deb And .rpm Packages
+
+GitHub Releases also include downloadable Linux packages built from the same
+release-ready archives.
+
+On Debian, Ubuntu, or compatible systems, install the matching `.deb` file:
+
+```bash
+sudo dpkg -i triginta_0.1.0-1_amd64.deb
+```
+
+On Fedora, RHEL, or other RPM-based systems, install the matching `.rpm` file:
+
+```bash
+sudo dnf install ./triginta-0.1.0-1.x86_64.rpm
+```
+
+These are direct download artifacts only. There is no apt or dnf repository
+feed yet.
 
 ## Build From Source
 
@@ -61,77 +138,13 @@ triginta --version
 
 If `~/.local/bin` is not on your `PATH`, add it in your shell configuration.
 
-## Shell Installer
-
-The shell installer is available after a GitHub Release exists. For release
-`v0.1.0`, the command will be:
-
-```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/triginta/releases/download/v0.1.0/triginta-installer.sh | sh
-```
-
-If that release URL does not exist yet, use the source or manual local install
-methods above.
-
-Release archives include checksums. Verify downloaded archives against the
-corresponding `.sha256` file or `sha256.sum` from the GitHub Release.
-
-## Downloadable .deb And .rpm Packages
-
-GitHub Releases also include downloadable Linux packages built from the same
-musl release archives used by the shell installer.
-
-On Debian, Ubuntu, or compatible systems, install the matching `.deb` file:
-
-```bash
-sudo dpkg -i triginta_VERSION_ARCH.deb
-```
-
-On Fedora, RHEL, or other RPM-based systems, install the matching `.rpm` file:
-
-```bash
-sudo dnf install ./triginta-VERSION-RELEASE.ARCH.rpm
-```
-
-These are standalone downloadable packages, not apt or dnf repository feeds.
-There is no signed apt or dnf repository yet.
-
-## Homebrew
-
-Stable releases can be published to Homebrew through
-`jeansimeoni/homebrew-tap`. Once that tap has been bootstrapped and a stable
-release has completed successfully, install with:
-
-```bash
-brew install jeansimeoni/tap/triginta
-```
-
-Homebrew publication is stable-only. Pre-release tags such as `-rc` are not
-published to the tap.
-
-If the formula is not available yet, use the shell installer, source build, or
-manual local install methods above.
-
-## AUR And yay
-
-Stable releases can also publish `triginta-bin` to the Arch User Repository.
-Once the package has been bootstrapped on AUR and the publish workflow has run
-successfully, install with:
-
-```bash
-yay -S triginta-bin
-```
-
-The AUR package installs the prebuilt Linux musl archive from the matching
-GitHub Release. Pre-release tags are not published automatically.
-
-If `triginta-bin` is not available yet, use the shell installer, source build,
-or manual local install methods above.
+Release archives include checksums. Verify downloaded archives against
+`sha256.sum` from the GitHub Release.
 
 ## Update
 
-If you installed with the shell installer after a GitHub Release was published,
-run the installer for the newer release version.
+If you installed with the shell installer, rerun the installer for the newer
+release version.
 
 For a source checkout:
 
@@ -146,6 +159,16 @@ If you manually installed the binary, copy the rebuilt binary again:
 ```bash
 install -Dm755 target/release/triginta ~/.local/bin/triginta
 ```
+
+For AUR installs:
+
+```bash
+yay -Syu triginta-bin
+```
+
+For downloaded `.deb` packages, install the newer file with `dpkg -i` again.
+
+For downloaded `.rpm` packages, install the newer file with `dnf install`.
 
 ## Uninstall
 

@@ -5,7 +5,7 @@
 # Triginta
 
 [![CI](https://github.com/jeansimeoni/triginta/actions/workflows/ci.yml/badge.svg)](https://github.com/jeansimeoni/triginta/actions/workflows/ci.yml)
-[![Latest Release](https://img.shields.io/github/v/release/jeansimeoni/triginta?include_prereleases&sort=semver)](https://github.com/jeansimeoni/triginta/releases)
+[![Latest Release](https://img.shields.io/github/v/release/jeansimeoni/triginta?sort=semver)](https://github.com/jeansimeoni/triginta/releases)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 
 Triginta is a local-first terminal app for Pomodoro tracking and task
@@ -89,12 +89,19 @@ usage is not a primary release target yet.
 
 ## Installation
 
-If you want to install Triginta from source, you will need a Rust toolchain
-first. This repository uses [`mise`](https://mise.jdx.dev/) to manage tool
-versions, so the simplest path is to install `mise` and let it provision the
-required Rust toolchain automatically.
+Stable install methods are available through:
 
-With `mise` installed, here are the steps:
+- GitHub Releases: macOS and Linux archives, shell installer, and downloadable Linux `.deb`/`.rpm` packages
+- Homebrew: `brew install jeansimeoni/tap/triginta`
+- Arch User Repository: `yay -S triginta-bin`
+- Source build with `mise` and Cargo
+
+If you want to build from source, you will need a Rust toolchain first. This
+repository uses [`mise`](https://mise.jdx.dev/) to manage tool versions, so the
+simplest path is to install `mise` and let it provision the required Rust
+toolchain automatically.
+
+With `mise` installed, build from source like this:
 
 ```bash
 git clone https://github.com/jeansimeoni/triginta.git
@@ -111,13 +118,9 @@ install -Dm755 target/release/triginta ~/.local/bin/triginta
 triginta --version
 ```
 
-GitHub Releases provide prebuilt archives, a shell installer, and downloadable
-Linux `.deb`/`.rpm` packages. Note, however, that these packages come with very
-little testing from my end. Please create an issue in case you find problems.
-
-Stable Homebrew and AUR publishing are also available. See
-[Install](docs/install.md) for the exact commands, current availability, and
-uninstall steps.
+The shell installer installs to `${CARGO_HOME:-~/.cargo}/bin` by default. See
+[Install](docs/install.md) for the exact commands, release download methods,
+package-manager installs, update paths, and uninstall steps.
 
 ## Quick Start
 
@@ -177,6 +180,7 @@ project evolves.
 - Task assignment (when syncing with Todoist)
 - Task comments
 - Calendar view
+- Pomodoro history browser
 - More improvements to come
 
 ## Acknowledgments
