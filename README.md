@@ -6,6 +6,7 @@
 
 [![CI](https://github.com/jeansimeoni/triginta/actions/workflows/ci.yml/badge.svg)](https://github.com/jeansimeoni/triginta/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/jeansimeoni/triginta?sort=semver)](https://github.com/jeansimeoni/triginta/releases)
+[![Website](https://img.shields.io/badge/website-triginta.app-1f6feb)](https://triginta.app)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 
 Triginta is a local-first terminal app for Pomodoro tracking and task
@@ -15,6 +16,8 @@ offline.
 
 Todoist sync is optional. Your data lives locally in SQLite, so the app remains
 fully usable even if you never enable sync.
+
+Website: <https://triginta.app>
 
 ## The Reason
 

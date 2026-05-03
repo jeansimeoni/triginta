@@ -4,6 +4,8 @@ Triginta `0.1.0` is available through GitHub Releases, the shell installer,
 Homebrew, downloadable Linux `.deb`/`.rpm` packages, the AUR `triginta-bin`
 package, and source builds.
 
+Project website: <https://triginta.app>
+
 ## Requirements
 
 - Linux or macOS terminal with raw-mode TUI support

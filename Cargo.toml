@@ -6,7 +6,7 @@ rust-version = "1.94"
 description = "A local-first TUI Pomodoro timer and task manager."
 license = "GPL-3.0-only"
 repository = "https://github.com/jeansimeoni/triginta"
-homepage = "https://github.com/jeansimeoni/triginta"
+homepage = "https://triginta.app"
 keywords = ["pomodoro", "tui", "task-management", "sqlite", "todoist"]
 categories = ["command-line-utilities", "date-and-time"]
 
