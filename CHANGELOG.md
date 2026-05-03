@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-03
+
+### Fixed
+
+- Native Linux package publishing now triggers from the published GitHub Release
+  instead of relying on fragile tag workflow-run metadata.
+- Homebrew tap publishing now bootstraps an empty tap repository and no longer
+  fails the release when there is nothing new to commit.
+- Public installation and packaging metadata now consistently use
+  <https://triginta.app> as the project homepage.
+- Installation docs no longer claim `.deb` and `.rpm` artifacts for `0.1.0`,
+  which shipped without them due to the release workflow failure.
+
 ### Added
 
 - GPL v3 project license and public release metadata.
