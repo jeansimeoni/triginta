@@ -1,8 +1,7 @@
 # Install
 
 Triginta `0.1.0` is available through GitHub Releases, the shell installer,
-Homebrew, downloadable Linux `.deb`/`.rpm` packages, the AUR `triginta-bin`
-package, and source builds.
+Homebrew, the AUR `triginta-bin` package, and source builds.
 
 Project website: <https://triginta.app>
 
@@ -35,8 +34,6 @@ The `v0.1.0` release includes:
 - Linux musl archives for `x86_64` and `aarch64`
 - `sha256.sum`
 - `triginta-installer.sh`
-- downloadable `.deb` packages for `amd64` and `arm64`
-- downloadable `.rpm` packages for `x86_64` and `aarch64`
 
 If you prefer a manual archive install, download the asset for your platform,
 extract it, and place `triginta` somewhere on your `PATH`.
@@ -80,26 +77,6 @@ yay -S triginta-bin
 
 The AUR package installs the same Linux musl release archives published on
 GitHub Releases.
-
-## Downloadable .deb And .rpm Packages
-
-GitHub Releases also include downloadable Linux packages built from the same
-release-ready archives.
-
-On Debian, Ubuntu, or compatible systems, install the matching `.deb` file:
-
-```bash
-sudo dpkg -i triginta_0.1.0-1_amd64.deb
-```
-
-On Fedora, RHEL, or other RPM-based systems, install the matching `.rpm` file:
-
-```bash
-sudo dnf install ./triginta-0.1.0-1.x86_64.rpm
-```
-
-These are direct download artifacts only. There is no apt or dnf repository
-feed yet.
 
 ## Build From Source
 
@@ -168,10 +145,6 @@ For AUR installs:
 yay -Syu triginta-bin
 ```
 
-For downloaded `.deb` packages, install the newer file with `dpkg -i` again.
-
-For downloaded `.rpm` packages, install the newer file with `dnf install`.
-
 ## Uninstall
 
 For a manual local install, remove the binary:
@@ -192,18 +165,6 @@ For AUR/yay, uninstall with:
 
 ```bash
 yay -R triginta-bin
-```
-
-For `.deb` installs, uninstall with:
-
-```bash
-sudo apt remove triginta
-```
-
-For `.rpm` installs, uninstall with:
-
-```bash
-sudo dnf remove triginta
 ```
 
 To remove local app data, delete the platform app data and config directories.

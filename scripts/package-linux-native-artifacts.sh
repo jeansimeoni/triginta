@@ -108,7 +108,7 @@ description_short="A local-first TUI Pomodoro timer and task manager."
 description_long="Triginta keeps tasks, projects, tags, timer sessions, and logs in local SQLite storage so the app remains useful offline."
 maintainer_name="Jean Simeoni"
 maintainer_email="opensource@users.noreply.github.com"
-homepage="https://github.com/jeansimeoni/triginta"
+homepage="https://triginta.app"
 license="GPL-3.0-only"
 
 package_archives=(

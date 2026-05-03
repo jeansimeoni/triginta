@@ -4,7 +4,8 @@ This directory contains the in-repo source-of-truth for the `triginta-bin`
 package published to the Arch User Repository.
 
 `triginta-bin` installs the prebuilt Linux musl archives from GitHub Releases.
-It does not build from source.
+Its package homepage should point to <https://triginta.app>. It does not build
+from source.
 
 ## Files
 

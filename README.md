@@ -94,7 +94,7 @@ usage is not a primary release target yet.
 
 Stable install methods are available through:
 
-- GitHub Releases: macOS and Linux archives, shell installer, and downloadable Linux `.deb`/`.rpm` packages
+- GitHub Releases: macOS and Linux archives plus the shell installer
 - Homebrew: `brew install jeansimeoni/tap/triginta`
 - Arch User Repository: `yay -S triginta-bin`
 - Source build with `mise` and Cargo

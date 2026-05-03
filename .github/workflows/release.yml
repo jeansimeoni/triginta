@@ -288,41 +288,72 @@ jobs:
       PLAN: ${{ needs.plan.outputs.val }}
       GITHUB_USER: "axo bot"
       GITHUB_EMAIL: "admin+bot@axo.dev"
+      TAP_REPOSITORY: "jeansimeoni/homebrew-tap"
+      TAP_DEFAULT_BRANCH: "main"
     if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: true
-          repository: "jeansimeoni/homebrew-tap"
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-      # So we have access to the formula
+      - name: Clone or initialize tap repository
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          repo_url="https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPOSITORY}.git"
+
+          if git ls-remote --exit-code "$repo_url" HEAD >/dev/null 2>&1; then
+            git clone "$repo_url" tap-repo
+            cd tap-repo
+            git checkout "${TAP_DEFAULT_BRANCH}" || git checkout -b "${TAP_DEFAULT_BRANCH}"
+          else
+            git init tap-repo
+            cd tap-repo
+            git checkout -b "${TAP_DEFAULT_BRANCH}"
+            git remote add origin "$repo_url"
+          fi
+
+          mkdir -p Formula
       - name: Fetch homebrew formulae
         uses: actions/download-artifact@v7
         with:
           pattern: artifacts-*
-          path: Formula/
+          path: tap-repo/Formula/
           merge-multiple: true
-      # This is extra complex because you can make your Formula name not match your app name
-      # so we need to find releases with a *.rb file, and publish with that filename.
       - name: Commit formula files
+        shell: bash
         run: |
           git config --global user.name "${GITHUB_USER}"
           git config --global user.email "${GITHUB_EMAIL}"
+          cd tap-repo
 
+          committed=false
           for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)'); do
             filename=$(echo "$release" | jq '.artifacts[] | select(endswith(".rb"))' --raw-output)
             name=$(echo "$filename" | sed "s/\.rb$//")
             version=$(echo "$release" | jq .app_version --raw-output)
 
-            export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
-            brew update
-            # We avoid reformatting user-provided data such as the app description and homepage.
-            brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
+            if command -v brew >/dev/null 2>&1; then
+              export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+              brew update
+              # We avoid reformatting user-provided data such as the app description and homepage.
+              brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
+            else
+              echo "brew not available on runner; skipping formula style check"
+            fi
 
             git add "Formula/${filename}"
+            if git diff --cached --quiet; then
+              echo "No changes to commit for ${filename}"
+              continue
+            fi
+
             git commit -m "${name} ${version}"
+            committed=true
           done
-          git push
+
+          if [[ "$committed" == true ]]; then
+            git push origin "HEAD:${TAP_DEFAULT_BRANCH}"
+          else
+            echo "No Homebrew formula changes to publish"
+          fi
 
   announce:
     needs:
