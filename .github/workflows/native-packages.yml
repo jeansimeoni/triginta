@@ -45,8 +45,9 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
             tag="$(
-              git ls-remote --tags origin \
+              git ls-remote --tags "$repo_url" \
                 | awk -v sha="${{ github.event.workflow_run.head_sha }}" '
                     $1 == sha && $2 !~ /\^\{\}$/ {
                       ref = $2
