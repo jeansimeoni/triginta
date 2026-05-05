@@ -7173,7 +7173,7 @@ mod tests {
             Span::raw(" "),
             Span::raw("[D]"),
             Span::raw("  "),
-            Span::raw("0.1.3"),
+            Span::raw("0.1.4"),
         ];
 
         assert_eq!(status_bar_spans_width(spans.as_slice()), 33);

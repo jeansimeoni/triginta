@@ -290,6 +290,7 @@ pub struct RemoteProjectRecord {
     pub color: String,
     pub is_favorite: bool,
     pub is_inbox: bool,
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,6 +298,7 @@ pub struct RemoteSectionRecord {
     pub todoist_id: String,
     pub project_todoist_id: String,
     pub name: String,
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,6 +307,7 @@ pub struct RemoteTagRecord {
     pub name: String,
     pub color: String,
     pub is_favorite: bool,
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +317,7 @@ pub struct RemoteFilterRecord {
     pub query: String,
     pub color: String,
     pub is_favorite: bool,
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1663,6 +1667,60 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             )? {
                 return Ok(SyncApplyOutcome::Skipped);
             }
+            if remote.is_deleted {
+                if dry_run {
+                    return Ok(SyncApplyOutcome::Updated);
+                }
+                self.connection
+                    .execute(
+                        "WITH RECURSIVE project_tree(id) AS (
+                             SELECT id FROM projects WHERE id = ?1
+                             UNION ALL
+                             SELECT projects.id
+                             FROM projects
+                             INNER JOIN project_tree ON projects.parent_project_id = project_tree.id
+                         )
+                         UPDATE projects
+                         SET deleted_at = COALESCE(deleted_at, ?2),
+                             updated_at = ?2,
+                             synced_at = ?3
+                         WHERE id IN (SELECT id FROM project_tree)",
+                        params![local_id, now_local, synced_at_utc],
+                    )?;
+                self.connection
+                    .execute(
+                        "WITH RECURSIVE project_tree(id) AS (
+                             SELECT id FROM projects WHERE id = ?1
+                             UNION ALL
+                             SELECT projects.id
+                             FROM projects
+                             INNER JOIN project_tree ON projects.parent_project_id = project_tree.id
+                         )
+                         UPDATE tasks
+                         SET deleted_at = COALESCE(deleted_at, ?2),
+                             updated_at = ?2,
+                             synced_at = COALESCE(synced_at, ?3)
+                         WHERE project_id IN (SELECT id FROM project_tree)",
+                        params![local_id, now_local, synced_at_utc],
+                    )?;
+                self.connection
+                    .execute(
+                        "WITH RECURSIVE project_tree(id) AS (
+                             SELECT id FROM projects WHERE id = ?1
+                             UNION ALL
+                             SELECT projects.id
+                             FROM projects
+                             INNER JOIN project_tree ON projects.parent_project_id = project_tree.id
+                         )
+                         UPDATE sections
+                         SET deleted_at = COALESCE(deleted_at, ?2),
+                             updated_at = ?2,
+                             synced_at = COALESCE(synced_at, ?3)
+                         WHERE project_id IN (SELECT id FROM project_tree)",
+                        params![local_id, now_local, synced_at_utc],
+                    )?;
+                return Ok(SyncApplyOutcome::Updated);
+            }
             if dry_run {
                 return Ok(SyncApplyOutcome::Updated);
             }
@@ -1688,6 +1746,9 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         if let Some(existing_local_id) =
             self.match_unmapped_project_by_name_and_parent(remote.name.as_str(), parent_local_id)?
         {
+            if remote.is_deleted {
+                return Ok(SyncApplyOutcome::Skipped);
+            }
             if dry_run {
                 return Ok(SyncApplyOutcome::Updated);
             }
@@ -1711,6 +1772,9 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             return Ok(SyncApplyOutcome::Updated);
         }
 
+        if remote.is_deleted {
+            return Ok(SyncApplyOutcome::Skipped);
+        }
         if dry_run {
             return Ok(SyncApplyOutcome::Created);
         }
@@ -1740,11 +1804,6 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         synced_at_utc: &str,
         dry_run: bool,
     ) -> Result<SyncApplyOutcome> {
-        let Some(project_local_id) =
-            self.lookup_local_id_by_todoist("projects", remote.project_todoist_id.as_str())?
-        else {
-            return Ok(SyncApplyOutcome::Skipped);
-        };
         let now_local = Local::now();
         let mapped = self
             .connection
@@ -1774,6 +1833,29 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             )? {
                 return Ok(SyncApplyOutcome::Skipped);
             }
+            if remote.is_deleted {
+                if dry_run {
+                    return Ok(SyncApplyOutcome::Updated);
+                }
+                self.connection.execute(
+                    "UPDATE sections
+                     SET deleted_at = COALESCE(deleted_at, ?1), updated_at = ?1, synced_at = ?2
+                     WHERE id = ?3",
+                    params![now_local, synced_at_utc, local_id],
+                )?;
+                self.connection.execute(
+                    "UPDATE tasks
+                     SET section_id = NULL, updated_at = ?2, synced_at = COALESCE(synced_at, ?3)
+                     WHERE section_id = ?1",
+                    params![local_id, now_local, synced_at_utc],
+                )?;
+                return Ok(SyncApplyOutcome::Updated);
+            }
+            let Some(project_local_id) =
+                self.lookup_local_id_by_todoist("projects", remote.project_todoist_id.as_str())?
+            else {
+                return Ok(SyncApplyOutcome::Skipped);
+            };
             if dry_run {
                 return Ok(SyncApplyOutcome::Updated);
             }
@@ -1792,6 +1874,14 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             return Ok(SyncApplyOutcome::Updated);
         }
 
+        if remote.is_deleted {
+            return Ok(SyncApplyOutcome::Skipped);
+        }
+        let Some(project_local_id) =
+            self.lookup_local_id_by_todoist("projects", remote.project_todoist_id.as_str())?
+        else {
+            return Ok(SyncApplyOutcome::Skipped);
+        };
         if dry_run {
             return Ok(SyncApplyOutcome::Created);
         }
@@ -1847,6 +1937,22 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             )? {
                 return Ok(SyncApplyOutcome::Skipped);
             }
+            if remote.is_deleted {
+                if dry_run {
+                    return Ok(SyncApplyOutcome::Updated);
+                }
+                self.connection.execute(
+                    "UPDATE tags
+                     SET deleted_at = COALESCE(deleted_at, ?1), updated_at = ?1, synced_at = ?2
+                     WHERE id = ?3",
+                    params![now_local, synced_at_utc, local_id],
+                )?;
+                self.connection.execute(
+                    "DELETE FROM task_tags WHERE tag_id = ?1",
+                    params![local_id],
+                )?;
+                return Ok(SyncApplyOutcome::Updated);
+            }
             if dry_run {
                 return Ok(SyncApplyOutcome::Updated);
             }
@@ -1868,6 +1974,9 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         }
 
         if let Some(existing_local_id) = self.match_unmapped_tag_by_name(remote.name.as_str())? {
+            if remote.is_deleted {
+                return Ok(SyncApplyOutcome::Skipped);
+            }
             if dry_run {
                 return Ok(SyncApplyOutcome::Updated);
             }
@@ -1889,6 +1998,9 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             return Ok(SyncApplyOutcome::Updated);
         }
 
+        if remote.is_deleted {
+            return Ok(SyncApplyOutcome::Skipped);
+        }
         if dry_run {
             return Ok(SyncApplyOutcome::Created);
         }
@@ -1945,6 +2057,18 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             )? {
                 return Ok(SyncApplyOutcome::Skipped);
             }
+            if remote.is_deleted {
+                if dry_run {
+                    return Ok(SyncApplyOutcome::Updated);
+                }
+                self.connection.execute(
+                    "UPDATE filters
+                     SET deleted_at = COALESCE(deleted_at, ?1), updated_at = ?1, synced_at = ?2
+                     WHERE id = ?3",
+                    params![now_local, synced_at_utc, local_id],
+                )?;
+                return Ok(SyncApplyOutcome::Updated);
+            }
             if dry_run {
                 return Ok(SyncApplyOutcome::Updated);
             }
@@ -1966,6 +2090,9 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             return Ok(SyncApplyOutcome::Updated);
         }
 
+        if remote.is_deleted {
+            return Ok(SyncApplyOutcome::Skipped);
+        }
         if dry_run {
             return Ok(SyncApplyOutcome::Created);
         }
@@ -4237,8 +4364,9 @@ mod tests {
     use crate::domain::{SessionKind, SessionOutcome};
 
     use super::{
-        Database, FilterRepository, PomodoroRepository, ProjectRepository, RemoteProjectRecord,
-        RemoteTaskRecord, SyncApplyOutcome, SyncRepository, SyncStateRecord, TagRepository,
+        Database, FilterRepository, PomodoroRepository, ProjectRepository, RemoteFilterRecord,
+        RemoteProjectRecord, RemoteSectionRecord, RemoteTagRecord, RemoteTaskRecord,
+        SectionRepository, SyncApplyOutcome, SyncRepository, SyncStateRecord, TagRepository,
         TaskRepository,
     };
 
@@ -4398,6 +4526,7 @@ mod tests {
                 color: "grey".to_string(),
                 is_favorite: false,
                 is_inbox: true,
+                is_deleted: false,
             },
             Utc::now().to_rfc3339().as_str(),
             false,
@@ -4421,6 +4550,204 @@ mod tests {
         )?;
         assert_eq!(stored.0.as_deref(), Some("todoist-inbox-1"));
         assert!(stored.1);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_remote_deleted_filter_marks_local_filter_deleted() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let filter = database.filter_repository().create(
+            "Today",
+            "today",
+            FilterColor::Blue,
+            false,
+            Local::now(),
+        )?;
+        sync.set_entity_todoist_id("filter", filter.id.0, "todoist-filter-1", Utc::now().to_rfc3339().as_str())?;
+        database.connection.execute("DELETE FROM sync_outbox", [])?;
+
+        let outcome = sync.apply_remote_filter(
+            &RemoteFilterRecord {
+                todoist_id: "todoist-filter-1".to_string(),
+                name: String::new(),
+                query: String::new(),
+                color: "charcoal".to_string(),
+                is_favorite: false,
+                is_deleted: true,
+            },
+            Utc::now().to_rfc3339().as_str(),
+            false,
+        )?;
+        assert_eq!(outcome, SyncApplyOutcome::Updated);
+
+        let filters = database.filter_repository().list_all()?;
+        let stored = filters
+            .into_iter()
+            .find(|candidate| candidate.id == filter.id)
+            .expect("filter should still exist locally");
+        assert!(stored.deleted_at.is_some());
+        assert_eq!(stored.name, "Today");
+        Ok(())
+    }
+
+    #[test]
+    fn apply_remote_deleted_tag_marks_local_tag_deleted_and_detaches_links() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let inbox_project_id = database.project_repository().inbox_project_id()?;
+        let task = database
+            .task_repository()
+            .create("Task", inbox_project_id, None, Local::now())?;
+        let tag = database.tag_repository().create(
+            "Urgent",
+            TagColor::Red,
+            false,
+            Local::now(),
+        )?;
+        sync.set_entity_todoist_id("tag", tag.id.0, "todoist-tag-1", Utc::now().to_rfc3339().as_str())?;
+        database.connection.execute("DELETE FROM sync_outbox", [])?;
+        database.connection.execute(
+            "INSERT INTO task_tags(task_id, tag_id) VALUES (?1, ?2)",
+            params![task.id.0, tag.id.0],
+        )?;
+
+        let outcome = sync.apply_remote_tag(
+            &RemoteTagRecord {
+                todoist_id: "todoist-tag-1".to_string(),
+                name: String::new(),
+                color: "charcoal".to_string(),
+                is_favorite: false,
+                is_deleted: true,
+            },
+            Utc::now().to_rfc3339().as_str(),
+            false,
+        )?;
+        assert_eq!(outcome, SyncApplyOutcome::Updated);
+
+        let tags = database.tag_repository().list_all()?;
+        let stored = tags
+            .into_iter()
+            .find(|candidate| candidate.id == tag.id)
+            .expect("tag should still exist locally");
+        assert!(stored.deleted_at.is_some());
+        let remaining_links: i64 = database.connection.query_row(
+            "SELECT COUNT(*) FROM task_tags WHERE tag_id = ?1",
+            params![tag.id.0],
+            |row| row.get(0),
+        )?;
+        assert_eq!(remaining_links, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_remote_deleted_section_marks_local_section_deleted_and_detaches_tasks() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let project = database.project_repository().create(
+            "Work",
+            None,
+            ProjectColor::Blue,
+            false,
+            Local::now(),
+        )?;
+        let section = database
+            .section_repository()
+            .create(project.id, "Inbox Section", Local::now())?;
+        let task = database
+            .task_repository()
+            .create("Task", project.id, None, Local::now())?;
+        database.connection.execute(
+            "UPDATE tasks SET section_id = ?1 WHERE id = ?2",
+            params![section.id.0, task.id.0],
+        )?;
+        sync.set_entity_todoist_id("section", section.id.0, "todoist-section-1", Utc::now().to_rfc3339().as_str())?;
+        database.connection.execute("DELETE FROM sync_outbox", [])?;
+
+        let outcome = sync.apply_remote_section(
+            &RemoteSectionRecord {
+                todoist_id: "todoist-section-1".to_string(),
+                project_todoist_id: "ignored-for-delete".to_string(),
+                name: String::new(),
+                is_deleted: true,
+            },
+            Utc::now().to_rfc3339().as_str(),
+            false,
+        )?;
+        assert_eq!(outcome, SyncApplyOutcome::Updated);
+
+        let sections = database.section_repository().list_all()?;
+        let stored = sections
+            .into_iter()
+            .find(|candidate| candidate.id == section.id)
+            .expect("section should still exist locally");
+        assert!(stored.deleted_at.is_some());
+        let detached_section_id: Option<i64> = database.connection.query_row(
+            "SELECT section_id FROM tasks WHERE id = ?1",
+            params![task.id.0],
+            |row| row.get(0),
+        )?;
+        assert_eq!(detached_section_id, None);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_remote_deleted_project_marks_local_subtree_deleted() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let project = database.project_repository().create(
+            "Work",
+            None,
+            ProjectColor::Blue,
+            false,
+            Local::now(),
+        )?;
+        let section = database
+            .section_repository()
+            .create(project.id, "Planning", Local::now())?;
+        let task = database
+            .task_repository()
+            .create("Task", project.id, None, Local::now())?;
+        database.connection.execute(
+            "UPDATE tasks SET section_id = ?1 WHERE id = ?2",
+            params![section.id.0, task.id.0],
+        )?;
+        sync.set_entity_todoist_id("project", project.id.0, "todoist-project-1", Utc::now().to_rfc3339().as_str())?;
+        database.connection.execute("DELETE FROM sync_outbox", [])?;
+
+        let outcome = sync.apply_remote_project(
+            &RemoteProjectRecord {
+                todoist_id: "todoist-project-1".to_string(),
+                parent_todoist_id: None,
+                name: String::new(),
+                color: "charcoal".to_string(),
+                is_favorite: false,
+                is_inbox: false,
+                is_deleted: true,
+            },
+            Utc::now().to_rfc3339().as_str(),
+            false,
+        )?;
+        assert_eq!(outcome, SyncApplyOutcome::Updated);
+
+        let projects = database.project_repository().list_all()?;
+        let stored_project = projects
+            .into_iter()
+            .find(|candidate| candidate.id == project.id)
+            .expect("project should still exist locally");
+        assert!(stored_project.deleted_at.is_some());
+        let sections = database.section_repository().list_all()?;
+        let stored_section = sections
+            .into_iter()
+            .find(|candidate| candidate.id == section.id)
+            .expect("section should still exist locally");
+        assert!(stored_section.deleted_at.is_some());
+        let deleted_task_at: Option<String> = database.connection.query_row(
+            "SELECT deleted_at FROM tasks WHERE id = ?1",
+            params![task.id.0],
+            |row| row.get(0),
+        )?;
+        assert!(deleted_task_at.is_some());
         Ok(())
     }
 

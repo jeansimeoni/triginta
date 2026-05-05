@@ -993,6 +993,7 @@ impl TodoistSyncProvider {
                 color: project.color.unwrap_or_else(|| "charcoal".to_string()),
                 is_favorite: project.is_favorite.unwrap_or(false),
                 is_inbox: project.inbox_project.unwrap_or(false),
+                is_deleted: project.is_deleted,
             };
             let outcome =
                 sync_repository.apply_remote_project(&remote, synced_at_utc, self.dry_run)?;
@@ -1007,6 +1008,7 @@ impl TodoistSyncProvider {
                 todoist_id: section.id,
                 project_todoist_id,
                 name: section.name,
+                is_deleted: section.is_deleted,
             };
             let outcome =
                 sync_repository.apply_remote_section(&remote, synced_at_utc, self.dry_run)?;
@@ -1019,6 +1021,7 @@ impl TodoistSyncProvider {
                 name: label.name,
                 color: label.color.unwrap_or_else(|| "charcoal".to_string()),
                 is_favorite: label.is_favorite.unwrap_or(false),
+                is_deleted: label.is_deleted,
             };
             let outcome = sync_repository.apply_remote_tag(&remote, synced_at_utc, self.dry_run)?;
             stats.record("tag", remote.todoist_id.as_str(), outcome, self.dry_run);
@@ -1031,6 +1034,7 @@ impl TodoistSyncProvider {
                 query: filter.query,
                 color: filter.color.unwrap_or_else(|| "charcoal".to_string()),
                 is_favorite: filter.is_favorite.unwrap_or(false),
+                is_deleted: filter.is_deleted,
             };
             let outcome =
                 sync_repository.apply_remote_filter(&remote, synced_at_utc, self.dry_run)?;
@@ -1156,6 +1160,8 @@ struct TodoistProject {
     is_favorite: Option<bool>,
     #[serde(alias = "is_inbox_project")]
     inbox_project: Option<bool>,
+    #[serde(default)]
+    is_deleted: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1163,6 +1169,8 @@ struct TodoistSection {
     id: String,
     project_id: Option<String>,
     name: String,
+    #[serde(default)]
+    is_deleted: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1171,6 +1179,8 @@ struct TodoistLabel {
     name: String,
     color: Option<String>,
     is_favorite: Option<bool>,
+    #[serde(default)]
+    is_deleted: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1180,6 +1190,8 @@ struct TodoistFilter {
     query: String,
     color: Option<String>,
     is_favorite: Option<bool>,
+    #[serde(default)]
+    is_deleted: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
