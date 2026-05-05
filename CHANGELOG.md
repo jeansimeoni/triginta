@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-05-05
+
+### Fixed
+
+- Todoist task moves and project reparenting now use the correct upstream move
+  operations instead of overloading regular update requests.
+- Todoist downstream sync now treats deleted remote projects, sections, tags,
+  and filters as tombstones, preventing blank or stale sidebar rows after
+  remote deletes.
+- Release follow-up workflows now resolve stable tags correctly from Release
+  runs, release publishing is idempotent when the GitHub release already
+  exists, and `cargo-dist` now allows the intentional CI workflow customization
+  used by this repository.
+
 ## [0.1.4] - 2026-05-05
 
 ### Fixed
