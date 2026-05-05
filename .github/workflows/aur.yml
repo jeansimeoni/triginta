@@ -133,7 +133,7 @@ jobs:
         run: pacman -Syu --noconfirm git sudo
 
       - name: Download generated package metadata
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: aur-package
           path: aur-package
@@ -157,7 +157,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Download generated package metadata
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: aur-package
           path: aur-package
