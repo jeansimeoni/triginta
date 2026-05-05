@@ -1,6 +1,6 @@
 # Install
 
-Triginta `0.1.2` is available through GitHub Releases, the shell installer,
+Triginta `0.1.3` is available through GitHub Releases, the shell installer,
 Homebrew, the AUR `triginta-bin` package, and source builds.
 
 Project website: <https://triginta.app>
@@ -28,7 +28,7 @@ All stable releases are published at:
 
 <https://github.com/jeansimeoni/triginta/releases>
 
-The `v0.1.2` release includes:
+The `v0.1.3` release includes:
 
 - macOS archives for `x86_64` and `aarch64`
 - Linux musl archives for `x86_64` and `aarch64`
@@ -44,7 +44,7 @@ The shell installer downloads the matching release artifact and installs
 `triginta` into `${CARGO_HOME:-$HOME/.cargo}/bin`.
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/triginta/releases/download/v0.1.2/triginta-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/triginta/releases/download/v0.1.3/triginta-installer.sh | sh
 ```
 
 Confirm the installed binary:

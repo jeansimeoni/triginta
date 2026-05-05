@@ -79,6 +79,44 @@ pub struct TodoistSyncProvider {
 }
 
 impl TodoistSyncProvider {
+    fn todoist_sync_command<'a>(
+        command_type: &'a str,
+        temp_id: Option<&'a str>,
+        uuid: &'a str,
+        args: Value,
+    ) -> TodoistSyncCommand<'a> {
+        TodoistSyncCommand {
+            command_type,
+            temp_id,
+            uuid,
+            args,
+        }
+    }
+
+    fn ensure_sync_command_succeeded(
+        response: &TodoistSyncCommandResponse,
+        uuid: &str,
+    ) -> Result<()> {
+        match response.sync_status.get(uuid) {
+            Some(Value::String(status)) if status == "ok" => Ok(()),
+            Some(status) => bail!("todoist sync command failed: {}", status),
+            None => bail!("todoist sync response is missing sync status for command {uuid}"),
+        }
+    }
+
+    fn created_id_from_sync_response(
+        response: &TodoistSyncCommandResponse,
+        temp_id: &str,
+    ) -> Result<String> {
+        scalar_value_as_string(
+            response
+                .temp_id_mapping
+                .get(temp_id)
+                .context("todoist sync response is missing temp id mapping")?,
+        )
+        .context("todoist sync response temp id mapping is missing a valid id")
+    }
+
     fn todoist_priority_to_local(priority: u8) -> i64 {
         match priority {
             4 => 1,
@@ -688,7 +726,14 @@ impl TodoistSyncProvider {
     ) -> Result<Option<String>> {
         if op_kind == "delete" || filter.deleted_at.is_some() {
             if let Some(remote_id) = filter.todoist_id.as_deref() {
-                client.delete(&format!("/filters/{remote_id}"))?;
+                let command_uuid = Uuid::new_v4().to_string();
+                let response = client.run_sync_command(&Self::todoist_sync_command(
+                    "filter_delete",
+                    None,
+                    command_uuid.as_str(),
+                    json!({ "id": remote_id }),
+                ))?;
+                Self::ensure_sync_command_succeeded(&response, command_uuid.as_str())?;
             }
             return Ok(None);
         }
@@ -700,14 +745,35 @@ impl TodoistSyncProvider {
             "is_favorite": filter.is_favorite,
         });
         if let Some(remote_id) = filter.todoist_id.as_deref() {
-            client.post_no_content(&format!("/filters/{remote_id}"), &body)?;
+            let command_uuid = Uuid::new_v4().to_string();
+            let response = client.run_sync_command(&Self::todoist_sync_command(
+                "filter_update",
+                None,
+                command_uuid.as_str(),
+                json!({
+                    "id": remote_id,
+                    "name": filter.name,
+                    "query": filter.query,
+                    "color": filter.color,
+                    "is_favorite": filter.is_favorite,
+                }),
+            ))?;
+            Self::ensure_sync_command_succeeded(&response, command_uuid.as_str())?;
             Ok(None)
         } else {
-            let created = client.post_json::<Value>("/filters", &body)?;
-            Ok(Some(
-                value_id_as_string(&created)
-                    .context("todoist filter create response is missing id")?,
-            ))
+            let command_uuid = Uuid::new_v4().to_string();
+            let temp_id = Uuid::new_v4().to_string();
+            let response = client.run_sync_command(&Self::todoist_sync_command(
+                "filter_add",
+                Some(temp_id.as_str()),
+                command_uuid.as_str(),
+                body,
+            ))?;
+            Self::ensure_sync_command_succeeded(&response, command_uuid.as_str())?;
+            Ok(Some(Self::created_id_from_sync_response(
+                &response,
+                temp_id.as_str(),
+            )?))
         }
     }
 
@@ -1216,6 +1282,24 @@ struct TodoistRestClient {
     correlation_id: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct TodoistSyncCommand<'a> {
+    #[serde(rename = "type")]
+    command_type: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temp_id: Option<&'a str>,
+    uuid: &'a str,
+    args: Value,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TodoistSyncCommandResponse {
+    #[serde(default)]
+    sync_status: HashMap<String, Value>,
+    #[serde(default)]
+    temp_id_mapping: HashMap<String, Value>,
+}
+
 impl TodoistRestClient {
     fn new(token: String) -> Self {
         Self {
@@ -1325,6 +1409,19 @@ impl TodoistRestClient {
             .read_json::<TodoistSyncResponse>()
             .map_err(|error| anyhow!(error))
     }
+
+    fn run_sync_command(&self, command: &TodoistSyncCommand<'_>) -> Result<TodoistSyncCommandResponse> {
+        let commands = serde_json::to_string(&[command]).context("failed to encode Todoist sync command")?;
+        let mut response = self
+            .post_request("/sync")
+            .send_form([("commands", commands.as_str())])
+            .map_err(map_ureq_error)?;
+        ensure_success_status(&mut response)?;
+        response
+            .body_mut()
+            .read_json::<TodoistSyncCommandResponse>()
+            .map_err(|error| anyhow!(error))
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1357,6 +1454,14 @@ fn value_id_as_string(value: &Value) -> Option<String> {
         Value::Number(raw) => Some(raw.to_string()),
         _ => None,
     })
+}
+
+fn scalar_value_as_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(raw) => Some(raw.clone()),
+        Value::Number(raw) => Some(raw.to_string()),
+        _ => None,
+    }
 }
 
 fn ensure_success_status(response: &mut ureq::http::Response<ureq::Body>) -> Result<()> {
@@ -1435,11 +1540,14 @@ fn completed_tasks_since(
 mod tests {
     use anyhow::Result;
     use chrono::Utc;
+    use serde_json::json;
 
     use crate::config::TodoistIntegrationConfig;
     use crate::storage::{Database, SyncRepository};
 
-    use super::{SyncTrigger, TaskSyncProvider, TodoistSyncProvider};
+    use super::{
+        SyncTrigger, TaskSyncProvider, TodoistSyncCommandResponse, TodoistSyncProvider,
+    };
 
     #[test]
     fn todoist_sync_dry_run_marks_outbox_as_pending_without_failures() -> Result<()> {
@@ -1558,5 +1666,45 @@ mod tests {
             "amanha",
             Some("pt-BR")
         ));
+    }
+
+    #[test]
+    fn todoist_filter_add_command_uses_sync_api_payload_shape() -> Result<()> {
+        let command = TodoistSyncProvider::todoist_sync_command(
+            "filter_add",
+            Some("temp-123"),
+            "uuid-123",
+            json!({
+                "name": "Today",
+                "query": "today",
+                "color": "charcoal",
+                "is_favorite": true,
+            }),
+        );
+        let serialized = serde_json::to_value(&command)?;
+
+        assert_eq!(serialized["type"], "filter_add");
+        assert_eq!(serialized["temp_id"], "temp-123");
+        assert_eq!(serialized["uuid"], "uuid-123");
+        assert_eq!(serialized["args"]["name"], "Today");
+        assert_eq!(serialized["args"]["query"], "today");
+        assert_eq!(serialized["args"]["color"], "charcoal");
+        assert_eq!(serialized["args"]["is_favorite"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn todoist_created_id_from_sync_response_reads_temp_id_mapping() -> Result<()> {
+        let response = TodoistSyncCommandResponse {
+            sync_status: std::iter::once(("uuid-123".to_string(), json!("ok"))).collect(),
+            temp_id_mapping: std::iter::once(("temp-123".to_string(), json!("4638878"))).collect(),
+        };
+
+        TodoistSyncProvider::ensure_sync_command_succeeded(&response, "uuid-123")?;
+        assert_eq!(
+            TodoistSyncProvider::created_id_from_sync_response(&response, "temp-123")?,
+            "4638878"
+        );
+        Ok(())
     }
 }
