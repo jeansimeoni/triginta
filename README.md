@@ -177,6 +177,7 @@ and documentation work.
 This section is intentionally incomplete for now. I will expand it as the
 project evolves.
 
+- Notifications
 - Mouse support where it makes sense
 - Better clipboard handling beyond basic terminal copy-paste, including copying
   task titles and other task information more easily
