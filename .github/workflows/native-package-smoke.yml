@@ -45,7 +45,7 @@ jobs:
             --pattern "${{ matrix.package_pattern }}"
 
       - name: Upload .deb smoke artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: native-deb-${{ matrix.arch }}
           path: smoke-artifacts/
@@ -119,7 +119,7 @@ jobs:
             --pattern "${{ matrix.package_pattern }}"
 
       - name: Upload .rpm smoke artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: native-rpm-${{ matrix.arch }}
           path: smoke-artifacts/
