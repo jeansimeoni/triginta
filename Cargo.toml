@@ -15,7 +15,7 @@ anyhow = "=1.0.102"
 chrono = { version = "=0.4.44", features = ["clock", "serde"] }
 clap = { version = "=4.6.1", default-features = false, features = ["std", "help", "usage", "error-context"] }
 crossterm = "=0.28.1"
-directories = "=5.0.1"
+directories = "=6.0.0"
 ratatui = { version = "=0.29.0", features = ["widget-calendar"] }
 rusqlite = { version = "=0.32.1", features = ["bundled", "chrono"] }
 serde = { version = "=1.0.228", features = ["derive"] }
