@@ -6,6 +6,7 @@ use std::{path::Path, time::Duration};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::json;
 
 use crate::domain::{
     DayHistorySummary, Filter, FilterColor, FilterId, FilterUpdate, FocusDaySummary,
@@ -1131,6 +1132,40 @@ fn enqueue_sync_outbox(
         ],
     )?;
     Ok(())
+}
+
+fn task_sync_update_payload(
+    current_project_id: ProjectId,
+    current_section_id: Option<SectionId>,
+    current_parent_task_id: Option<TaskId>,
+    update: &TaskUpdate,
+) -> String {
+    let location_changed = current_project_id != update.project_id
+        || current_section_id != update.section_id
+        || current_parent_task_id != update.parent_task_id;
+    let location_target = if update.parent_task_id.is_some() {
+        Some("parent")
+    } else if update.section_id.is_some() {
+        Some("section")
+    } else {
+        Some("project")
+    };
+
+    json!({
+        "location_changed": location_changed,
+        "location_target": location_target,
+    })
+    .to_string()
+}
+
+fn project_sync_update_payload(
+    current_parent_project_id: Option<ProjectId>,
+    update: &ProjectUpdate,
+) -> String {
+    json!({
+        "parent_changed": current_parent_project_id != update.parent_project_id,
+    })
+    .to_string()
 }
 
 pub struct SqliteSyncRepository<'a> {
@@ -2494,7 +2529,13 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             "task",
             task_id.0,
             "update",
-            "{}",
+            task_sync_update_payload(
+                current.project_id,
+                current.section_id,
+                current.parent_task_id,
+                update,
+            )
+            .as_str(),
             now_utc_rfc3339().as_str(),
         )?;
 
@@ -2954,7 +2995,7 @@ impl ProjectRepository for SqliteProjectRepository<'_> {
             "project",
             project_id.0,
             "update",
-            "{}",
+            project_sync_update_payload(current.parent_project_id, update).as_str(),
             now_utc_rfc3339().as_str(),
         )?;
 

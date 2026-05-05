@@ -117,6 +117,79 @@ impl TodoistSyncProvider {
         .context("todoist sync response temp id mapping is missing a valid id")
     }
 
+    fn task_outbox_payload(payload: &str) -> Result<TodoistTaskOutboxPayload> {
+        serde_json::from_str(payload).context("failed to parse Todoist task outbox payload")
+    }
+
+    fn project_outbox_payload(payload: &str) -> Result<TodoistProjectOutboxPayload> {
+        serde_json::from_str(payload).context("failed to parse Todoist project outbox payload")
+    }
+
+    fn sync_task_location(
+        task: &SyncTaskSnapshot,
+        client: &TodoistRestClient,
+        remote_id: &str,
+        payload: &TodoistTaskOutboxPayload,
+    ) -> Result<()> {
+        if !payload.location_changed {
+            return Ok(());
+        }
+
+        let target = payload.location_target.as_deref().unwrap_or("project");
+        let body = match target {
+            "parent" => json!({
+                "parent_id": task.parent_todoist_id.as_deref().context(
+                    "task parent mapping is not synced yet; retrying after parent task sync"
+                )?,
+            }),
+            "section" => json!({
+                "section_id": task.section_todoist_id.as_deref().context(
+                    "task section mapping is not synced yet; retrying after section sync"
+                )?,
+            }),
+            "project" => json!({
+                "project_id": task.project_todoist_id.as_deref().context(
+                    "task project mapping is not synced yet; retrying after project sync"
+                )?,
+            }),
+            other => bail!("unsupported Todoist task location target {other}"),
+        };
+
+        let _ = client.post_json::<Value>(&format!("/tasks/{remote_id}/move"), &body)?;
+        Ok(())
+    }
+
+    fn sync_project_parent(
+        project: &SyncProjectSnapshot,
+        client: &TodoistRestClient,
+        remote_id: &str,
+        payload: &TodoistProjectOutboxPayload,
+    ) -> Result<()> {
+        if !payload.parent_changed {
+            return Ok(());
+        }
+
+        let command_uuid = Uuid::new_v4().to_string();
+        let response = client.run_sync_command(&Self::todoist_sync_command(
+            "project_move",
+            None,
+            command_uuid.as_str(),
+            json!({
+                "id": remote_id,
+                "parent_id": if project.has_parent_project {
+                    Value::String(
+                        project.parent_todoist_id.as_deref().context(
+                            "project parent mapping is not synced yet; retrying after parent project sync"
+                        )?.to_string()
+                    )
+                } else {
+                    Value::Null
+                },
+            }),
+        ))?;
+        Self::ensure_sync_command_succeeded(&response, command_uuid.as_str())
+    }
+
     fn todoist_priority_to_local(priority: u8) -> i64 {
         match priority {
             4 => 1,
@@ -397,7 +470,8 @@ impl TodoistSyncProvider {
 
         match snapshot {
             SyncEntitySnapshot::Task(task) => {
-                let created_id = self.sync_task(entry.op_kind.as_str(), &task, client)?;
+                let created_id =
+                    self.sync_task(entry.op_kind.as_str(), entry.payload.as_str(), &task, client)?;
                 if let Some(created_id) = created_id {
                     sync_repository.set_entity_todoist_id(
                         "task",
@@ -414,7 +488,12 @@ impl TodoistSyncProvider {
                 }
             }
             SyncEntitySnapshot::Project(project) => {
-                let created_id = self.sync_project(entry.op_kind.as_str(), &project, client)?;
+                let created_id = self.sync_project(
+                    entry.op_kind.as_str(),
+                    entry.payload.as_str(),
+                    &project,
+                    client,
+                )?;
                 if let Some(created_id) = created_id {
                     sync_repository.set_entity_todoist_id(
                         "project",
@@ -490,6 +569,7 @@ impl TodoistSyncProvider {
     fn sync_task(
         &self,
         op_kind: &str,
+        payload: &str,
         task: &SyncTaskSnapshot,
         client: &TodoistRestClient,
     ) -> Result<Option<String>> {
@@ -516,23 +596,25 @@ impl TodoistSyncProvider {
             bail!("task project mapping is not synced yet; retrying after project sync");
         }
 
-        if let Some(project_id) = task.project_todoist_id.as_deref() {
-            body.insert(
-                "project_id".to_string(),
-                Value::String(project_id.to_string()),
-            );
-        }
-        if let Some(section_id) = task.section_todoist_id.as_deref() {
-            body.insert(
-                "section_id".to_string(),
-                Value::String(section_id.to_string()),
-            );
-        }
-        if let Some(parent_id) = task.parent_todoist_id.as_deref() {
-            body.insert(
-                "parent_id".to_string(),
-                Value::String(parent_id.to_string()),
-            );
+        if task.todoist_id.is_none() {
+            if let Some(project_id) = task.project_todoist_id.as_deref() {
+                body.insert(
+                    "project_id".to_string(),
+                    Value::String(project_id.to_string()),
+                );
+            }
+            if let Some(section_id) = task.section_todoist_id.as_deref() {
+                body.insert(
+                    "section_id".to_string(),
+                    Value::String(section_id.to_string()),
+                );
+            }
+            if let Some(parent_id) = task.parent_todoist_id.as_deref() {
+                body.insert(
+                    "parent_id".to_string(),
+                    Value::String(parent_id.to_string()),
+                );
+            }
         }
         if let Some(due_string) = task.due_string.as_ref() {
             if Self::due_string_is_recurring_for_todoist(
@@ -594,6 +676,12 @@ impl TodoistSyncProvider {
         let should_be_completed = task.completed_at.is_some();
         if let Some(remote_id) = task.todoist_id.as_deref() {
             client.post_no_content(&format!("/tasks/{remote_id}"), &Value::Object(body))?;
+            Self::sync_task_location(
+                task,
+                client,
+                remote_id,
+                &Self::task_outbox_payload(payload)?,
+            )?;
             if should_be_completed {
                 client.post_empty(&format!("/tasks/{remote_id}/close"))?;
             } else {
@@ -614,6 +702,7 @@ impl TodoistSyncProvider {
     fn sync_project(
         &self,
         op_kind: &str,
+        payload: &str,
         project: &SyncProjectSnapshot,
         client: &TodoistRestClient,
     ) -> Result<Option<String>> {
@@ -643,6 +732,12 @@ impl TodoistSyncProvider {
 
         if let Some(remote_id) = project.todoist_id.as_deref() {
             client.post_no_content(&format!("/projects/{remote_id}"), &Value::Object(body))?;
+            Self::sync_project_parent(
+                project,
+                client,
+                remote_id,
+                &Self::project_outbox_payload(payload)?,
+            )?;
             Ok(None)
         } else {
             let created = client.post_json::<Value>("/projects", &Value::Object(body))?;
@@ -1298,6 +1393,19 @@ struct TodoistSyncCommandResponse {
     sync_status: HashMap<String, Value>,
     #[serde(default)]
     temp_id_mapping: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct TodoistTaskOutboxPayload {
+    #[serde(default)]
+    location_changed: bool,
+    location_target: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct TodoistProjectOutboxPayload {
+    #[serde(default)]
+    parent_changed: bool,
 }
 
 impl TodoistRestClient {

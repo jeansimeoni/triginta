@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   package-native-linux:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'v')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,9 +45,27 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
-            tag="${{ github.event.workflow_run.head_branch }}"
+            tag="$(
+              git ls-remote --tags origin \
+                | awk -v sha="${{ github.event.workflow_run.head_sha }}" '
+                    $1 == sha && $2 !~ /\^\{\}$/ {
+                      ref = $2
+                      sub(/^refs\/tags\//, "", ref)
+                      if (ref ~ /^v?[0-9]+\.[0-9]+\.[0-9]+([-.].*)?$/) {
+                        print ref
+                      }
+                    }
+                  ' \
+                | sort -V \
+                | tail -n 1
+            )"
           else
             tag="${{ inputs.tag }}"
+          fi
+
+          if [[ -z "$tag" ]]; then
+            echo "No semver tag found for release workflow head ${{ github.event.workflow_run.head_sha }}" >&2
+            exit 1
           fi
 
           if [[ "$tag" != v* ]]; then
