@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Check AUR packaging generation
         run: scripts/check-aur-packaging.sh
@@ -55,7 +55,7 @@ jobs:
       publish: ${{ steps.resolve.outputs.publish }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - id: resolve
         name: Resolve release inputs
@@ -117,7 +117,7 @@ jobs:
             --output-dir aur-package
 
       - name: Upload generated package metadata
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aur-package
           path: aur-package/
@@ -133,7 +133,7 @@ jobs:
         run: pacman -Syu --noconfirm git sudo
 
       - name: Download generated package metadata
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: aur-package
           path: aur-package
@@ -157,7 +157,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Download generated package metadata
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: aur-package
           path: aur-package

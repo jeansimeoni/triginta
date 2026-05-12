@@ -45,7 +45,7 @@ jobs:
             --pattern "${{ matrix.package_pattern }}"
 
       - name: Upload .deb smoke artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: native-deb-${{ matrix.arch }}
           path: smoke-artifacts/
@@ -69,7 +69,7 @@ jobs:
           apt-get install -y ca-certificates
 
       - name: Download .deb smoke artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: native-deb-${{ matrix.arch }}
           path: smoke-artifacts
@@ -119,7 +119,7 @@ jobs:
             --pattern "${{ matrix.package_pattern }}"
 
       - name: Upload .rpm smoke artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: native-rpm-${{ matrix.arch }}
           path: smoke-artifacts/
@@ -142,7 +142,7 @@ jobs:
           dnf install -y findutils
 
       - name: Download .rpm smoke artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: native-rpm-${{ matrix.arch }}
           path: smoke-artifacts
