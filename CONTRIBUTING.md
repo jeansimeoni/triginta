@@ -56,6 +56,20 @@ Dependency changes must preserve the GPLv3-compatible dependency policy in
 reviewed supply-chain change: check the new license, advisory status, source,
 and duplicate-version impact before merging.
 
+Routine dependency upgrades are intentionally conservative in this repository.
+Dependabot security updates should remain enabled in repository settings, but
+routine Cargo version-bump PRs are disabled. Prefer deliberate dependency
+refreshes during planned maintenance or when there is a concrete reason to
+upgrade, such as:
+
+- a security advisory or other supply-chain issue
+- a bug fix or platform fix that affects Triginta directly
+- a release engineering need, such as updated GitHub Actions runners or APIs
+- an intentional migration of the terminal or storage stack
+
+When performing a dependency refresh, batch related upgrades where practical
+and review them as product and infrastructure changes, not as automatic churn.
+
 ## Release Process
 
 Releases are maintainer-controlled and are published by the generated `dist`
