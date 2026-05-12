@@ -470,8 +470,12 @@ impl TodoistSyncProvider {
 
         match snapshot {
             SyncEntitySnapshot::Task(task) => {
-                let created_id =
-                    self.sync_task(entry.op_kind.as_str(), entry.payload.as_str(), &task, client)?;
+                let created_id = self.sync_task(
+                    entry.op_kind.as_str(),
+                    entry.payload.as_str(),
+                    &task,
+                    client,
+                )?;
                 if let Some(created_id) = created_id {
                     sync_repository.set_entity_todoist_id(
                         "task",
@@ -1530,8 +1534,12 @@ impl TodoistRestClient {
             .map_err(|error| anyhow!(error))
     }
 
-    fn run_sync_command(&self, command: &TodoistSyncCommand<'_>) -> Result<TodoistSyncCommandResponse> {
-        let commands = serde_json::to_string(&[command]).context("failed to encode Todoist sync command")?;
+    fn run_sync_command(
+        &self,
+        command: &TodoistSyncCommand<'_>,
+    ) -> Result<TodoistSyncCommandResponse> {
+        let commands =
+            serde_json::to_string(&[command]).context("failed to encode Todoist sync command")?;
         let mut response = self
             .post_request("/sync")
             .send_form([("commands", commands.as_str())])
@@ -1665,9 +1673,7 @@ mod tests {
     use crate::config::TodoistIntegrationConfig;
     use crate::storage::{Database, SyncRepository};
 
-    use super::{
-        SyncTrigger, TaskSyncProvider, TodoistSyncCommandResponse, TodoistSyncProvider,
-    };
+    use super::{SyncTrigger, TaskSyncProvider, TodoistSyncCommandResponse, TodoistSyncProvider};
 
     #[test]
     fn todoist_sync_dry_run_marks_outbox_as_pending_without_failures() -> Result<()> {

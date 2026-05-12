@@ -1671,9 +1671,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                 if dry_run {
                     return Ok(SyncApplyOutcome::Updated);
                 }
-                self.connection
-                    .execute(
-                        "WITH RECURSIVE project_tree(id) AS (
+                self.connection.execute(
+                    "WITH RECURSIVE project_tree(id) AS (
                              SELECT id FROM projects WHERE id = ?1
                              UNION ALL
                              SELECT projects.id
@@ -1685,11 +1684,10 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                              updated_at = ?2,
                              synced_at = ?3
                          WHERE id IN (SELECT id FROM project_tree)",
-                        params![local_id, now_local, synced_at_utc],
-                    )?;
-                self.connection
-                    .execute(
-                        "WITH RECURSIVE project_tree(id) AS (
+                    params![local_id, now_local, synced_at_utc],
+                )?;
+                self.connection.execute(
+                    "WITH RECURSIVE project_tree(id) AS (
                              SELECT id FROM projects WHERE id = ?1
                              UNION ALL
                              SELECT projects.id
@@ -1701,11 +1699,10 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                              updated_at = ?2,
                              synced_at = COALESCE(synced_at, ?3)
                          WHERE project_id IN (SELECT id FROM project_tree)",
-                        params![local_id, now_local, synced_at_utc],
-                    )?;
-                self.connection
-                    .execute(
-                        "WITH RECURSIVE project_tree(id) AS (
+                    params![local_id, now_local, synced_at_utc],
+                )?;
+                self.connection.execute(
+                    "WITH RECURSIVE project_tree(id) AS (
                              SELECT id FROM projects WHERE id = ?1
                              UNION ALL
                              SELECT projects.id
@@ -1717,8 +1714,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                              updated_at = ?2,
                              synced_at = COALESCE(synced_at, ?3)
                          WHERE project_id IN (SELECT id FROM project_tree)",
-                        params![local_id, now_local, synced_at_utc],
-                    )?;
+                    params![local_id, now_local, synced_at_utc],
+                )?;
                 return Ok(SyncApplyOutcome::Updated);
             }
             if dry_run {
@@ -1947,10 +1944,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                      WHERE id = ?3",
                     params![now_local, synced_at_utc, local_id],
                 )?;
-                self.connection.execute(
-                    "DELETE FROM task_tags WHERE tag_id = ?1",
-                    params![local_id],
-                )?;
+                self.connection
+                    .execute("DELETE FROM task_tags WHERE tag_id = ?1", params![local_id])?;
                 return Ok(SyncApplyOutcome::Updated);
             }
             if dry_run {
@@ -4564,7 +4559,12 @@ mod tests {
             false,
             Local::now(),
         )?;
-        sync.set_entity_todoist_id("filter", filter.id.0, "todoist-filter-1", Utc::now().to_rfc3339().as_str())?;
+        sync.set_entity_todoist_id(
+            "filter",
+            filter.id.0,
+            "todoist-filter-1",
+            Utc::now().to_rfc3339().as_str(),
+        )?;
         database.connection.execute("DELETE FROM sync_outbox", [])?;
 
         let outcome = sync.apply_remote_filter(
@@ -4596,16 +4596,19 @@ mod tests {
         let database = Database::open_in_memory()?;
         let sync = database.sync_repository();
         let inbox_project_id = database.project_repository().inbox_project_id()?;
-        let task = database
-            .task_repository()
-            .create("Task", inbox_project_id, None, Local::now())?;
-        let tag = database.tag_repository().create(
-            "Urgent",
-            TagColor::Red,
-            false,
-            Local::now(),
+        let task =
+            database
+                .task_repository()
+                .create("Task", inbox_project_id, None, Local::now())?;
+        let tag = database
+            .tag_repository()
+            .create("Urgent", TagColor::Red, false, Local::now())?;
+        sync.set_entity_todoist_id(
+            "tag",
+            tag.id.0,
+            "todoist-tag-1",
+            Utc::now().to_rfc3339().as_str(),
         )?;
-        sync.set_entity_todoist_id("tag", tag.id.0, "todoist-tag-1", Utc::now().to_rfc3339().as_str())?;
         database.connection.execute("DELETE FROM sync_outbox", [])?;
         database.connection.execute(
             "INSERT INTO task_tags(task_id, tag_id) VALUES (?1, ?2)",
@@ -4651,9 +4654,10 @@ mod tests {
             false,
             Local::now(),
         )?;
-        let section = database
-            .section_repository()
-            .create(project.id, "Inbox Section", Local::now())?;
+        let section =
+            database
+                .section_repository()
+                .create(project.id, "Inbox Section", Local::now())?;
         let task = database
             .task_repository()
             .create("Task", project.id, None, Local::now())?;
@@ -4661,7 +4665,12 @@ mod tests {
             "UPDATE tasks SET section_id = ?1 WHERE id = ?2",
             params![section.id.0, task.id.0],
         )?;
-        sync.set_entity_todoist_id("section", section.id.0, "todoist-section-1", Utc::now().to_rfc3339().as_str())?;
+        sync.set_entity_todoist_id(
+            "section",
+            section.id.0,
+            "todoist-section-1",
+            Utc::now().to_rfc3339().as_str(),
+        )?;
         database.connection.execute("DELETE FROM sync_outbox", [])?;
 
         let outcome = sync.apply_remote_section(
@@ -4712,7 +4721,12 @@ mod tests {
             "UPDATE tasks SET section_id = ?1 WHERE id = ?2",
             params![section.id.0, task.id.0],
         )?;
-        sync.set_entity_todoist_id("project", project.id.0, "todoist-project-1", Utc::now().to_rfc3339().as_str())?;
+        sync.set_entity_todoist_id(
+            "project",
+            project.id.0,
+            "todoist-project-1",
+            Utc::now().to_rfc3339().as_str(),
+        )?;
         database.connection.execute("DELETE FROM sync_outbox", [])?;
 
         let outcome = sync.apply_remote_project(
