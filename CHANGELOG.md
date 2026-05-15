@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-05-15
+
+### Fixed
+
+- Todoist downstream sync now merges duplicate local inbox rows into the
+  canonical mapped inbox when a remote inbox project is applied, preventing
+  tasks from staying attached to an unmapped local inbox row.
+- Database bootstrap now reconciles previously split inbox rows on upgrade, so
+  affected users recover on `Database::open()` without waiting for another
+  Todoist inbox payload.
+
 ## [0.1.6] - 2026-05-15
 
 ### Fixed
