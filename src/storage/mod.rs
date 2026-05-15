@@ -1721,6 +1721,18 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             if dry_run {
                 return Ok(SyncApplyOutcome::Updated);
             }
+            if remote.is_inbox {
+                if let Some(duplicate_local_id) =
+                    self.match_unmapped_inbox_project_excluding(local_id)?
+                {
+                    self.merge_duplicate_inbox_project(
+                        duplicate_local_id,
+                        local_id,
+                        now_local,
+                        synced_at_utc,
+                    )?;
+                }
+            }
             self.connection.execute(
                 "UPDATE projects
                  SET name = ?1, parent_project_id = ?2, color = ?3, is_favorite = ?4,
@@ -2433,6 +2445,83 @@ impl SqliteSyncRepository<'_> {
             )
             .optional()
             .context("failed to match unmapped inbox project")
+    }
+
+    fn match_unmapped_inbox_project_excluding(&self, excluded_id: i64) -> Result<Option<i64>> {
+        self.connection
+            .query_row(
+                "SELECT id
+                 FROM projects
+                 WHERE id != ?1
+                   AND is_inbox = 1
+                   AND todoist_id IS NULL
+                   AND deleted_at IS NULL
+                 ORDER BY id
+                 LIMIT 1",
+                params![excluded_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("failed to match duplicate unmapped inbox project")
+    }
+
+    fn merge_duplicate_inbox_project(
+        &self,
+        duplicate_local_id: i64,
+        canonical_local_id: i64,
+        now_local: DateTime<Local>,
+        synced_at_utc: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "UPDATE tasks
+             SET project_id = ?1,
+                 updated_at = ?2
+             WHERE project_id = ?3",
+            params![canonical_local_id, now_local, duplicate_local_id],
+        )?;
+        self.connection.execute(
+            "UPDATE sections
+             SET project_id = ?1,
+                 updated_at = ?2,
+                 synced_at = COALESCE(synced_at, ?4)
+             WHERE project_id = ?3",
+            params![
+                canonical_local_id,
+                now_local,
+                duplicate_local_id,
+                synced_at_utc
+            ],
+        )?;
+        self.connection.execute(
+            "UPDATE projects
+             SET parent_project_id = ?1,
+                 updated_at = ?2,
+                 synced_at = COALESCE(synced_at, ?4)
+             WHERE parent_project_id = ?3",
+            params![
+                canonical_local_id,
+                now_local,
+                duplicate_local_id,
+                synced_at_utc
+            ],
+        )?;
+        self.connection.execute(
+            "UPDATE sync_outbox
+             SET entity_local_id = ?1
+             WHERE entity_type = 'project'
+               AND entity_local_id = ?2",
+            params![canonical_local_id, duplicate_local_id],
+        )?;
+        self.connection.execute(
+            "UPDATE projects
+             SET is_inbox = 0,
+                 updated_at = ?1,
+                 synced_at = COALESCE(synced_at, ?2),
+                 deleted_at = COALESCE(deleted_at, ?1)
+             WHERE id = ?3",
+            params![now_local, synced_at_utc, duplicate_local_id],
+        )?;
+        Ok(())
     }
 
     fn match_unmapped_project_by_name_and_parent(
@@ -4404,10 +4493,10 @@ mod tests {
     use crate::domain::{SessionKind, SessionOutcome};
 
     use super::{
-        Database, FilterRepository, PomodoroRepository, ProjectRepository, RemoteFilterRecord,
-        RemoteProjectRecord, RemoteSectionRecord, RemoteTagRecord, RemoteTaskRecord,
-        SectionRepository, SyncApplyOutcome, SyncRepository, SyncStateRecord, TagRepository,
-        TaskRepository,
+        Database, FilterRepository, PomodoroRepository, ProjectId, ProjectRepository,
+        RemoteFilterRecord, RemoteProjectRecord, RemoteSectionRecord, RemoteTagRecord,
+        RemoteTaskRecord, SectionRepository, SyncApplyOutcome, SyncRepository, SyncStateRecord,
+        TagRepository, TaskRepository,
     };
 
     fn naive_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<Utc> {
@@ -4594,6 +4683,89 @@ mod tests {
         assert_eq!(stored.0.as_deref(), Some("todoist-inbox-1"));
         assert!(stored.1);
         assert_eq!(stored.2, "Boite de reception");
+        Ok(())
+    }
+
+    #[test]
+    fn apply_remote_inbox_project_merges_duplicate_local_inbox_into_mapped_row() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let tasks = database.task_repository();
+        let original_inbox_id = database.project_repository().inbox_project_id()?;
+
+        database.connection.execute(
+            "UPDATE projects
+             SET todoist_id = ?1, is_inbox = 0, synced_at = ?2
+             WHERE id = ?3",
+            params![
+                "todoist-inbox-1",
+                Utc::now().to_rfc3339(),
+                original_inbox_id.0
+            ],
+        )?;
+        database.connection.execute(
+            "INSERT INTO projects(name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+             VALUES ('Inbox', NULL, 'charcoal', 0, 1, 0, ?1, ?1, NULL, NULL, NULL)",
+            params![Local::now()],
+        )?;
+        let duplicate_inbox_id = database.connection.last_insert_rowid();
+        let task = tasks.create(
+            "Atualizar financas",
+            ProjectId(duplicate_inbox_id),
+            None,
+            Local::now(),
+        )?;
+
+        let outcome = sync.apply_remote_project(
+            &RemoteProjectRecord {
+                todoist_id: "todoist-inbox-1".to_string(),
+                parent_todoist_id: None,
+                name: "Boite de reception".to_string(),
+                color: "grey".to_string(),
+                is_favorite: false,
+                is_inbox: true,
+                is_deleted: false,
+            },
+            Utc::now().to_rfc3339().as_str(),
+            false,
+        )?;
+        assert_eq!(outcome, SyncApplyOutcome::Updated);
+
+        let moved_project_id: i64 = database.connection.query_row(
+            "SELECT project_id
+             FROM tasks
+             WHERE id = ?1",
+            params![task.id.0],
+            |row| row.get(0),
+        )?;
+        assert_eq!(moved_project_id, original_inbox_id.0);
+
+        let duplicate_state = database.connection.query_row(
+            "SELECT is_inbox, deleted_at
+             FROM projects
+             WHERE id = ?1",
+            params![duplicate_inbox_id],
+            |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, Option<String>>(1)?)),
+        )?;
+        assert!(!duplicate_state.0);
+        assert!(duplicate_state.1.is_some());
+
+        let canonical_state = database.connection.query_row(
+            "SELECT is_inbox, todoist_id, name
+             FROM projects
+             WHERE id = ?1",
+            params![original_inbox_id.0],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? != 0,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        assert!(canonical_state.0);
+        assert_eq!(canonical_state.1.as_deref(), Some("todoist-inbox-1"));
+        assert_eq!(canonical_state.2, "Boite de reception");
         Ok(())
     }
 
