@@ -595,8 +595,7 @@ impl TodoistSyncProvider {
             Value::Number(Self::local_priority_to_todoist(task.priority).into()),
         );
 
-        if task.todoist_id.is_none() && task.project_todoist_id.is_none() && !task.project_is_inbox
-        {
+        if Self::task_create_requires_project_mapping(task) {
             bail!("task project mapping is not synced yet; retrying after project sync");
         }
 
@@ -701,6 +700,13 @@ impl TodoistSyncProvider {
             }
             Ok(Some(created_id))
         }
+    }
+
+    fn task_create_requires_project_mapping(task: &SyncTaskSnapshot) -> bool {
+        task.todoist_id.is_none()
+            && task.project_todoist_id.is_none()
+            && !task.project_is_inbox
+            && task.parent_todoist_id.is_none()
     }
 
     fn sync_project(
@@ -1671,7 +1677,7 @@ mod tests {
     use serde_json::json;
 
     use crate::config::TodoistIntegrationConfig;
-    use crate::storage::{Database, SyncRepository};
+    use crate::storage::{Database, SyncRepository, SyncTaskSnapshot};
 
     use super::{SyncTrigger, TaskSyncProvider, TodoistSyncCommandResponse, TodoistSyncProvider};
 
@@ -1832,5 +1838,61 @@ mod tests {
             "4638878"
         );
         Ok(())
+    }
+
+    #[test]
+    fn task_create_requires_project_mapping_for_top_level_tasks_without_synced_project() {
+        let task = SyncTaskSnapshot {
+            local_id: 1,
+            todoist_id: None,
+            todoist_sync_id: None,
+            project_todoist_id: None,
+            project_is_inbox: false,
+            section_todoist_id: None,
+            parent_todoist_id: None,
+            title: "Task".to_string(),
+            description: String::new(),
+            priority: 4,
+            due_date: None,
+            due_datetime_utc: None,
+            due_timezone: None,
+            due_string: None,
+            due_lang: None,
+            completed_at: None,
+            labels: Vec::new(),
+            deleted_at: None,
+        };
+
+        assert!(TodoistSyncProvider::task_create_requires_project_mapping(
+            &task
+        ));
+    }
+
+    #[test]
+    fn task_create_allows_subtasks_when_parent_mapping_is_synced() {
+        let task = SyncTaskSnapshot {
+            local_id: 1,
+            todoist_id: None,
+            todoist_sync_id: None,
+            project_todoist_id: None,
+            project_is_inbox: false,
+            section_todoist_id: None,
+            parent_todoist_id: Some("todoist-parent-1".to_string()),
+            title: "Subtask".to_string(),
+            description: String::new(),
+            priority: 4,
+            due_date: None,
+            due_datetime_utc: None,
+            due_timezone: None,
+            due_string: None,
+            due_lang: None,
+            completed_at: None,
+            labels: Vec::new(),
+            deleted_at: None,
+        };
+
+        assert!(!TodoistSyncProvider::task_create_requires_project_mapping(
+            &task
+        ));
     }
 }

@@ -1740,6 +1740,34 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             return Ok(SyncApplyOutcome::Updated);
         }
 
+        if remote.is_inbox {
+            if let Some(inbox_local_id) = self.match_unmapped_inbox_project()? {
+                if remote.is_deleted {
+                    return Ok(SyncApplyOutcome::Skipped);
+                }
+                if dry_run {
+                    return Ok(SyncApplyOutcome::Updated);
+                }
+                self.connection.execute(
+                    "UPDATE projects
+                     SET todoist_id = ?1, name = ?2, parent_project_id = ?3, color = ?4, is_favorite = ?5,
+                         is_inbox = 1, updated_at = ?6, synced_at = ?7, deleted_at = NULL
+                     WHERE id = ?8",
+                    params![
+                        remote.todoist_id,
+                        remote.name,
+                        parent_local_id,
+                        remote.color,
+                        if remote.is_favorite { 1_i64 } else { 0_i64 },
+                        now_local,
+                        synced_at_utc,
+                        inbox_local_id
+                    ],
+                )?;
+                return Ok(SyncApplyOutcome::Updated);
+            }
+        }
+
         if let Some(existing_local_id) =
             self.match_unmapped_project_by_name_and_parent(remote.name.as_str(), parent_local_id)?
         {
@@ -2388,6 +2416,23 @@ impl SqliteSyncRepository<'_> {
         let rows = statement.query_map(params![name], |row| row.get::<_, i64>(0))?;
         let ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(if ids.len() == 1 { Some(ids[0]) } else { None })
+    }
+
+    fn match_unmapped_inbox_project(&self) -> Result<Option<i64>> {
+        self.connection
+            .query_row(
+                "SELECT id
+                 FROM projects
+                 WHERE is_inbox = 1
+                   AND todoist_id IS NULL
+                   AND deleted_at IS NULL
+                 ORDER BY id
+                 LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("failed to match unmapped inbox project")
     }
 
     fn match_unmapped_project_by_name_and_parent(
@@ -4504,7 +4549,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_remote_inbox_project_reuses_bootstrapped_inbox_row() -> Result<()> {
+    fn apply_remote_inbox_project_reuses_bootstrapped_inbox_row_for_localized_name() -> Result<()> {
         let database = Database::open_in_memory()?;
         let sync = database.sync_repository();
 
@@ -4517,7 +4562,7 @@ mod tests {
             &RemoteProjectRecord {
                 todoist_id: "todoist-inbox-1".to_string(),
                 parent_todoist_id: None,
-                name: "Inbox".to_string(),
+                name: "Boite de reception".to_string(),
                 color: "grey".to_string(),
                 is_favorite: false,
                 is_inbox: true,
@@ -4529,22 +4574,26 @@ mod tests {
         assert_eq!(outcome, SyncApplyOutcome::Updated);
 
         let projects_after = database.project_repository().list_all()?;
-        let inbox_projects = projects_after
-            .iter()
-            .filter(|project| project.name == "Inbox")
-            .collect::<Vec<_>>();
-        assert_eq!(inbox_projects.len(), 1);
-        assert!(inbox_projects[0].is_inbox);
+        assert_eq!(projects_after.len(), 1);
+        assert!(projects_after[0].is_inbox);
+        assert_eq!(projects_after[0].name, "Boite de reception");
 
         let stored = database.connection.query_row(
-            "SELECT todoist_id, is_inbox
+            "SELECT todoist_id, is_inbox, name
              FROM projects
              WHERE id = ?1",
-            params![inbox_projects[0].id.0],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)? != 0)),
+            params![projects_after[0].id.0],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )?;
         assert_eq!(stored.0.as_deref(), Some("todoist-inbox-1"));
         assert!(stored.1);
+        assert_eq!(stored.2, "Boite de reception");
         Ok(())
     }
 
