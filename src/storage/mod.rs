@@ -721,6 +721,7 @@ impl Database {
                 params!["schema_version", "1"],
             )
             .context("failed to initialize app metadata")?;
+        self.reconcile_split_inbox_projects()?;
         let inbox_project_id = self.ensure_inbox_project()?;
         self.assign_tasks_to_inbox(inbox_project_id)?;
         self.normalize_task_child_order()?;
@@ -1097,6 +1098,65 @@ impl Database {
         Ok(ProjectId(self.connection.last_insert_rowid()))
     }
 
+    fn reconcile_split_inbox_projects(&self) -> Result<()> {
+        let canonical_inbox_id = self
+            .connection
+            .query_row(
+                "SELECT id
+                 FROM projects
+                 WHERE deleted_at IS NULL
+                   AND todoist_id IS NOT NULL
+                   AND lower(name) = 'inbox'
+                 ORDER BY id
+                 LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("failed to load canonical inbox candidate")?;
+        let Some(canonical_inbox_id) = canonical_inbox_id else {
+            return Ok(());
+        };
+
+        let duplicate_ids = self
+            .connection
+            .prepare(
+                "SELECT id
+                 FROM projects
+                 WHERE deleted_at IS NULL
+                   AND id != ?1
+                   AND is_inbox = 1
+                   AND todoist_id IS NULL
+                 ORDER BY id",
+            )?
+            .query_map(params![canonical_inbox_id], |row| row.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        if duplicate_ids.is_empty() {
+            return Ok(());
+        }
+
+        let now_local = Local::now();
+        for duplicate_local_id in duplicate_ids {
+            merge_duplicate_inbox_project(
+                &self.connection,
+                duplicate_local_id,
+                canonical_inbox_id,
+                now_local,
+                None,
+            )?;
+        }
+        self.connection.execute(
+            "UPDATE projects
+             SET is_inbox = 1,
+                 deleted_at = NULL,
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now_local, canonical_inbox_id],
+        )?;
+        Ok(())
+    }
+
     fn assign_tasks_to_inbox(&self, inbox_project_id: ProjectId) -> Result<()> {
         self.connection
             .execute(
@@ -1110,6 +1170,65 @@ impl Database {
 
 fn now_utc_rfc3339() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn merge_duplicate_inbox_project(
+    connection: &Connection,
+    duplicate_local_id: i64,
+    canonical_local_id: i64,
+    now_local: DateTime<Local>,
+    synced_at_utc: Option<&str>,
+) -> Result<()> {
+    connection.execute(
+        "UPDATE tasks
+         SET project_id = ?1,
+             updated_at = ?2
+         WHERE project_id = ?3",
+        params![canonical_local_id, now_local, duplicate_local_id],
+    )?;
+    connection.execute(
+        "UPDATE sections
+         SET project_id = ?1,
+             updated_at = ?2,
+             synced_at = COALESCE(synced_at, ?4)
+         WHERE project_id = ?3",
+        params![
+            canonical_local_id,
+            now_local,
+            duplicate_local_id,
+            synced_at_utc
+        ],
+    )?;
+    connection.execute(
+        "UPDATE projects
+         SET parent_project_id = ?1,
+             updated_at = ?2,
+             synced_at = COALESCE(synced_at, ?4)
+         WHERE parent_project_id = ?3",
+        params![
+            canonical_local_id,
+            now_local,
+            duplicate_local_id,
+            synced_at_utc
+        ],
+    )?;
+    connection.execute(
+        "UPDATE sync_outbox
+         SET entity_local_id = ?1
+         WHERE entity_type = 'project'
+           AND entity_local_id = ?2",
+        params![canonical_local_id, duplicate_local_id],
+    )?;
+    connection.execute(
+        "UPDATE projects
+         SET is_inbox = 0,
+             updated_at = ?1,
+             synced_at = COALESCE(synced_at, ?2),
+             deleted_at = COALESCE(deleted_at, ?1)
+         WHERE id = ?3",
+        params![now_local, synced_at_utc, duplicate_local_id],
+    )?;
+    Ok(())
 }
 
 fn enqueue_sync_outbox(
@@ -2472,56 +2591,13 @@ impl SqliteSyncRepository<'_> {
         now_local: DateTime<Local>,
         synced_at_utc: &str,
     ) -> Result<()> {
-        self.connection.execute(
-            "UPDATE tasks
-             SET project_id = ?1,
-                 updated_at = ?2
-             WHERE project_id = ?3",
-            params![canonical_local_id, now_local, duplicate_local_id],
-        )?;
-        self.connection.execute(
-            "UPDATE sections
-             SET project_id = ?1,
-                 updated_at = ?2,
-                 synced_at = COALESCE(synced_at, ?4)
-             WHERE project_id = ?3",
-            params![
-                canonical_local_id,
-                now_local,
-                duplicate_local_id,
-                synced_at_utc
-            ],
-        )?;
-        self.connection.execute(
-            "UPDATE projects
-             SET parent_project_id = ?1,
-                 updated_at = ?2,
-                 synced_at = COALESCE(synced_at, ?4)
-             WHERE parent_project_id = ?3",
-            params![
-                canonical_local_id,
-                now_local,
-                duplicate_local_id,
-                synced_at_utc
-            ],
-        )?;
-        self.connection.execute(
-            "UPDATE sync_outbox
-             SET entity_local_id = ?1
-             WHERE entity_type = 'project'
-               AND entity_local_id = ?2",
-            params![canonical_local_id, duplicate_local_id],
-        )?;
-        self.connection.execute(
-            "UPDATE projects
-             SET is_inbox = 0,
-                 updated_at = ?1,
-                 synced_at = COALESCE(synced_at, ?2),
-                 deleted_at = COALESCE(deleted_at, ?1)
-             WHERE id = ?3",
-            params![now_local, synced_at_utc, duplicate_local_id],
-        )?;
-        Ok(())
+        merge_duplicate_inbox_project(
+            self.connection,
+            duplicate_local_id,
+            canonical_local_id,
+            now_local,
+            Some(synced_at_utc),
+        )
     }
 
     fn match_unmapped_project_by_name_and_parent(
@@ -4546,6 +4622,72 @@ mod tests {
                 .pragma_query_value(None, "journal_mode", |row| row.get(0))?;
 
         assert_eq!(journal_mode.to_lowercase(), "wal");
+        Ok(())
+    }
+
+    #[test]
+    fn database_open_reconciles_split_inbox_projects_from_existing_file() -> Result<()> {
+        let tempdir = tempdir()?;
+        let database_path = tempdir.path().join("triginta.sqlite3");
+        let database = Database::open(database_path.as_path())?;
+        let tasks = database.task_repository();
+        let original_inbox_id = database.project_repository().inbox_project_id()?;
+
+        database.connection.execute(
+            "UPDATE projects
+             SET todoist_id = ?1, is_inbox = 0, synced_at = ?2
+             WHERE id = ?3",
+            params![
+                "todoist-inbox-1",
+                Utc::now().to_rfc3339(),
+                original_inbox_id.0
+            ],
+        )?;
+        database.connection.execute(
+            "INSERT INTO projects(name, parent_project_id, color, is_favorite, is_inbox, child_order, created_at, updated_at, synced_at, todoist_id, deleted_at)
+             VALUES ('Inbox', NULL, 'charcoal', 0, 1, 0, ?1, ?1, NULL, NULL, NULL)",
+            params![Local::now()],
+        )?;
+        let duplicate_inbox_id = database.connection.last_insert_rowid();
+        let task = tasks.create(
+            "Atualizar financas",
+            ProjectId(duplicate_inbox_id),
+            None,
+            Local::now(),
+        )?;
+        drop(database);
+
+        let reopened = Database::open(database_path.as_path())?;
+
+        let moved_project_id: i64 = reopened.connection.query_row(
+            "SELECT project_id
+             FROM tasks
+             WHERE id = ?1",
+            params![task.id.0],
+            |row| row.get(0),
+        )?;
+        assert_eq!(moved_project_id, original_inbox_id.0);
+
+        let active_inbox_rows: i64 = reopened.connection.query_row(
+            "SELECT COUNT(*)
+             FROM projects
+             WHERE deleted_at IS NULL
+               AND is_inbox = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(active_inbox_rows, 1);
+
+        let duplicate_state = reopened.connection.query_row(
+            "SELECT is_inbox, deleted_at
+             FROM projects
+             WHERE id = ?1",
+            params![duplicate_inbox_id],
+            |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, Option<String>>(1)?)),
+        )?;
+        assert!(!duplicate_state.0);
+        assert!(duplicate_state.1.is_some());
+
         Ok(())
     }
 
