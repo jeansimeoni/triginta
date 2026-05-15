@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-05-15
+
+### Fixed
+
+- Todoist downstream sync now matches the remote inbox to the bootstrapped
+  local inbox by `is_inbox`, fixing persistent sync failures for localized
+  non-English inbox names.
+- Todoist upstream task creation now allows subtasks with a synced parent to
+  proceed even when the project mapping has not synced yet.
+
 ## [0.1.5] - 2026-05-05
 
 ### Fixed
