@@ -1840,17 +1840,16 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             if dry_run {
                 return Ok(SyncApplyOutcome::Updated);
             }
-            if remote.is_inbox {
-                if let Some(duplicate_local_id) =
+            if remote.is_inbox
+                && let Some(duplicate_local_id) =
                     self.match_unmapped_inbox_project_excluding(local_id)?
-                {
-                    self.merge_duplicate_inbox_project(
-                        duplicate_local_id,
-                        local_id,
-                        synced_local,
-                        synced_at_utc,
-                    )?;
-                }
+            {
+                self.merge_duplicate_inbox_project(
+                    duplicate_local_id,
+                    local_id,
+                    synced_local,
+                    synced_at_utc,
+                )?;
             }
             self.connection.execute(
                 "UPDATE projects
@@ -1871,32 +1870,32 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             return Ok(SyncApplyOutcome::Updated);
         }
 
-        if remote.is_inbox {
-            if let Some(inbox_local_id) = self.match_unmapped_inbox_project()? {
-                if remote.is_deleted {
-                    return Ok(SyncApplyOutcome::Skipped);
-                }
-                if dry_run {
-                    return Ok(SyncApplyOutcome::Updated);
-                }
-                self.connection.execute(
-                    "UPDATE projects
-                     SET todoist_id = ?1, name = ?2, parent_project_id = ?3, color = ?4, is_favorite = ?5,
-                         is_inbox = 1, updated_at = ?6, synced_at = ?7, deleted_at = NULL
-                     WHERE id = ?8",
-                    params![
-                        remote.todoist_id,
-                        remote.name,
-                        parent_local_id,
-                        remote.color,
-                        if remote.is_favorite { 1_i64 } else { 0_i64 },
-                        synced_local,
-                        synced_at_utc,
-                        inbox_local_id
-                    ],
-                )?;
+        if remote.is_inbox
+            && let Some(inbox_local_id) = self.match_unmapped_inbox_project()?
+        {
+            if remote.is_deleted {
+                return Ok(SyncApplyOutcome::Skipped);
+            }
+            if dry_run {
                 return Ok(SyncApplyOutcome::Updated);
             }
+            self.connection.execute(
+                "UPDATE projects
+                 SET todoist_id = ?1, name = ?2, parent_project_id = ?3, color = ?4, is_favorite = ?5,
+                     is_inbox = 1, updated_at = ?6, synced_at = ?7, deleted_at = NULL
+                 WHERE id = ?8",
+                params![
+                    remote.todoist_id,
+                    remote.name,
+                    parent_local_id,
+                    remote.color,
+                    if remote.is_favorite { 1_i64 } else { 0_i64 },
+                    synced_local,
+                    synced_at_utc,
+                    inbox_local_id
+                ],
+            )?;
+            return Ok(SyncApplyOutcome::Updated);
         }
 
         if let Some(existing_local_id) =
