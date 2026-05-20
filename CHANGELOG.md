@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-05-20
+
+### Added
+
+- A user-facing Todoist full resync recovery path:
+  `triginta --todoist-full-resync` from the CLI, or `Shift+R` from the sync
+  status panel in the TUI.
+
+### Fixed
+
+- Todoist users can now recover from stale incremental sync state without
+  manual SQLite edits by resetting the stored downstream sync cursor and
+  forcing a full refresh.
+
 ## [0.1.8] - 2026-05-20
 
 ### Fixed
