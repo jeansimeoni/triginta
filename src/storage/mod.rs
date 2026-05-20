@@ -1753,7 +1753,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         synced_at_utc: &str,
         dry_run: bool,
     ) -> Result<SyncApplyOutcome> {
-        let now_local = Local::now();
+        let synced_local = synced_at_local(synced_at_utc);
         let parent_local_id = match remote.parent_todoist_id.as_deref() {
             Some(todoist_id) => self.lookup_local_id_by_todoist("projects", todoist_id)?,
             None => None,
@@ -1803,7 +1803,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                              updated_at = ?2,
                              synced_at = ?3
                          WHERE id IN (SELECT id FROM project_tree)",
-                    params![local_id, now_local, synced_at_utc],
+                    params![local_id, synced_local, synced_at_utc],
                 )?;
                 self.connection.execute(
                     "WITH RECURSIVE project_tree(id) AS (
@@ -1818,7 +1818,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                              updated_at = ?2,
                              synced_at = COALESCE(synced_at, ?3)
                          WHERE project_id IN (SELECT id FROM project_tree)",
-                    params![local_id, now_local, synced_at_utc],
+                    params![local_id, synced_local, synced_at_utc],
                 )?;
                 self.connection.execute(
                     "WITH RECURSIVE project_tree(id) AS (
@@ -1833,7 +1833,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                              updated_at = ?2,
                              synced_at = COALESCE(synced_at, ?3)
                          WHERE project_id IN (SELECT id FROM project_tree)",
-                    params![local_id, now_local, synced_at_utc],
+                    params![local_id, synced_local, synced_at_utc],
                 )?;
                 return Ok(SyncApplyOutcome::Updated);
             }
@@ -1847,7 +1847,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     self.merge_duplicate_inbox_project(
                         duplicate_local_id,
                         local_id,
-                        now_local,
+                        synced_local,
                         synced_at_utc,
                     )?;
                 }
@@ -1863,7 +1863,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     remote.color,
                     if remote.is_favorite { 1_i64 } else { 0_i64 },
                     if remote.is_inbox { 1_i64 } else { 0_i64 },
-                    now_local,
+                    synced_local,
                     synced_at_utc,
                     local_id
                 ],
@@ -1890,7 +1890,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                         parent_local_id,
                         remote.color,
                         if remote.is_favorite { 1_i64 } else { 0_i64 },
-                        now_local,
+                        synced_local,
                         synced_at_utc,
                         inbox_local_id
                     ],
@@ -1920,7 +1920,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     remote.color,
                     if remote.is_favorite { 1_i64 } else { 0_i64 },
                     if remote.is_inbox { 1_i64 } else { 0_i64 },
-                    now_local,
+                    synced_local,
                     synced_at_utc,
                     existing_local_id
                 ],
@@ -1945,8 +1945,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                 if remote.is_favorite { 1_i64 } else { 0_i64 },
                 if remote.is_inbox { 1_i64 } else { 0_i64 },
                 child_order,
-                now_local,
-                now_local,
+                synced_local,
+                synced_local,
                 synced_at_utc,
                 remote.todoist_id
             ],
@@ -1960,7 +1960,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         synced_at_utc: &str,
         dry_run: bool,
     ) -> Result<SyncApplyOutcome> {
-        let now_local = Local::now();
+        let synced_local = synced_at_local(synced_at_utc);
         let mapped = self
             .connection
             .query_row(
@@ -1997,13 +1997,13 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     "UPDATE sections
                      SET deleted_at = COALESCE(deleted_at, ?1), updated_at = ?1, synced_at = ?2
                      WHERE id = ?3",
-                    params![now_local, synced_at_utc, local_id],
+                    params![synced_local, synced_at_utc, local_id],
                 )?;
                 self.connection.execute(
                     "UPDATE tasks
                      SET section_id = NULL, updated_at = ?2, synced_at = COALESCE(synced_at, ?3)
                      WHERE section_id = ?1",
-                    params![local_id, now_local, synced_at_utc],
+                    params![local_id, synced_local, synced_at_utc],
                 )?;
                 return Ok(SyncApplyOutcome::Updated);
             }
@@ -2022,7 +2022,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                 params![
                     project_local_id,
                     remote.name,
-                    now_local,
+                    synced_local,
                     synced_at_utc,
                     local_id
                 ],
@@ -2049,8 +2049,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                 project_local_id,
                 remote.name,
                 section_order,
-                now_local,
-                now_local,
+                synced_local,
+                synced_local,
                 synced_at_utc,
                 remote.todoist_id
             ],
@@ -2064,7 +2064,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         synced_at_utc: &str,
         dry_run: bool,
     ) -> Result<SyncApplyOutcome> {
-        let now_local = Local::now();
+        let synced_local = synced_at_local(synced_at_utc);
         let mapped = self
             .connection
             .query_row(
@@ -2101,7 +2101,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     "UPDATE tags
                      SET deleted_at = COALESCE(deleted_at, ?1), updated_at = ?1, synced_at = ?2
                      WHERE id = ?3",
-                    params![now_local, synced_at_utc, local_id],
+                    params![synced_local, synced_at_utc, local_id],
                 )?;
                 self.connection
                     .execute("DELETE FROM task_tags WHERE tag_id = ?1", params![local_id])?;
@@ -2119,7 +2119,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     remote.name,
                     remote.color,
                     if remote.is_favorite { 1_i64 } else { 0_i64 },
-                    now_local,
+                    synced_local,
                     synced_at_utc,
                     local_id
                 ],
@@ -2144,7 +2144,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     remote.name,
                     remote.color,
                     if remote.is_favorite { 1_i64 } else { 0_i64 },
-                    now_local,
+                    synced_local,
                     synced_at_utc,
                     existing_local_id
                 ],
@@ -2167,8 +2167,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                 remote.color,
                 if remote.is_favorite { 1_i64 } else { 0_i64 },
                 item_order,
-                now_local,
-                now_local,
+                synced_local,
+                synced_local,
                 synced_at_utc,
                 remote.todoist_id
             ],
@@ -2182,7 +2182,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         synced_at_utc: &str,
         dry_run: bool,
     ) -> Result<SyncApplyOutcome> {
-        let now_local = Local::now();
+        let synced_local = synced_at_local(synced_at_utc);
         let mapped = self
             .connection
             .query_row(
@@ -2219,7 +2219,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     "UPDATE filters
                      SET deleted_at = COALESCE(deleted_at, ?1), updated_at = ?1, synced_at = ?2
                      WHERE id = ?3",
-                    params![now_local, synced_at_utc, local_id],
+                    params![synced_local, synced_at_utc, local_id],
                 )?;
                 return Ok(SyncApplyOutcome::Updated);
             }
@@ -2236,7 +2236,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     remote.query,
                     remote.color,
                     if remote.is_favorite { 1_i64 } else { 0_i64 },
-                    now_local,
+                    synced_local,
                     synced_at_utc,
                     local_id
                 ],
@@ -2260,8 +2260,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                 remote.color,
                 if remote.is_favorite { 1_i64 } else { 0_i64 },
                 item_order,
-                now_local,
-                now_local,
+                synced_local,
+                synced_local,
                 synced_at_utc,
                 remote.todoist_id
             ],
@@ -2275,7 +2275,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         synced_at_utc: &str,
         dry_run: bool,
     ) -> Result<SyncApplyOutcome> {
-        let now_local = Local::now();
+        let synced_local = synced_at_local(synced_at_utc);
         let project_local_id = match remote.project_todoist_id.as_deref() {
             Some(project_todoist_id) => {
                 self.lookup_local_id_by_todoist("projects", project_todoist_id)?
@@ -2385,7 +2385,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     if remote.due_is_recurring { 1_i64 } else { 0_i64 },
                     remote.todoist_id,
                     remote.todoist_sync_id,
-                    now_local,
+                    synced_local,
                     synced_at_utc,
                     local_id
                 ],
@@ -2410,8 +2410,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                 remote.description,
                 status,
                 remote.priority,
-                now_local,
-                now_local,
+                synced_local,
+                synced_local,
                 synced_at_utc,
                 remote.todoist_id,
                 remote.todoist_sync_id,
@@ -2721,6 +2721,12 @@ fn local_changed_since_sync(updated_at: DateTime<Local>, synced_at_utc: Option<&
     };
     let synced_local = parsed_synced.with_timezone(&Local);
     updated_at > synced_local
+}
+
+fn synced_at_local(synced_at_utc: &str) -> DateTime<Local> {
+    DateTime::parse_from_rfc3339(synced_at_utc)
+        .map(|value| value.with_timezone(&Local))
+        .unwrap_or_else(|_| Local::now())
 }
 
 pub struct SqliteTaskRepository<'a> {
@@ -4558,7 +4564,7 @@ impl PomodoroRepository for SqlitePomodoroRepository<'_> {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use chrono::{Local, NaiveDate, Timelike, Utc};
+    use chrono::{DateTime, Local, NaiveDate, Timelike, Utc};
     use rusqlite::params;
     use tempfile::tempdir;
 
@@ -4572,7 +4578,7 @@ mod tests {
         Database, FilterRepository, PomodoroRepository, ProjectId, ProjectRepository,
         RemoteFilterRecord, RemoteProjectRecord, RemoteSectionRecord, RemoteTagRecord,
         RemoteTaskRecord, SectionRepository, SyncApplyOutcome, SyncRepository, SyncStateRecord,
-        TagRepository, TaskRepository,
+        TagRepository, TaskRepository, local_changed_since_sync,
     };
 
     fn naive_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<Utc> {
@@ -5249,6 +5255,95 @@ mod tests {
             .find(|task| task.id == created.id)
             .expect("task should still exist");
         assert_eq!(refreshed.title, "Buy milk");
+        assert_eq!(refreshed.status, TaskStatus::Todo);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_remote_task_allows_later_remote_updates_after_prior_pull() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let tasks = database.task_repository();
+        let inbox_project_id = database.project_repository().inbox_project_id()?;
+        let created = tasks.create("Buy milk", inbox_project_id, None, Local::now())?;
+        database.connection.execute(
+            "UPDATE tasks
+             SET todoist_id = ?1, updated_at = ?2, synced_at = ?3
+             WHERE id = ?4",
+            params![
+                "todoist-task-1",
+                "2026-05-20T07:00:00-03:00",
+                "2026-05-20T10:00:00Z",
+                created.id.0
+            ],
+        )?;
+        database
+            .connection
+            .execute("DELETE FROM sync_outbox", [])
+            .expect("bootstrap outbox should clear for downstream test");
+
+        let first_remote = RemoteTaskRecord {
+            todoist_id: "todoist-task-1".to_string(),
+            todoist_sync_id: None,
+            project_todoist_id: None,
+            section_todoist_id: None,
+            parent_todoist_id: None,
+            content: "Buy milk and eggs".to_string(),
+            description: String::new(),
+            priority: 4,
+            labels: Vec::new(),
+            due_date: None,
+            due_datetime_utc: None,
+            due_timezone: None,
+            due_string: None,
+            due_lang: None,
+            due_is_recurring: false,
+            completed_at: None,
+        };
+
+        let first_outcome = sync.apply_remote_task(&first_remote, "2026-05-20T10:05:00Z", false)?;
+        assert_eq!(first_outcome, SyncApplyOutcome::Updated);
+
+        let stored_after_first_apply = database.connection.query_row(
+            "SELECT updated_at, synced_at
+             FROM tasks
+             WHERE id = ?1",
+            params![created.id.0],
+            |row| {
+                Ok((
+                    row.get::<_, DateTime<Local>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )?;
+        assert!(
+            !local_changed_since_sync(
+                stored_after_first_apply.0,
+                stored_after_first_apply.1.as_deref()
+            ),
+            "remote apply should not leave the task marked dirty: updated_at={:?} synced_at={:?}",
+            stored_after_first_apply.0,
+            stored_after_first_apply.1
+        );
+        assert!(
+            !sync.entity_has_pending_outbox("todoist", "task", created.id.0)?,
+            "remote apply should not create a pending outbox entry"
+        );
+
+        let second_remote = RemoteTaskRecord {
+            content: "Buy milk, eggs, and bread".to_string(),
+            ..first_remote
+        };
+        let second_outcome =
+            sync.apply_remote_task(&second_remote, "2026-05-20T10:10:00Z", false)?;
+        assert_eq!(second_outcome, SyncApplyOutcome::Updated);
+
+        let refreshed = tasks
+            .list_all()?
+            .into_iter()
+            .find(|task| task.id == created.id)
+            .expect("task should still exist");
+        assert_eq!(refreshed.title, "Buy milk, eggs, and bread");
         assert_eq!(refreshed.status, TaskStatus::Todo);
         Ok(())
     }
