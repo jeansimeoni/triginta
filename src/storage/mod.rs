@@ -518,6 +518,7 @@ pub trait SyncRepository {
         entity_local_id: i64,
         synced_at_utc: &str,
     ) -> Result<()>;
+    fn reset_state_for_full_resync(&self, provider: &str, reset_at_utc: &str) -> Result<()>;
     fn apply_remote_project(
         &self,
         remote: &RemoteProjectRecord,
@@ -1745,6 +1746,19 @@ impl SyncRepository for SqliteSyncRepository<'_> {
             _ => {}
         };
         Ok(())
+    }
+
+    fn reset_state_for_full_resync(&self, provider: &str, reset_at_utc: &str) -> Result<()> {
+        let previous = self.get_state(provider)?;
+        self.upsert_state(&SyncStateRecord {
+            provider: provider.to_string(),
+            sync_token: None,
+            completed_tasks_synced_until: None,
+            last_synced_at: previous.and_then(|state| state.last_synced_at),
+            last_status: Some("reset_pending".to_string()),
+            last_error: None,
+            updated_at: reset_at_utc.to_string(),
+        })
     }
 
     fn apply_remote_project(
@@ -5447,6 +5461,37 @@ mod tests {
         seconds.sort_unstable();
         assert_eq!(seconds, vec![1200, 1500]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn sync_repository_can_reset_state_for_full_resync() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        sync.upsert_state(&SyncStateRecord {
+            provider: "todoist".to_string(),
+            sync_token: Some("token-1".to_string()),
+            completed_tasks_synced_until: Some("2026-05-20T10:00:00Z".to_string()),
+            last_synced_at: Some("2026-05-20T10:00:00Z".to_string()),
+            last_status: Some("ok".to_string()),
+            last_error: Some("previous error".to_string()),
+            updated_at: "2026-05-20T10:00:00Z".to_string(),
+        })?;
+
+        sync.reset_state_for_full_resync("todoist", "2026-05-20T11:00:00Z")?;
+
+        let state = sync
+            .get_state("todoist")?
+            .expect("todoist state should exist");
+        assert_eq!(state.sync_token, None);
+        assert_eq!(state.completed_tasks_synced_until, None);
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.last_status.as_deref(), Some("reset_pending"));
+        assert_eq!(
+            state.last_synced_at.as_deref(),
+            Some("2026-05-20T10:00:00Z")
+        );
+        assert_eq!(state.updated_at, "2026-05-20T11:00:00Z");
         Ok(())
     }
 

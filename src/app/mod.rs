@@ -53,6 +53,7 @@ pub struct RunOptions {
     pub dry_run_sync: bool,
     pub local_only: bool,
     pub seed_showcase_data: bool,
+    pub todoist_full_resync: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2115,6 +2116,7 @@ struct TodoistSyncUiState {
     preferred_language: Option<String>,
     pending_push_at: Option<DateTime<Local>>,
     queued_trigger: Option<SyncTrigger>,
+    queued_full_resync: bool,
     in_flight_trigger: Option<SyncTrigger>,
     next_poll_at: DateTime<Local>,
     poll_interval: Duration,
@@ -2378,6 +2380,7 @@ impl App {
                 preferred_language: None,
                 pending_push_at: None,
                 queued_trigger: None,
+                queued_full_resync: false,
                 in_flight_trigger: None,
                 next_poll_at: Local::now(),
                 poll_interval: poll_min,
@@ -11096,6 +11099,9 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('S') => {
                     self.sync_status_panel_open = false;
                 }
+                KeyCode::Char('R') => {
+                    self.request_todoist_full_resync(now)?;
+                }
                 _ => {}
             }
             return Ok(());
@@ -11957,6 +11963,14 @@ impl App {
             Err(error) => self.apply_todoist_sync_error(trigger, now, error.as_str()),
         }
 
+        if self
+            .todoist_sync
+            .as_mut()
+            .is_some_and(|sync| std::mem::take(&mut sync.queued_full_resync))
+        {
+            self.perform_todoist_full_resync(now)?;
+        }
+
         let queued = self
             .todoist_sync
             .as_mut()
@@ -12092,6 +12106,60 @@ impl App {
             .ok()
             .flatten();
         sync.next_poll_at = now + chrono_duration(sync.poll_interval);
+    }
+
+    fn request_todoist_full_resync(&mut self, now: DateTime<Local>) -> Result<()> {
+        let Some(sync) = self.todoist_sync.as_mut() else {
+            return Ok(());
+        };
+
+        if sync.is_running {
+            sync.queued_full_resync = true;
+            sync.latest_status_line = "full Todoist resync queued".to_string();
+            sync.last_status = "reset_pending".to_string();
+            sync.last_error = None;
+            sync.activity_until = Some(now + ChronoDuration::seconds(3));
+            return Ok(());
+        }
+
+        self.perform_todoist_full_resync(now)
+    }
+
+    fn perform_todoist_full_resync(&mut self, now: DateTime<Local>) -> Result<()> {
+        self.database
+            .sync_repository()
+            .reset_state_for_full_resync("todoist", Utc::now().to_rfc3339().as_str())?;
+
+        let pending_outbox = self
+            .database
+            .sync_repository()
+            .list_outbox("todoist", i64::MAX)?
+            .len();
+        let latest_pending_outbox_id = self
+            .database
+            .sync_repository()
+            .latest_pending_outbox_id("todoist")?;
+
+        if let Some(sync) = self.todoist_sync.as_mut() {
+            sync.queued_full_resync = false;
+            sync.queued_trigger = None;
+            sync.in_flight_trigger = None;
+            sync.pending_push_at = None;
+            sync.latest_status_line = "full Todoist resync requested".to_string();
+            sync.last_status = "reset_pending".to_string();
+            sync.last_error = None;
+            sync.last_trigger = Some(SyncTrigger::Startup);
+            sync.last_sync_at = Some(now);
+            sync.pending_outbox = pending_outbox;
+            sync.delivered_outbox = 0;
+            sync.failed_outbox = 0;
+            sync.last_seen_outbox_id = latest_pending_outbox_id;
+            sync.next_poll_at = now;
+            sync.activity_until = Some(now + ChronoDuration::seconds(3));
+        }
+
+        self.dispatch_todoist_sync(SyncTrigger::Startup, now);
+        Ok(())
     }
 
     fn refresh_history(&mut self) -> Result<()> {
@@ -12246,6 +12314,12 @@ pub fn run(options: RunOptions) -> Result<()> {
     info!("starting triginta");
 
     let database = Database::open(&paths.db_path)?;
+    if options.todoist_full_resync {
+        database
+            .sync_repository()
+            .reset_state_for_full_resync("todoist", Utc::now().to_rfc3339().as_str())?;
+        info!("todoist full resync requested before app startup");
+    }
     #[cfg(debug_assertions)]
     {
         seed_showcase_data_if_requested(&database, options)?;
@@ -13126,7 +13200,7 @@ mod tests {
     };
     use crate::storage::{
         Database, FilterRepository, PomodoroRepository, ProjectRepository, SectionRepository,
-        SyncRepository, TagRepository, TaskRepository,
+        SyncRepository, SyncStateRecord, TagRepository, TaskRepository,
     };
     use crate::task_nlp::{locale_priority_with_hint, parse_due_input_with_locales};
     use crate::theme::ThemePalette;
@@ -18356,6 +18430,40 @@ mod tests {
     }
 
     #[test]
+    fn sync_panel_can_request_todoist_full_resync() {
+        let mut app = test_app_with_todoist_enabled();
+        let now = fixed_now();
+        app.database
+            .sync_repository()
+            .upsert_state(&SyncStateRecord {
+                provider: "todoist".to_string(),
+                sync_token: Some("token-1".to_string()),
+                completed_tasks_synced_until: Some("2026-04-17T12:00:00Z".to_string()),
+                last_synced_at: Some("2026-04-17T12:00:00Z".to_string()),
+                last_status: Some("ok".to_string()),
+                last_error: Some("old error".to_string()),
+                updated_at: "2026-04-17T12:00:00Z".to_string(),
+            })
+            .expect("sync state should persist");
+
+        app.handle_key(crossterm::event::KeyCode::Char('S'))
+            .expect("sync panel should open");
+        app.handle_key_at(crossterm::event::KeyCode::Char('R'), now)
+            .expect("full resync should be requested");
+
+        let state = app
+            .database
+            .sync_repository()
+            .get_state("todoist")
+            .expect("sync state should load")
+            .expect("todoist state should exist");
+        assert_eq!(state.sync_token, None);
+        assert_eq!(state.completed_tasks_synced_until, None);
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.last_status.as_deref(), Some("reset_pending"));
+    }
+
+    #[test]
     fn task_editor_submits_when_existing_recurrence_phrase_is_unparseable() {
         let mut app = test_app();
         let now = Local::now();
@@ -19100,6 +19208,7 @@ mod tests {
                 dry_run_sync: false,
                 local_only: false,
                 seed_showcase_data: false,
+                todoist_full_resync: false,
             },
         );
 
@@ -19121,6 +19230,7 @@ mod tests {
                 dry_run_sync: false,
                 local_only: true,
                 seed_showcase_data: false,
+                todoist_full_resync: false,
             },
         );
 
@@ -19140,6 +19250,7 @@ mod tests {
                 dry_run_sync: false,
                 local_only: false,
                 seed_showcase_data: true,
+                todoist_full_resync: false,
             },
         )
         .expect("showcase seed should succeed");

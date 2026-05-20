@@ -42,18 +42,26 @@ where
 {
     match cli_command(include_debug_flags).try_get_matches_from(args) {
         Ok(matches) => {
+            let mut options = triginta::app::RunOptions {
+                todoist_full_resync: matches.get_flag("todoist-full-resync"),
+                ..triginta::app::RunOptions::default()
+            };
+
             if !include_debug_flags {
-                return Ok(CliAction::Run(triginta::app::RunOptions::default()));
+                return Ok(CliAction::Run(options));
             }
 
-            Ok(CliAction::Run(triginta::app::RunOptions {
+            options = triginta::app::RunOptions {
                 force_ascii: matches.get_flag("ascii"),
                 force_short_timer: matches.get_flag("short-timer"),
                 reset_data: matches.get_flag("reset-data"),
                 dry_run_sync: matches.get_flag("dry-run-sync"),
                 local_only: matches.get_flag("local-only"),
                 seed_showcase_data: matches.get_flag("seed-showcase-data"),
-            }))
+                todoist_full_resync: matches.get_flag("todoist-full-resync"),
+            };
+
+            Ok(CliAction::Run(options))
         }
         Err(error)
             if matches!(
@@ -72,7 +80,13 @@ fn cli_command(include_debug_flags: bool) -> Command {
         .about("A local-first TUI Pomodoro timer and task manager.")
         .version(env!("CARGO_PKG_VERSION"))
         .arg_required_else_help(false)
-        .disable_help_subcommand(true);
+        .disable_help_subcommand(true)
+        .arg(
+            Arg::new("todoist-full-resync")
+                .long("todoist-full-resync")
+                .action(ArgAction::SetTrue)
+                .help("Reset stored Todoist sync state and force a full downstream resync"),
+        );
 
     if include_debug_flags {
         command = command
@@ -138,6 +152,7 @@ mod tests {
         let action = parse_cli_action_with_debug_flags(
             [
                 "triginta",
+                "--todoist-full-resync",
                 "--ascii",
                 "--short-timer",
                 "--reset-data",
@@ -159,6 +174,7 @@ mod tests {
         assert!(options.dry_run_sync);
         assert!(options.local_only);
         assert!(options.seed_showcase_data);
+        assert!(options.todoist_full_resync);
     }
 
     #[test]
@@ -176,6 +192,21 @@ mod tests {
         assert!(!options.dry_run_sync);
         assert!(!options.local_only);
         assert!(!options.seed_showcase_data);
+        assert!(!options.todoist_full_resync);
+    }
+
+    #[test]
+    fn todoist_full_resync_flag_parses_when_debug_flags_are_disabled() {
+        let action =
+            parse_cli_action_with_debug_flags(["triginta", "--todoist-full-resync"], false)
+                .expect("release-style parse should accept the full resync flag");
+
+        let CliAction::Run(options) = action else {
+            panic!("full resync flag should run the app");
+        };
+
+        assert!(options.todoist_full_resync);
+        assert!(!options.force_ascii);
     }
 
     #[test]

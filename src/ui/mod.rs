@@ -3212,7 +3212,7 @@ fn render_sync_status_panel(
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
         ))
-        .title_bottom(Line::from("Esc or Shift+S closes").right_aligned())
+        .title_bottom(Line::from("Shift+R full resync  •  Esc/Shift+S close").right_aligned())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.accent));
     let popup = Paragraph::new(lines)
