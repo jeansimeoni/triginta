@@ -5362,6 +5362,56 @@ mod tests {
     }
 
     #[test]
+    fn apply_remote_task_persists_remote_due_datetime() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let tasks = database.task_repository();
+        let due_date = chrono::NaiveDate::from_ymd_opt(2026, 6, 12).expect("valid date");
+        let due_datetime = due_date.and_hms_opt(15, 0, 0).expect("valid time");
+        let due_datetime_utc = naive_to_utc(due_datetime);
+
+        let remote = RemoteTaskRecord {
+            todoist_id: "todoist-task-1".to_string(),
+            todoist_sync_id: None,
+            project_todoist_id: None,
+            section_todoist_id: None,
+            parent_todoist_id: None,
+            content: "Timed remote task".to_string(),
+            description: String::new(),
+            priority: 4,
+            labels: Vec::new(),
+            due_date: Some(due_date),
+            due_datetime_utc: Some(due_datetime_utc.to_rfc3339()),
+            due_timezone: Some("America/Sao_Paulo".to_string()),
+            due_string: Some("2026-06-12 12:00".to_string()),
+            due_lang: Some("en".to_string()),
+            due_is_recurring: false,
+            completed_at: None,
+        };
+
+        let outcome = sync.apply_remote_task(&remote, Utc::now().to_rfc3339().as_str(), false)?;
+        assert_eq!(outcome, SyncApplyOutcome::Created);
+
+        let refreshed = tasks
+            .list_all()?
+            .into_iter()
+            .find(|task| task.title == "Timed remote task")
+            .expect("task should exist");
+        assert_eq!(
+            refreshed.due,
+            Some(TaskDue {
+                date: due_date,
+                datetime: Some(due_datetime_utc),
+                timezone: Some("America/Sao_Paulo".to_string()),
+                string: "2026-06-12 12:00".to_string(),
+                due_lang: Some("en".to_string()),
+                is_recurring: false,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
     fn pomodoro_repository_summarizes_completed_focus_for_stats_panels() -> Result<()> {
         let database = Database::open_in_memory()?;
         let repository = database.pomodoro_repository();
