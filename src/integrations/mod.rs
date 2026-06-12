@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tracing::info;
@@ -299,6 +299,27 @@ impl TodoistSyncProvider {
         let locales = locale_priority_with_hint(due_lang);
         parse_due_input_with_locales(due_string, reference_date, locales.as_slice())
             .is_some_and(|due| due.is_recurring)
+    }
+
+    fn todoist_due_fields(due: Option<&TodoistDue>) -> TodoistRemoteDueFields {
+        let Some(due) = due else {
+            return TodoistRemoteDueFields::default();
+        };
+        let (due_date, due_datetime_utc) = due
+            .date
+            .as_deref()
+            .and_then(parse_todoist_due_date)
+            .or_else(|| due.datetime.as_deref().and_then(parse_todoist_due_date))
+            .unwrap_or((None, None));
+
+        TodoistRemoteDueFields {
+            due_date,
+            due_datetime_utc: due_datetime_utc.map(|datetime| datetime.to_rfc3339()),
+            due_timezone: due.timezone.clone(),
+            due_string: due.string.clone(),
+            due_lang: due.lang.clone(),
+            due_is_recurring: due.is_recurring.unwrap_or(false),
+        }
     }
 
     pub fn new(config: TodoistIntegrationConfig, dry_run: bool) -> Self {
@@ -926,6 +947,7 @@ impl TodoistSyncProvider {
             )?;
 
             for task in response.items {
+                let due = Self::todoist_due_fields(task.due.as_ref());
                 let remote = RemoteTaskRecord {
                     todoist_id: task.id,
                     todoist_sync_id: task.sync_id,
@@ -936,23 +958,12 @@ impl TodoistSyncProvider {
                     description: task.description.unwrap_or_default(),
                     priority: Self::todoist_priority_to_local(task.priority.unwrap_or(1)),
                     labels: task.labels.unwrap_or_default(),
-                    due_date: task
-                        .due
-                        .as_ref()
-                        .and_then(|due| due.date.as_deref())
-                        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()),
-                    due_datetime_utc: task
-                        .due
-                        .as_ref()
-                        .and_then(|due| due.datetime.as_ref().cloned()),
-                    due_timezone: task.due.as_ref().and_then(|due| due.timezone.clone()),
-                    due_string: task.due.as_ref().and_then(|due| due.string.clone()),
-                    due_lang: task.due.as_ref().and_then(|due| due.lang.clone()),
-                    due_is_recurring: task
-                        .due
-                        .as_ref()
-                        .and_then(|due| due.is_recurring)
-                        .unwrap_or(false),
+                    due_date: due.due_date,
+                    due_datetime_utc: due.due_datetime_utc,
+                    due_timezone: due.due_timezone,
+                    due_string: due.due_string,
+                    due_lang: due.due_lang,
+                    due_is_recurring: due.due_is_recurring,
                     completed_at: task.completed_at.or_else(|| {
                         if task.checked.unwrap_or(false) {
                             Some(synced_at_utc.to_string())
@@ -1052,6 +1063,7 @@ impl TodoistSyncProvider {
         }
 
         for task in sync_response.items {
+            let due = Self::todoist_due_fields(task.due.as_ref());
             let labels = task.labels.unwrap_or_else(|| {
                 task.label_ids
                     .unwrap_or_default()
@@ -1072,23 +1084,12 @@ impl TodoistSyncProvider {
                 description: task.description.unwrap_or_default(),
                 priority: Self::todoist_priority_to_local(task.priority.unwrap_or(1)),
                 labels,
-                due_date: task
-                    .due
-                    .as_ref()
-                    .and_then(|due| due.date.as_deref())
-                    .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()),
-                due_datetime_utc: task
-                    .due
-                    .as_ref()
-                    .and_then(|due| due.datetime.as_ref().cloned()),
-                due_timezone: task.due.as_ref().and_then(|due| due.timezone.clone()),
-                due_string: task.due.as_ref().and_then(|due| due.string.clone()),
-                due_lang: task.due.as_ref().and_then(|due| due.lang.clone()),
-                due_is_recurring: task
-                    .due
-                    .as_ref()
-                    .and_then(|due| due.is_recurring)
-                    .unwrap_or(false),
+                due_date: due.due_date,
+                due_datetime_utc: due.due_datetime_utc.clone(),
+                due_timezone: due.due_timezone.clone(),
+                due_string: due.due_string.clone(),
+                due_lang: due.due_lang.clone(),
+                due_is_recurring: due.due_is_recurring,
                 completed_at: task.completed_at.or_else(|| {
                     if task.checked.unwrap_or(false) {
                         Some(synced_at_utc.to_string())
@@ -1101,7 +1102,7 @@ impl TodoistSyncProvider {
                 sync_repository.apply_remote_task(&remote, synced_at_utc, self.dry_run)?;
             stats.record("task", remote.todoist_id.as_str(), outcome, self.dry_run);
             if preferred_language.is_none() {
-                preferred_language = task.due.as_ref().and_then(|due| due.lang.clone());
+                preferred_language = due.due_lang;
             }
         }
 
@@ -1245,6 +1246,66 @@ struct TodoistDue {
     string: Option<String>,
     is_recurring: Option<bool>,
     lang: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TodoistRemoteDueFields {
+    due_date: Option<NaiveDate>,
+    due_datetime_utc: Option<String>,
+    due_timezone: Option<String>,
+    due_string: Option<String>,
+    due_lang: Option<String>,
+    due_is_recurring: bool,
+}
+
+fn parse_todoist_due_date(raw: &str) -> Option<(Option<NaiveDate>, Option<DateTime<Utc>>)> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Ok(datetime) = DateTime::parse_from_rfc3339(value) {
+        let datetime = datetime.with_timezone(&Utc);
+        return Some((
+            Some(datetime.with_timezone(&Local).date_naive()),
+            Some(datetime),
+        ));
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return Some((Some(date), None));
+    }
+
+    parse_todoist_floating_due_datetime(value).map(|datetime| {
+        let datetime = local_naive_to_utc(datetime);
+        (
+            Some(datetime.with_timezone(&Local).date_naive()),
+            Some(datetime),
+        )
+    })
+}
+
+fn parse_todoist_floating_due_datetime(raw: &str) -> Option<NaiveDateTime> {
+    [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ]
+    .into_iter()
+    .find_map(|format| NaiveDateTime::parse_from_str(raw, format).ok())
+}
+
+fn local_naive_to_utc(naive: NaiveDateTime) -> DateTime<Utc> {
+    Local
+        .from_local_datetime(&naive)
+        .single()
+        .or_else(|| Local.from_local_datetime(&naive).earliest())
+        .or_else(|| Local.from_local_datetime(&naive).latest())
+        .expect("local datetime should be representable")
+        .with_timezone(&Utc)
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1673,13 +1734,15 @@ fn completed_tasks_since(
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use chrono::Utc;
+    use chrono::{DateTime, NaiveDate, Utc};
     use serde_json::json;
 
     use crate::config::TodoistIntegrationConfig;
     use crate::storage::{Database, SyncRepository, SyncTaskSnapshot};
 
-    use super::{SyncTrigger, TaskSyncProvider, TodoistSyncCommandResponse, TodoistSyncProvider};
+    use super::{
+        SyncTrigger, TaskSyncProvider, TodoistDue, TodoistSyncCommandResponse, TodoistSyncProvider,
+    };
 
     #[test]
     fn todoist_sync_dry_run_marks_outbox_as_pending_without_failures() -> Result<()> {
@@ -1798,6 +1861,93 @@ mod tests {
             "amanha",
             Some("pt-BR")
         ));
+    }
+
+    #[test]
+    fn todoist_due_fields_parse_date_only_due() {
+        let due = TodoistDue {
+            date: Some("2026-06-12".to_string()),
+            datetime: None,
+            timezone: None,
+            string: Some("Jun 12".to_string()),
+            is_recurring: Some(false),
+            lang: Some("en".to_string()),
+        };
+
+        let fields = TodoistSyncProvider::todoist_due_fields(Some(&due));
+
+        assert_eq!(
+            fields.due_date,
+            Some(NaiveDate::from_ymd_opt(2026, 6, 12).expect("valid date"))
+        );
+        assert_eq!(fields.due_datetime_utc, None);
+        assert_eq!(fields.due_string.as_deref(), Some("Jun 12"));
+        assert_eq!(fields.due_lang.as_deref(), Some("en"));
+        assert!(!fields.due_is_recurring);
+    }
+
+    #[test]
+    fn todoist_due_fields_parse_floating_timed_due_from_date_field() {
+        let due = TodoistDue {
+            date: Some("2026-06-12T12:00:00.000000".to_string()),
+            datetime: None,
+            timezone: None,
+            string: Some("2026-06-12 12:00".to_string()),
+            is_recurring: Some(false),
+            lang: None,
+        };
+
+        let fields = TodoistSyncProvider::todoist_due_fields(Some(&due));
+
+        assert_eq!(
+            fields.due_date,
+            Some(NaiveDate::from_ymd_opt(2026, 6, 12).expect("valid date"))
+        );
+        let stored = fields
+            .due_datetime_utc
+            .as_deref()
+            .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+            .expect("datetime should parse")
+            .with_timezone(&Utc);
+        let expected = super::local_naive_to_utc(
+            NaiveDate::from_ymd_opt(2026, 6, 12)
+                .expect("valid date")
+                .and_hms_opt(12, 0, 0)
+                .expect("valid time"),
+        );
+        assert_eq!(stored, expected);
+    }
+
+    #[test]
+    fn todoist_due_fields_parse_utc_timed_due_from_date_field() {
+        let due = TodoistDue {
+            date: Some("2026-06-12T15:00:00.000000Z".to_string()),
+            datetime: None,
+            timezone: Some("America/Sao_Paulo".to_string()),
+            string: Some("2026-06-12 12:00".to_string()),
+            is_recurring: Some(false),
+            lang: None,
+        };
+
+        let fields = TodoistSyncProvider::todoist_due_fields(Some(&due));
+
+        assert_eq!(
+            fields.due_date,
+            Some(NaiveDate::from_ymd_opt(2026, 6, 12).expect("valid date"))
+        );
+        assert_eq!(fields.due_timezone.as_deref(), Some("America/Sao_Paulo"));
+        let stored = fields
+            .due_datetime_utc
+            .as_deref()
+            .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+            .expect("datetime should parse")
+            .with_timezone(&Utc);
+        assert_eq!(
+            stored,
+            DateTime::parse_from_rfc3339("2026-06-12T15:00:00Z")
+                .expect("datetime should parse")
+                .with_timezone(&Utc)
+        );
     }
 
     #[test]
