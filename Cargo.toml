@@ -28,7 +28,7 @@ tracing-appender = "=0.2.5"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
 unicode-width = "=0.2.0"
 ureq = { version = "=3.3.0", features = ["json"] }
-uuid = { version = "=1.23.2", features = ["v4"] }
+uuid = { version = "=1.23.3", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "=3.27.0"
