@@ -6590,6 +6590,13 @@ impl App {
             .collect()
     }
 
+    fn task_id_at_visible_position(&self, index: usize) -> Option<TaskId> {
+        let visible_ids = self.visible_task_ids();
+        visible_ids
+            .get(index.min(visible_ids.len().saturating_sub(1)))
+            .copied()
+    }
+
     fn sync_task_selection(&mut self) {
         let visible_ids = self.visible_task_ids();
         self.selected_task_id = match self.selected_task_id {
@@ -8920,6 +8927,11 @@ impl App {
         let Some(task) = self.selected_task().cloned() else {
             return Ok(());
         };
+        let selected_task_index = self
+            .visible_task_ids()
+            .iter()
+            .position(|task_id| *task_id == task.id)
+            .unwrap_or(0);
 
         let next_status = match task.status {
             TaskStatus::Todo => TaskStatus::Done,
@@ -9011,22 +9023,13 @@ impl App {
             if self.active_focus_task_id == Some(task.id) {
                 self.active_focus_task_id = Some(next_task.id);
             }
-            let next_task_visible = self
-                .screen_data
-                .tasks
-                .iter()
-                .find(|candidate| candidate.id == next_task.id)
-                .map(|candidate| {
-                    self.task_is_active(candidate) && self.task_matches_active_view(candidate)
-                })
-                .unwrap_or(false);
-            self.selected_task_id = Some(if next_task_visible {
-                next_task.id
+            self.selected_task_id = if self.visible_task_ids().contains(&next_task.id) {
+                Some(next_task.id)
             } else {
-                task.id
-            });
+                self.task_id_at_visible_position(selected_task_index)
+            };
         } else {
-            self.selected_task_id = Some(task.id);
+            self.selected_task_id = self.task_id_at_visible_position(selected_task_index);
         }
         Ok(())
     }
@@ -18206,6 +18209,83 @@ mod tests {
         app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
             .expect("status should toggle");
         assert_eq!(app.screen_data.tasks[0].status, TaskStatus::Todo);
+    }
+
+    #[test]
+    fn app_selects_same_visible_position_after_completing_task() {
+        let mut app = test_app();
+        let now = Local::now();
+        let inbox_id = app.inbox_project_id();
+        app.config.ui.hide_completed_tasks = true;
+        app.config.ui.task_list_sort = TaskSortOrder::TitleAsc;
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+
+        let alpha = app
+            .database
+            .task_repository()
+            .create("Alpha task", inbox_id, None, now)
+            .expect("task should create");
+        let beta = app
+            .database
+            .task_repository()
+            .create("Beta task", inbox_id, None, now)
+            .expect("task should create");
+        let gamma = app
+            .database
+            .task_repository()
+            .create("Gamma task", inbox_id, None, now)
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.selected_task_id = Some(beta.id);
+
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
+            .expect("status should toggle");
+
+        assert_eq!(app.selected_task_id, Some(gamma.id));
+        assert_eq!(
+            app.visible_tasks()
+                .into_iter()
+                .map(|task| task.id)
+                .collect::<Vec<_>>(),
+            vec![alpha.id, gamma.id]
+        );
+    }
+
+    #[test]
+    fn app_selects_new_last_visible_task_after_completing_last_task() {
+        let mut app = test_app();
+        let now = Local::now();
+        let inbox_id = app.inbox_project_id();
+        app.config.ui.hide_completed_tasks = true;
+        app.config.ui.task_list_sort = TaskSortOrder::TitleAsc;
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+
+        let alpha = app
+            .database
+            .task_repository()
+            .create("Alpha task", inbox_id, None, now)
+            .expect("task should create");
+        let beta = app
+            .database
+            .task_repository()
+            .create("Beta task", inbox_id, None, now)
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        app.selected_task_id = Some(beta.id);
+
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
+            .expect("status should toggle");
+
+        assert_eq!(app.selected_task_id, Some(alpha.id));
+        assert_eq!(
+            app.visible_tasks()
+                .into_iter()
+                .map(|task| task.id)
+                .collect::<Vec<_>>(),
+            vec![alpha.id]
+        );
     }
 
     #[test]
