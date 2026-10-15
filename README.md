@@ -177,8 +177,15 @@ and documentation work.
 This section is intentionally incomplete for now. I will expand it as the
 project evolves.
 
+### v0.2
+
 - Notifications
 - Mouse support where it makes sense
+- Execute external commands upon app events (pomodoro
+  started/cancelled/finished, task created/completed, etc)
+
+### Backlog
+
 - Better clipboard handling beyond basic terminal copy-paste, including copying
   task titles and other task information more easily
 - Task assignment (when syncing with Todoist)
