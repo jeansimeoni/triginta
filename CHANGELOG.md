@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-10-15
+
 ### Added
 
 - Todoist task duration now syncs both ways and is modeled end-to-end: it
@@ -35,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   summaries) no longer goes stale in long-running sessions left open across
   a day boundary. The data now refreshes automatically when the local date
   rolls over.
+
+### Security
+
+- Bumped `rustls` (pulled in transitively via `ureq`, Triginta's Todoist
+  sync HTTP client) to `0.23.46`, resolving RUSTSEC-2026-0285,
+  RUSTSEC-2026-0346, RUSTSEC-2026-0348, and RUSTSEC-2026-0349.
 
 ## [0.1.9] - 2026-05-20
 
