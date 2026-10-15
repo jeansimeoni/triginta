@@ -6789,18 +6789,20 @@ mod tests {
     use super::{
         FormPreviewPanelView, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, PreviewLineView,
         STATUS_BAR_GLOBAL_SHORTCUTS, TaskTagRowSegment, footer_with_filter_indicator,
-        format_compact_history_duration, format_task_tags_for_row, history_footer_hints,
-        input_window_view, is_status_bar_global_focus_tip, is_status_bar_suppressed_tip,
-        markdown_first_plain_line, markdown_inline_spans, markdown_inline_tokens,
-        navigation_group_status_bar_tips, preview_panel_lines, preview_panel_required_height,
-        responsive_bar_width, statistics_footer_hints, status_bar_keys_label,
-        status_bar_spans_width, task_details_footer_hints, terminal_too_small, timer_footer_hints,
+        format_compact_history_duration, format_due_label, format_task_tags_for_row,
+        history_footer_hints, input_window_view, is_status_bar_global_focus_tip,
+        is_status_bar_suppressed_tip, markdown_first_plain_line, markdown_inline_spans,
+        markdown_inline_tokens, navigation_group_status_bar_tips, preview_panel_lines,
+        preview_panel_required_height, responsive_bar_width, statistics_footer_hints,
+        status_bar_keys_label, status_bar_spans_width, task_details_footer_hints,
+        terminal_too_small, timer_footer_hints,
     };
     use crate::app::{ShortcutTip, SidebarTab};
     use crate::config::GlyphMode;
-    use crate::domain::TagColor;
+    use crate::domain::{TagColor, TaskDue};
     use crate::theme::{ProjectColorPalette, ThemePalette};
     use crate::ui::symbols::Symbols;
+    use chrono::{Local, NaiveDate, TimeZone};
     use ratatui::style::Color;
     use ratatui::text::{Line, Span};
 
@@ -7220,6 +7222,50 @@ mod tests {
         assert_eq!(format_compact_history_duration(45), "45s");
         assert_eq!(format_compact_history_duration(60), "01m");
     }
+
+    #[test]
+    fn due_label_appends_end_time_when_duration_is_present() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = TaskDue {
+            date: today,
+            datetime: Some(
+                Local
+                    .with_ymd_and_hms(2026, 4, 17, 7, 0, 0)
+                    .single()
+                    .expect("valid timestamp")
+                    .with_timezone(&chrono::Utc),
+            ),
+            timezone: None,
+            string: "today at 07:00".to_string(),
+            due_lang: None,
+            is_recurring: false,
+            duration_minutes: Some(30),
+        };
+
+        assert_eq!(format_due_label(&due, today), "today 07:00-07:30");
+    }
+
+    #[test]
+    fn due_label_omits_end_time_when_duration_is_absent() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = TaskDue {
+            date: today,
+            datetime: Some(
+                Local
+                    .with_ymd_and_hms(2026, 4, 17, 7, 0, 0)
+                    .single()
+                    .expect("valid timestamp")
+                    .with_timezone(&chrono::Utc),
+            ),
+            timezone: None,
+            string: "today at 07:00".to_string(),
+            due_lang: None,
+            is_recurring: false,
+            duration_minutes: None,
+        };
+
+        assert_eq!(format_due_label(&due, today), "today 07:00");
+    }
 }
 
 fn progress_meta_line(
@@ -7408,10 +7454,18 @@ fn format_due_label(due: &crate::domain::TaskDue, today: NaiveDate) -> String {
     };
 
     if let Some(datetime) = due.datetime {
-        format!(
-            "{day_label} {}",
-            datetime.with_timezone(&chrono::Local).format("%H:%M")
-        )
+        let start = datetime.with_timezone(&chrono::Local);
+        match due.duration_minutes {
+            Some(duration_minutes) if duration_minutes > 0 => {
+                let end = start + chrono::Duration::minutes(duration_minutes);
+                format!(
+                    "{day_label} {}-{}",
+                    start.format("%H:%M"),
+                    end.format("%H:%M")
+                )
+            }
+            _ => format!("{day_label} {}", start.format("%H:%M")),
+        }
     } else {
         day_label
     }
