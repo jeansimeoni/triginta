@@ -2214,6 +2214,7 @@ pub struct App {
     needs_full_redraw: bool,
     should_quit: bool,
     screen_data: ScreenData,
+    history_data_date: NaiveDate,
 }
 
 impl App {
@@ -2468,6 +2469,7 @@ impl App {
             needs_full_redraw: false,
             should_quit: false,
             screen_data,
+            history_data_date: Local::now().date_naive(),
         };
         app.sync_task_selection();
         app.sync_favorite_selection();
@@ -11701,6 +11703,9 @@ impl App {
     fn on_tick_at(&mut self, now: DateTime<Local>) -> Result<()> {
         self.sync_task_details_anchor();
         self.handle_todoist_sync_tick(now)?;
+        if now.date_naive() != self.history_data_date {
+            self.refresh_history()?;
+        }
         if self.timer.run_state != TimerRunState::Running {
             return Ok(());
         }
@@ -12194,6 +12199,7 @@ impl App {
             .database
             .pomodoro_repository()
             .summarize_completed_focus_hours(monthly_started_at, monthly_ended_at)?;
+        self.history_data_date = now.date_naive();
         self.history_scroll = self.history_scroll.min(self.max_history_scroll());
         Ok(())
     }
@@ -19206,6 +19212,24 @@ mod tests {
                 CycleEntryState::NotStarted
             ]
         );
+    }
+
+    #[test]
+    fn tick_refreshes_history_cache_when_local_day_rolls_over() {
+        let mut app = test_app();
+        let yesterday = app.history_data_date - chrono::Days::new(1);
+
+        // Simulate a long-running session: the history cache still reflects
+        // the day it was last refreshed for, populated with stale data that
+        // the real current day's (empty) database would not produce.
+        app.history_data_date = yesterday;
+        app.screen_data.today_stats.total_sessions = 3;
+
+        app.on_tick_at(Local::now())
+            .expect("tick should refresh stale history cache");
+
+        assert_eq!(app.history_data_date, Local::now().date_naive());
+        assert_eq!(app.screen_data.today_stats.total_sessions, 0);
     }
 
     #[test]
