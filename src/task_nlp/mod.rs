@@ -4,8 +4,8 @@
 mod locales;
 
 use chrono::{
-    DateTime, Datelike, Days, Local, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
-    Weekday,
+    DateTime, Datelike, Days, Local, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeZone,
+    Timelike, Utc, Weekday,
 };
 
 use crate::domain::TaskDue;
@@ -529,8 +529,15 @@ fn with_time_suffix(
     if let Some((time_end, time)) = parse_time_suffix(input, end) {
         due.datetime = Some(local_naive_to_utc(NaiveDateTime::new(due.date, time)));
         due.timezone = local_timezone_name();
-        due.string = input[start..time_end].trim().to_string();
-        (extend_removable_span(input, start, time_end), due)
+        let mut final_end = time_end;
+        if let Some((duration_end, duration_minutes)) =
+            parse_duration_or_range_suffix(input, time, time_end)
+        {
+            due.duration_minutes = Some(duration_minutes);
+            final_end = duration_end;
+        }
+        due.string = input[start..final_end].trim().to_string();
+        (extend_removable_span(input, start, final_end), due)
     } else {
         (extend_removable_span(input, start, end), due)
     }
@@ -551,6 +558,14 @@ fn local_timezone_name() -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+/// Prefixes that introduce a due time, tried in order. `from `/`das `/`de `
+/// cover the "from/until"-style phrasing Todoist itself uses for recurring
+/// tasks that also carry a time range or duration, in English, Portuguese
+/// and Spanish respectively; the locale-specific normalization tables
+/// already fold `as`/`as`/`a las`/`a la` (and, after diacritic-folding,
+/// `às`) down to `at `, so they do not need separate entries here.
+const DUE_TIME_PREFIX_MARKERS: [&str; 4] = ["at ", "from ", "das ", "de "];
+
 fn parse_time_suffix(input: &str, start: usize) -> Option<(usize, NaiveTime)> {
     let slice = &input[start..];
     let trimmed = slice.trim_start();
@@ -563,14 +578,19 @@ fn parse_time_suffix(input: &str, start: usize) -> Option<(usize, NaiveTime)> {
     let lower = trimmed.to_ascii_lowercase();
     let mut candidate = lower.as_str();
 
-    if let Some(rest) = candidate.strip_prefix("at ") {
-        offset += 3;
-        candidate = rest;
+    for marker in DUE_TIME_PREFIX_MARKERS {
+        if let Some(rest) = candidate.strip_prefix(marker) {
+            offset += marker.len();
+            candidate = rest;
+            break;
+        }
     }
 
+    // A bare dash immediately after the time (e.g. "07:00-07:30") marks the
+    // start of a time range rather than part of the time token itself.
     let token_end = candidate
         .char_indices()
-        .find(|(_, character)| character.is_whitespace())
+        .find(|(_, character)| character.is_whitespace() || *character == '-')
         .map(|(index, _)| index)
         .unwrap_or(candidate.len());
     let token = &candidate[..token_end];
@@ -604,7 +624,127 @@ fn parse_time_token(token: &str) -> Option<NaiveTime> {
         return NaiveTime::from_hms_opt(hour, minute, 0);
     }
 
+    // Portuguese/Spanish compact hour notation: "8h30" = 08:30, "8h" = 08:00.
+    if let Some((hour, minute)) = token.split_once('h') {
+        let hour = hour.parse::<u32>().ok()?;
+        let minute = if minute.is_empty() {
+            0
+        } else {
+            minute.parse::<u32>().ok()?
+        };
+        return NaiveTime::from_hms_opt(hour, minute, 0);
+    }
+
     None
+}
+
+/// Looks for a time range ("to"/"until"/"-"/"as"/"a" + end time) or an
+/// explicit duration clause ("for"/"por"/"durante" + quantity) immediately
+/// following an already-parsed start time, and returns the span to consume
+/// plus the resulting duration in minutes. Operates directly on whichever
+/// marker words are present rather than on the active locale, so a phrase
+/// mixing languages (as Todoist's own due strings sometimes do, e.g. an
+/// English recurrence with a Portuguese duration suffix) is still
+/// recognized correctly.
+fn parse_duration_or_range_suffix(
+    input: &str,
+    start_time: NaiveTime,
+    start: usize,
+) -> Option<(usize, i64)> {
+    let slice = &input[start..];
+    let trimmed = slice.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let leading_ws = slice.len() - trimmed.len();
+    let base = start + leading_ws;
+
+    for connector in [
+        "to ", "until ", "till ", "ate ", "at ", "as ", "a ", "- ", "-",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(connector) {
+            let token_end = rest
+                .char_indices()
+                .find(|(_, character)| character.is_whitespace())
+                .map(|(index, _)| index)
+                .unwrap_or(rest.len());
+            let token = &rest[..token_end];
+            if let Some(end_time) = parse_time_token(token) {
+                let start_minutes = i64::from(start_time.num_seconds_from_midnight()) / 60;
+                let end_minutes = i64::from(end_time.num_seconds_from_midnight()) / 60;
+                if end_minutes > start_minutes {
+                    return Some((
+                        base + connector.len() + token_end,
+                        end_minutes - start_minutes,
+                    ));
+                }
+            }
+        }
+    }
+
+    for marker in ["for ", "por ", "durante "] {
+        if let Some(rest) = trimmed.strip_prefix(marker)
+            && let Some((quantity_end, minutes)) = parse_duration_quantity(rest)
+        {
+            return Some((base + marker.len() + quantity_end, minutes));
+        }
+    }
+
+    None
+}
+
+/// Parses a duration quantity such as "30 minutes", "30min", "30m",
+/// "1 hour", "1h30", "1h30m", "2 horas" or "90 minutos" from the start of
+/// `text`, returning the number of minutes and how much of `text` it
+/// consumed.
+fn parse_duration_quantity(text: &str) -> Option<(usize, i64)> {
+    let digit_end = text
+        .char_indices()
+        .take_while(|(_, character)| character.is_ascii_digit())
+        .last()
+        .map(|(index, character)| index + character.len_utf8())
+        .unwrap_or(0);
+    if digit_end == 0 {
+        return None;
+    }
+    let number: i64 = text[..digit_end].parse().ok()?;
+    let rest = &text[digit_end..];
+
+    // Compact "<H>h<MM>" / "<H>h<MM>m" / "<H>h" form.
+    if let Some(after_h) = rest.strip_prefix('h') {
+        let minute_digit_end = after_h
+            .char_indices()
+            .take_while(|(_, character)| character.is_ascii_digit())
+            .last()
+            .map(|(index, character)| index + character.len_utf8())
+            .unwrap_or(0);
+        if minute_digit_end > 0 {
+            let minutes: i64 = after_h[..minute_digit_end].parse().ok()?;
+            let mut end = digit_end + 1 + minute_digit_end;
+            if after_h[minute_digit_end..].starts_with('m') {
+                end += 1;
+            }
+            return Some((end, number * 60 + minutes));
+        }
+        if !after_h.starts_with(|character: char| character.is_ascii_alphabetic()) {
+            return Some((digit_end + 1, number * 60));
+        }
+    }
+
+    let trimmed = rest.trim_start();
+    let gap = rest.len() - trimmed.len();
+    let word_end = trimmed
+        .char_indices()
+        .find(|(_, character)| !character.is_ascii_alphabetic())
+        .map(|(index, _)| index)
+        .unwrap_or(trimmed.len());
+    let word = &trimmed[..word_end];
+    let minutes = match word {
+        "minutes" | "minute" | "mins" | "min" | "minutos" | "minuto" | "m" => number,
+        "hours" | "hour" | "horas" | "hora" | "hs" | "h" => number * 60,
+        _ => return None,
+    };
+    Some((digit_end + gap + word_end, minutes))
 }
 
 fn parse_meridiem_time(value: &str, is_pm: bool) -> Option<NaiveTime> {
@@ -2171,5 +2311,122 @@ mod tests {
             next_due.date,
             NaiveDate::from_ymd_opt(2026, 4, 18).expect("valid date")
         );
+    }
+
+    #[test]
+    fn parses_english_explicit_duration_suffix() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "daily at 8am for 30 minutes",
+            reference_date,
+            &[NlpLocale::En],
+        )
+        .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.duration_minutes, Some(30));
+        assert_eq!(due.string, "daily at 8am for 30 minutes");
+    }
+
+    #[test]
+    fn parses_english_time_range_as_duration() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "daily from 8am to 8:30am",
+            reference_date,
+            &[NlpLocale::En],
+        )
+        .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.duration_minutes, Some(30));
+    }
+
+    #[test]
+    fn parses_compact_dash_time_range_as_duration() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due =
+            parse_due_input_with_locales("daily 07:00-07:30", reference_date, &[NlpLocale::En])
+                .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.duration_minutes, Some(30));
+        assert_eq!(due.string, "daily 07:00-07:30");
+    }
+
+    #[test]
+    fn parses_todoist_mixed_english_recurrence_with_portuguese_duration_suffix() {
+        // Reproduces the exact due string from GH-33: Todoist produced an
+        // English recurrence phrase with a Portuguese duration suffix
+        // ("por 30m") mixed in.
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "every weekday at 07:00 por 30m",
+            reference_date,
+            &[NlpLocale::En],
+        )
+        .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.duration_minutes, Some(30));
+        assert_eq!(due.string, "every weekday at 07:00 por 30m");
+    }
+
+    #[test]
+    fn parses_portuguese_compact_weekly_time_range() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "toda quarta-feira das 8h as 8h30",
+            reference_date,
+            &[NlpLocale::PtBr],
+        )
+        .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.duration_minutes, Some(30));
+    }
+
+    #[test]
+    fn parses_spanish_explicit_duration_suffix() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "cada miercoles a las 8:00 durante 30 minutos",
+            reference_date,
+            &[NlpLocale::Es],
+        )
+        .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.duration_minutes, Some(30));
+    }
+
+    #[test]
+    fn parses_compact_hour_and_minute_duration() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "daily at 9am for 1h30m",
+            reference_date,
+            &[NlpLocale::En],
+        )
+        .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.duration_minutes, Some(90));
+    }
+
+    #[test]
+    fn non_recurring_due_can_also_carry_a_duration() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due = parse_due_input_with_locales(
+            "tomorrow at 3pm for 45 minutes",
+            reference_date,
+            &[NlpLocale::En],
+        )
+        .expect("due should parse");
+        assert!(!due.is_recurring);
+        assert_eq!(due.duration_minutes, Some(45));
+    }
+
+    #[test]
+    fn does_not_attach_a_negative_or_zero_length_range_as_duration() {
+        let reference_date = NaiveDate::from_ymd_opt(2026, 4, 17).expect("valid date");
+        let due =
+            parse_due_input_with_locales("daily from 8am to 7am", reference_date, &[NlpLocale::En])
+                .expect("due should parse");
+        assert!(due.is_recurring);
+        assert_eq!(due.duration_minutes, None);
     }
 }
