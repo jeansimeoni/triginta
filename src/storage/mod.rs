@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     due_string TEXT,
     due_lang TEXT,
     due_is_recurring INTEGER NOT NULL DEFAULT 0,
+    due_duration_minutes INTEGER,
     FOREIGN KEY(project_id) REFERENCES projects(id),
     FOREIGN KEY(section_id) REFERENCES sections(id),
     FOREIGN KEY(parent_task_id) REFERENCES tasks(id)
@@ -218,6 +219,8 @@ pub struct SyncTaskSnapshot {
     pub due_timezone: Option<String>,
     pub due_string: Option<String>,
     pub due_lang: Option<String>,
+    pub due_is_recurring: bool,
+    pub due_duration_minutes: Option<i64>,
     pub completed_at: Option<String>,
     pub labels: Vec<String>,
     pub deleted_at: Option<String>,
@@ -337,6 +340,7 @@ pub struct RemoteTaskRecord {
     pub due_string: Option<String>,
     pub due_lang: Option<String>,
     pub due_is_recurring: bool,
+    pub due_duration_minutes: Option<i64>,
     pub completed_at: Option<String>,
 }
 
@@ -621,6 +625,10 @@ impl Database {
         self.ensure_tasks_column(
             "due_is_recurring",
             "ALTER TABLE tasks ADD COLUMN due_is_recurring INTEGER NOT NULL DEFAULT 0",
+        )?;
+        self.ensure_tasks_column(
+            "due_duration_minutes",
+            "ALTER TABLE tasks ADD COLUMN due_duration_minutes INTEGER",
         )?;
         self.ensure_tasks_column(
             "priority",
@@ -1530,7 +1538,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                                 projects.todoist_id, sections.todoist_id, parent.todoist_id,
                                 projects.is_inbox, tasks.title, tasks.description, tasks.priority,
                                 tasks.due_date, tasks.due_datetime_utc, tasks.due_timezone,
-                                tasks.due_string, tasks.due_lang, tasks.completed_at, tasks.deleted_at
+                                tasks.due_string, tasks.due_lang, tasks.due_is_recurring,
+                                tasks.due_duration_minutes, tasks.completed_at, tasks.deleted_at
                          FROM tasks
                          LEFT JOIN projects ON projects.id = tasks.project_id
                          LEFT JOIN sections ON sections.id = tasks.section_id
@@ -1554,8 +1563,10 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                                 due_timezone: row.get(12)?,
                                 due_string: row.get(13)?,
                                 due_lang: row.get(14)?,
-                                completed_at: row.get(15)?,
-                                deleted_at: row.get(16)?,
+                                due_is_recurring: row.get::<_, i64>(15)? != 0,
+                                due_duration_minutes: row.get(16)?,
+                                completed_at: row.get(17)?,
+                                deleted_at: row.get(18)?,
                                 labels: Vec::new(),
                             })
                         },
@@ -2379,8 +2390,9 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                  SET project_id = ?1, section_id = ?2, parent_task_id = ?3,
                      title = ?4, description = ?5, status = ?6, completed_at = ?7, priority = ?8,
                      due_date = ?9, due_datetime_utc = ?10, due_timezone = ?11, due_string = ?12, due_lang = ?13, due_is_recurring = ?14,
-                     todoist_id = ?15, todoist_sync_id = ?16, updated_at = ?17, synced_at = ?18, deleted_at = NULL
-                 WHERE id = ?19",
+                     due_duration_minutes = ?15,
+                     todoist_id = ?16, todoist_sync_id = ?17, updated_at = ?18, synced_at = ?19, deleted_at = NULL
+                 WHERE id = ?20",
                 params![
                     project_local_id,
                     section_local_id,
@@ -2396,6 +2408,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                     remote.due_string,
                     remote.due_lang,
                     if remote.due_is_recurring { 1_i64 } else { 0_i64 },
+                    remote.due_duration_minutes,
                     remote.todoist_id,
                     remote.todoist_sync_id,
                     synced_local,
@@ -2412,8 +2425,8 @@ impl SyncRepository for SqliteSyncRepository<'_> {
         }
         let child_order = self.next_task_child_order(parent_local_id.map(TaskId))?;
         self.connection.execute(
-            "INSERT INTO tasks(project_id, section_id, parent_task_id, child_order, title, description, status, priority, created_at, updated_at, synced_at, todoist_id, todoist_sync_id, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_lang, due_is_recurring)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL, ?15, ?16, ?17, ?18, ?19, ?20)",
+            "INSERT INTO tasks(project_id, section_id, parent_task_id, child_order, title, description, status, priority, created_at, updated_at, synced_at, todoist_id, todoist_sync_id, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_lang, due_is_recurring, due_duration_minutes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 project_local_id,
                 section_local_id,
@@ -2435,6 +2448,7 @@ impl SyncRepository for SqliteSyncRepository<'_> {
                 remote.due_string,
                 remote.due_lang,
                 if remote.due_is_recurring { 1_i64 } else { 0_i64 },
+                remote.due_duration_minutes,
             ],
         )?;
         let local_id = self.connection.last_insert_rowid();
@@ -2752,7 +2766,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         // closure. The closure is conceptually similar to a row-to-struct
         // callback in C, but its return type is checked by the compiler.
         let mut statement = self.connection.prepare(
-            "SELECT id, project_id, section_id, parent_task_id, child_order, title, description, status, priority, created_at, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_lang, due_is_recurring
+            "SELECT id, project_id, section_id, parent_task_id, child_order, title, description, status, priority, created_at, completed_at, deleted_at, due_date, due_datetime_utc, due_timezone, due_string, due_lang, due_is_recurring, due_duration_minutes
              FROM tasks
              ORDER BY created_at DESC, id DESC",
         )?;
@@ -2771,7 +2785,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
                 created_at: row.get(9)?,
                 completed_at: row.get(10)?,
                 deleted_at: row.get(11)?,
-                due: Self::row_due(row, 12, 13, 14, 15, 16, 17)?,
+                due: Self::row_due(row, 12)?,
             })
         })?;
 
@@ -2791,8 +2805,8 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         let now_utc = now_utc_rfc3339();
         self.connection
             .execute(
-                "INSERT INTO tasks(project_id, section_id, parent_task_id, child_order, title, status, priority, created_at, updated_at, synced_at, todoist_id, completed_at, due_date, due_datetime_utc, due_timezone, due_string, due_lang, due_is_recurring)
-                 VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO tasks(project_id, section_id, parent_task_id, child_order, title, status, priority, created_at, updated_at, synced_at, todoist_id, completed_at, due_date, due_datetime_utc, due_timezone, due_string, due_lang, due_is_recurring, due_duration_minutes)
+                 VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     project_id.0,
                     self.next_child_order(None)?,
@@ -2808,6 +2822,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
                     due.and_then(|due| due.due_lang.clone()),
                     due.map(|due| if due.is_recurring { 1_i64 } else { 0_i64 })
                         .unwrap_or(0_i64),
+                    due.and_then(|due| due.duration_minutes),
                 ],
             )
             .context("failed to create task")?;
@@ -2845,8 +2860,8 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         self.connection
             .execute(
                 "UPDATE tasks
-                 SET title = ?1, description = ?2, project_id = ?3, section_id = ?4, parent_task_id = ?5, child_order = ?6, priority = ?7, due_date = ?8, due_datetime_utc = ?9, due_timezone = ?10, due_string = ?11, due_lang = ?12, due_is_recurring = ?13, updated_at = ?14
-                 WHERE id = ?15",
+                 SET title = ?1, description = ?2, project_id = ?3, section_id = ?4, parent_task_id = ?5, child_order = ?6, priority = ?7, due_date = ?8, due_datetime_utc = ?9, due_timezone = ?10, due_string = ?11, due_lang = ?12, due_is_recurring = ?13, due_duration_minutes = ?14, updated_at = ?15
+                 WHERE id = ?16",
                 params![
                     update.title,
                     update.description,
@@ -2869,6 +2884,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
                         .as_ref()
                         .map(|due| if due.is_recurring { 1_i64 } else { 0_i64 })
                         .unwrap_or(0_i64),
+                    update.due.as_ref().and_then(|due| due.duration_minutes),
                     Local::now(),
                     task_id.0,
                 ],
@@ -3098,7 +3114,7 @@ impl SqliteTaskRepository<'_> {
             .query_row(
                 "SELECT id, project_id, section_id, parent_task_id, child_order, title, description, status,
                         created_at, completed_at, priority, deleted_at, due_date,
-                        due_datetime_utc, due_timezone, due_string, due_lang, due_is_recurring
+                        due_datetime_utc, due_timezone, due_string, due_lang, due_is_recurring, due_duration_minutes
                  FROM tasks
                  WHERE id = ?1",
                 params![task_id.0],
@@ -3116,7 +3132,7 @@ impl SqliteTaskRepository<'_> {
                         completed_at: row.get(9)?,
                         priority: TaskPriority::from_db(row.get::<_, i64>(10)?),
                         deleted_at: row.get(11)?,
-                        due: Self::row_due(row, 12, 13, 14, 15, 16, 17)?,
+                        due: Self::row_due(row, 12)?,
                     })
                 },
             )
@@ -3152,21 +3168,17 @@ impl SqliteTaskRepository<'_> {
         Ok(())
     }
 
-    fn row_due(
-        row: &rusqlite::Row<'_>,
-        date_col: usize,
-        datetime_col: usize,
-        timezone_col: usize,
-        string_col: usize,
-        due_lang_col: usize,
-        recurring_col: usize,
-    ) -> rusqlite::Result<Option<TaskDue>> {
-        let date = row.get::<_, Option<chrono::NaiveDate>>(date_col)?;
-        let datetime_utc = row.get::<_, Option<String>>(datetime_col)?;
-        let timezone = row.get::<_, Option<String>>(timezone_col)?;
-        let string = row.get::<_, Option<String>>(string_col)?;
-        let due_lang = row.get::<_, Option<String>>(due_lang_col)?;
-        let is_recurring = row.get::<_, i64>(recurring_col)?;
+    /// Reads the seven contiguous due-related columns starting at `start_col`,
+    /// in the fixed order: date, datetime, timezone, string, due_lang,
+    /// is_recurring, duration_minutes.
+    fn row_due(row: &rusqlite::Row<'_>, start_col: usize) -> rusqlite::Result<Option<TaskDue>> {
+        let date = row.get::<_, Option<chrono::NaiveDate>>(start_col)?;
+        let datetime_utc = row.get::<_, Option<String>>(start_col + 1)?;
+        let timezone = row.get::<_, Option<String>>(start_col + 2)?;
+        let string = row.get::<_, Option<String>>(start_col + 3)?;
+        let due_lang = row.get::<_, Option<String>>(start_col + 4)?;
+        let is_recurring = row.get::<_, i64>(start_col + 5)?;
+        let duration_minutes = row.get::<_, Option<i64>>(start_col + 6)?;
 
         match (date, string) {
             (Some(date), Some(string)) => {
@@ -3181,6 +3193,7 @@ impl SqliteTaskRepository<'_> {
                     string,
                     due_lang,
                     is_recurring: is_recurring != 0,
+                    duration_minutes,
                 }))
             }
             _ => Ok(None),
@@ -4590,8 +4603,8 @@ mod tests {
     use super::{
         Database, FilterRepository, PomodoroRepository, ProjectId, ProjectRepository,
         RemoteFilterRecord, RemoteProjectRecord, RemoteSectionRecord, RemoteTagRecord,
-        RemoteTaskRecord, SectionRepository, SyncApplyOutcome, SyncRepository, SyncStateRecord,
-        TagRepository, TaskRepository, local_changed_since_sync,
+        RemoteTaskRecord, SectionRepository, SyncApplyOutcome, SyncEntitySnapshot, SyncRepository,
+        SyncStateRecord, TagRepository, TaskRepository, local_changed_since_sync,
     };
 
     fn naive_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<Utc> {
@@ -5187,6 +5200,7 @@ mod tests {
             due_string: None,
             due_lang: None,
             due_is_recurring: false,
+            due_duration_minutes: None,
             completed_at: Some(Utc::now().to_rfc3339()),
         };
 
@@ -5256,6 +5270,7 @@ mod tests {
             due_string: None,
             due_lang: None,
             due_is_recurring: false,
+            due_duration_minutes: None,
             completed_at: Some(Utc::now().to_rfc3339()),
         };
 
@@ -5311,6 +5326,7 @@ mod tests {
             due_string: None,
             due_lang: None,
             due_is_recurring: false,
+            due_duration_minutes: None,
             completed_at: None,
         };
 
@@ -5386,6 +5402,7 @@ mod tests {
             due_string: Some("2026-06-12 12:00".to_string()),
             due_lang: Some("en".to_string()),
             due_is_recurring: false,
+            due_duration_minutes: None,
             completed_at: None,
         };
 
@@ -5406,8 +5423,52 @@ mod tests {
                 string: "2026-06-12 12:00".to_string(),
                 due_lang: Some("en".to_string()),
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_remote_task_persists_recurring_due_and_duration() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let tasks = database.task_repository();
+        let due_date = chrono::NaiveDate::from_ymd_opt(2026, 6, 15).expect("valid date");
+        let due_datetime = due_date.and_hms_opt(7, 0, 0).expect("valid time");
+        let due_datetime_utc = naive_to_utc(due_datetime);
+
+        let remote = RemoteTaskRecord {
+            todoist_id: "todoist-task-2".to_string(),
+            todoist_sync_id: None,
+            project_todoist_id: None,
+            section_todoist_id: None,
+            parent_todoist_id: None,
+            content: "Recurring timed remote task".to_string(),
+            description: String::new(),
+            priority: 4,
+            labels: Vec::new(),
+            due_date: Some(due_date),
+            due_datetime_utc: Some(due_datetime_utc.to_rfc3339()),
+            due_timezone: Some("America/Sao_Paulo".to_string()),
+            due_string: Some("every weekday at 07:00 por 30m".to_string()),
+            due_lang: Some("en".to_string()),
+            due_is_recurring: true,
+            due_duration_minutes: Some(30),
+            completed_at: None,
+        };
+
+        let outcome = sync.apply_remote_task(&remote, Utc::now().to_rfc3339().as_str(), false)?;
+        assert_eq!(outcome, SyncApplyOutcome::Created);
+
+        let refreshed = tasks
+            .list_all()?
+            .into_iter()
+            .find(|task| task.title == "Recurring timed remote task")
+            .expect("task should exist");
+        let due = refreshed.due.expect("task should have a due date");
+        assert!(due.is_recurring);
+        assert_eq!(due.duration_minutes, Some(30));
         Ok(())
     }
 
@@ -5662,6 +5723,7 @@ mod tests {
                 string: "tomorrow".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             }),
             Local::now(),
         )?;
@@ -5675,12 +5737,50 @@ mod tests {
                 string: "tomorrow".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
 
         let tasks = repository.list_all()?;
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].due, created.due);
+
+        Ok(())
+    }
+
+    #[test]
+    fn outbound_sync_snapshot_carries_recurring_flag_and_duration() -> Result<()> {
+        // Regression test for GH-33: load_entity_snapshot's SyncTaskSnapshot
+        // must carry the already-known due_is_recurring/due_duration_minutes
+        // values, since the outbound Todoist sync trusts them directly
+        // rather than re-deriving recurrence by re-parsing due_string.
+        let database = Database::open_in_memory()?;
+        let repository = database.task_repository();
+        let inbox_project_id = database.project_repository().inbox_project_id()?;
+        let created = repository.create(
+            "Standup",
+            inbox_project_id,
+            Some(&TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 20).expect("valid date"),
+                datetime: None,
+                timezone: None,
+                string: "every weekday at 07:00 por 30m".to_string(),
+                due_lang: Some("en".to_string()),
+                is_recurring: true,
+                duration_minutes: Some(30),
+            }),
+            Local::now(),
+        )?;
+
+        let snapshot = database
+            .sync_repository()
+            .load_entity_snapshot("task", created.id.0)?
+            .expect("snapshot should exist");
+        let SyncEntitySnapshot::Task(task) = snapshot else {
+            panic!("expected a task snapshot");
+        };
+        assert!(task.due_is_recurring);
+        assert_eq!(task.due_duration_minutes, Some(30));
 
         Ok(())
     }
@@ -5702,6 +5802,7 @@ mod tests {
                 string: "tomorrow at 3pm".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             }),
             Local::now(),
         )?;
@@ -5715,6 +5816,7 @@ mod tests {
                 string: "tomorrow at 3pm".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
 
@@ -5781,6 +5883,7 @@ mod tests {
                     string: "every week at 9:30am".to_string(),
                     due_lang: None,
                     is_recurring: true,
+                    duration_minutes: None,
                 }),
             },
         )?;
@@ -5797,6 +5900,7 @@ mod tests {
                 string: "every week at 9:30am".to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             })
         );
 

@@ -24,7 +24,7 @@ use crate::{
         SyncOutboxEntry, SyncProjectSnapshot, SyncRepository, SyncSectionSnapshot, SyncStateRecord,
         SyncTagSnapshot, SyncTaskSnapshot,
     },
-    task_nlp::{NlpLocale, locale_priority_with_hint, parse_due_input_with_locales},
+    task_nlp::{NlpLocale, parse_due_input_with_locales},
 };
 
 const TODOIST_API_BASE: &str = "https://api.todoist.com/api/v1";
@@ -294,16 +294,16 @@ impl TodoistSyncProvider {
         Some((rewritten.to_string(), "en"))
     }
 
-    fn due_string_is_recurring_for_todoist(due_string: &str, due_lang: Option<&str>) -> bool {
-        let reference_date = Utc::now().date_naive();
-        let locales = locale_priority_with_hint(due_lang);
-        parse_due_input_with_locales(due_string, reference_date, locales.as_slice())
-            .is_some_and(|due| due.is_recurring)
-    }
-
-    fn todoist_due_fields(due: Option<&TodoistDue>) -> TodoistRemoteDueFields {
+    fn todoist_due_fields(
+        due: Option<&TodoistDue>,
+        duration: Option<&TodoistTaskDuration>,
+    ) -> TodoistRemoteDueFields {
+        let due_duration_minutes = duration.and_then(TodoistTaskDuration::as_minutes);
         let Some(due) = due else {
-            return TodoistRemoteDueFields::default();
+            return TodoistRemoteDueFields {
+                due_duration_minutes,
+                ..TodoistRemoteDueFields::default()
+            };
         };
         let (due_date, due_datetime_utc) = due
             .date
@@ -319,6 +319,7 @@ impl TodoistSyncProvider {
             due_string: due.string.clone(),
             due_lang: due.lang.clone(),
             due_is_recurring: due.is_recurring.unwrap_or(false),
+            due_duration_minutes,
         }
     }
 
@@ -591,6 +592,71 @@ impl TodoistSyncProvider {
         Ok(())
     }
 
+    /// Builds the due-date and duration fields of a Todoist task create/update
+    /// payload. Recurrence is preserved by trusting `task.due_is_recurring`
+    /// directly (already known correct, either from the Todoist API or from
+    /// Triginta's own NLP parser at creation/edit time) rather than
+    /// re-deriving it by re-parsing `due_string`, which can misclassify a
+    /// recurring due string that Triginta's parser does not fully
+    /// understand (e.g. one carrying a duration suffix) as non-recurring and
+    /// silently collapse it into a one-off date on Todoist.
+    fn task_due_payload_fields(task: &SyncTaskSnapshot) -> serde_json::Map<String, Value> {
+        let mut fields = serde_json::Map::new();
+        if let Some(due_string) = task.due_string.as_ref() {
+            if task.due_is_recurring {
+                let mut outgoing_due_string = due_string.clone();
+                let mut outgoing_due_lang = task
+                    .due_lang
+                    .as_deref()
+                    .and_then(Self::normalize_due_lang_for_todoist)
+                    .or_else(|| Self::detect_due_lang(due_string.as_str()));
+
+                if let Some((rewritten_due_string, rewritten_due_lang)) =
+                    Self::rewrite_due_string_for_todoist(due_string.as_str(), outgoing_due_lang)
+                {
+                    outgoing_due_string = rewritten_due_string;
+                    outgoing_due_lang = Some(rewritten_due_lang);
+                }
+
+                fields.insert("due_string".to_string(), Value::String(outgoing_due_string));
+                if let Some(due_lang) = outgoing_due_lang {
+                    fields.insert("due_lang".to_string(), Value::String(due_lang.to_string()));
+                }
+            } else if let Some(due_datetime_utc) = task.due_datetime_utc.as_ref() {
+                fields.insert(
+                    "due_datetime".to_string(),
+                    Value::String(due_datetime_utc.clone()),
+                );
+            } else if let Some(due_date) = task.due_date {
+                fields.insert(
+                    "due_date".to_string(),
+                    Value::String(due_date.format("%Y-%m-%d").to_string()),
+                );
+            }
+        } else if let Some(due_datetime_utc) = task.due_datetime_utc.as_ref() {
+            fields.insert(
+                "due_datetime".to_string(),
+                Value::String(due_datetime_utc.clone()),
+            );
+        } else if let Some(due_date) = task.due_date {
+            fields.insert(
+                "due_date".to_string(),
+                Value::String(due_date.format("%Y-%m-%d").to_string()),
+            );
+        }
+        if let Some(duration_minutes) = task.due_duration_minutes {
+            fields.insert(
+                "duration".to_string(),
+                Value::Number(duration_minutes.into()),
+            );
+            fields.insert(
+                "duration_unit".to_string(),
+                Value::String("minute".to_string()),
+            );
+        }
+        fields
+    }
+
     fn sync_task(
         &self,
         op_kind: &str,
@@ -640,51 +706,7 @@ impl TodoistSyncProvider {
                 );
             }
         }
-        if let Some(due_string) = task.due_string.as_ref() {
-            if Self::due_string_is_recurring_for_todoist(
-                due_string.as_str(),
-                task.due_lang.as_deref(),
-            ) {
-                let mut outgoing_due_string = due_string.clone();
-                let mut outgoing_due_lang = task
-                    .due_lang
-                    .as_deref()
-                    .and_then(Self::normalize_due_lang_for_todoist)
-                    .or_else(|| Self::detect_due_lang(due_string.as_str()));
-
-                if let Some((rewritten_due_string, rewritten_due_lang)) =
-                    Self::rewrite_due_string_for_todoist(due_string.as_str(), outgoing_due_lang)
-                {
-                    outgoing_due_string = rewritten_due_string;
-                    outgoing_due_lang = Some(rewritten_due_lang);
-                }
-
-                body.insert("due_string".to_string(), Value::String(outgoing_due_string));
-                if let Some(due_lang) = outgoing_due_lang {
-                    body.insert("due_lang".to_string(), Value::String(due_lang.to_string()));
-                }
-            } else if let Some(due_datetime_utc) = task.due_datetime_utc.as_ref() {
-                body.insert(
-                    "due_datetime".to_string(),
-                    Value::String(due_datetime_utc.clone()),
-                );
-            } else if let Some(due_date) = task.due_date {
-                body.insert(
-                    "due_date".to_string(),
-                    Value::String(due_date.format("%Y-%m-%d").to_string()),
-                );
-            }
-        } else if let Some(due_datetime_utc) = task.due_datetime_utc.as_ref() {
-            body.insert(
-                "due_datetime".to_string(),
-                Value::String(due_datetime_utc.clone()),
-            );
-        } else if let Some(due_date) = task.due_date {
-            body.insert(
-                "due_date".to_string(),
-                Value::String(due_date.format("%Y-%m-%d").to_string()),
-            );
-        }
+        body.extend(Self::task_due_payload_fields(task));
         if !task.labels.is_empty() {
             body.insert(
                 "labels".to_string(),
@@ -947,7 +969,7 @@ impl TodoistSyncProvider {
             )?;
 
             for task in response.items {
-                let due = Self::todoist_due_fields(task.due.as_ref());
+                let due = Self::todoist_due_fields(task.due.as_ref(), task.duration.as_ref());
                 let remote = RemoteTaskRecord {
                     todoist_id: task.id,
                     todoist_sync_id: task.sync_id,
@@ -964,6 +986,7 @@ impl TodoistSyncProvider {
                     due_string: due.due_string,
                     due_lang: due.due_lang,
                     due_is_recurring: due.due_is_recurring,
+                    due_duration_minutes: due.due_duration_minutes,
                     completed_at: task.completed_at.or_else(|| {
                         if task.checked.unwrap_or(false) {
                             Some(synced_at_utc.to_string())
@@ -1063,7 +1086,7 @@ impl TodoistSyncProvider {
         }
 
         for task in sync_response.items {
-            let due = Self::todoist_due_fields(task.due.as_ref());
+            let due = Self::todoist_due_fields(task.due.as_ref(), task.duration.as_ref());
             let labels = task.labels.unwrap_or_else(|| {
                 task.label_ids
                     .unwrap_or_default()
@@ -1090,6 +1113,7 @@ impl TodoistSyncProvider {
                 due_string: due.due_string.clone(),
                 due_lang: due.due_lang.clone(),
                 due_is_recurring: due.due_is_recurring,
+                due_duration_minutes: due.due_duration_minutes,
                 completed_at: task.completed_at.or_else(|| {
                     if task.checked.unwrap_or(false) {
                         Some(synced_at_utc.to_string())
@@ -1218,8 +1242,25 @@ struct TodoistTask {
     labels: Option<Vec<String>>,
     label_ids: Option<Vec<TodoistIdValue>>,
     due: Option<TodoistDue>,
+    duration: Option<TodoistTaskDuration>,
     completed_at: Option<String>,
     checked: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TodoistTaskDuration {
+    amount: i64,
+    unit: String,
+}
+
+impl TodoistTaskDuration {
+    fn as_minutes(&self) -> Option<i64> {
+        match self.unit.as_str() {
+            "minute" => Some(self.amount),
+            "day" => Some(self.amount.saturating_mul(1440)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1256,6 +1297,7 @@ struct TodoistRemoteDueFields {
     due_string: Option<String>,
     due_lang: Option<String>,
     due_is_recurring: bool,
+    due_duration_minutes: Option<i64>,
 }
 
 fn parse_todoist_due_date(raw: &str) -> Option<(Option<NaiveDate>, Option<DateTime<Utc>>)> {
@@ -1735,7 +1777,7 @@ fn completed_tasks_since(
 mod tests {
     use anyhow::Result;
     use chrono::{DateTime, NaiveDate, Utc};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use crate::config::TodoistIntegrationConfig;
     use crate::storage::{Database, SyncRepository, SyncTaskSnapshot};
@@ -1852,18 +1894,6 @@ mod tests {
     }
 
     #[test]
-    fn due_string_is_recurring_for_todoist_supports_pt_br_weekly_variation() {
-        assert!(TodoistSyncProvider::due_string_is_recurring_for_todoist(
-            "segunda toda a semana",
-            Some("pt-BR")
-        ));
-        assert!(!TodoistSyncProvider::due_string_is_recurring_for_todoist(
-            "amanha",
-            Some("pt-BR")
-        ));
-    }
-
-    #[test]
     fn todoist_due_fields_parse_date_only_due() {
         let due = TodoistDue {
             date: Some("2026-06-12".to_string()),
@@ -1874,7 +1904,7 @@ mod tests {
             lang: Some("en".to_string()),
         };
 
-        let fields = TodoistSyncProvider::todoist_due_fields(Some(&due));
+        let fields = TodoistSyncProvider::todoist_due_fields(Some(&due), None);
 
         assert_eq!(
             fields.due_date,
@@ -1897,7 +1927,7 @@ mod tests {
             lang: None,
         };
 
-        let fields = TodoistSyncProvider::todoist_due_fields(Some(&due));
+        let fields = TodoistSyncProvider::todoist_due_fields(Some(&due), None);
 
         assert_eq!(
             fields.due_date,
@@ -1929,7 +1959,7 @@ mod tests {
             lang: None,
         };
 
-        let fields = TodoistSyncProvider::todoist_due_fields(Some(&due));
+        let fields = TodoistSyncProvider::todoist_due_fields(Some(&due), None);
 
         assert_eq!(
             fields.due_date,
@@ -2008,6 +2038,8 @@ mod tests {
             due_timezone: None,
             due_string: None,
             due_lang: None,
+            due_is_recurring: false,
+            due_duration_minutes: None,
             completed_at: None,
             labels: Vec::new(),
             deleted_at: None,
@@ -2036,6 +2068,8 @@ mod tests {
             due_timezone: None,
             due_string: None,
             due_lang: None,
+            due_is_recurring: false,
+            due_duration_minutes: None,
             completed_at: None,
             labels: Vec::new(),
             deleted_at: None,
@@ -2044,5 +2078,110 @@ mod tests {
         assert!(!TodoistSyncProvider::task_create_requires_project_mapping(
             &task
         ));
+    }
+
+    fn base_sync_task_snapshot() -> SyncTaskSnapshot {
+        SyncTaskSnapshot {
+            local_id: 1,
+            todoist_id: Some("todoist-task-1".to_string()),
+            todoist_sync_id: None,
+            project_todoist_id: None,
+            project_is_inbox: true,
+            section_todoist_id: None,
+            parent_todoist_id: None,
+            title: "Task".to_string(),
+            description: String::new(),
+            priority: 4,
+            due_date: None,
+            due_datetime_utc: None,
+            due_timezone: None,
+            due_string: None,
+            due_lang: None,
+            due_is_recurring: false,
+            due_duration_minutes: None,
+            completed_at: None,
+            labels: Vec::new(),
+            deleted_at: None,
+        }
+    }
+
+    #[test]
+    fn task_due_payload_fields_sends_due_string_for_recurring_task_even_when_duration_suffix_is_unparseable()
+     {
+        // The stored `due_is_recurring` flag is the source of truth (it is
+        // populated directly from the Todoist API, or from Triginta's own
+        // parser at creation time) and must be trusted even when the due
+        // string itself carries phrasing (here, a Portuguese duration
+        // suffix mixed into an English recurrence phrase) that Triginta's
+        // NLP engine cannot fully round-trip. Falling back to due_date here
+        // would silently strip the recurrence on Todoist's side.
+        let task = SyncTaskSnapshot {
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 10, 16).unwrap()),
+            due_datetime_utc: Some("2026-10-16T10:00:00+00:00".to_string()),
+            due_string: Some("every weekday at 07:00 por 30m".to_string()),
+            due_lang: Some("en".to_string()),
+            due_is_recurring: true,
+            ..base_sync_task_snapshot()
+        };
+
+        let fields = TodoistSyncProvider::task_due_payload_fields(&task);
+
+        assert_eq!(
+            fields.get("due_string").and_then(Value::as_str),
+            Some("every weekday at 07:00 por 30m")
+        );
+        assert!(!fields.contains_key("due_date"));
+        assert!(!fields.contains_key("due_datetime"));
+    }
+
+    #[test]
+    fn task_due_payload_fields_sends_one_off_due_date_when_not_recurring() {
+        let task = SyncTaskSnapshot {
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 10, 16).unwrap()),
+            due_string: Some("oct 16".to_string()),
+            due_is_recurring: false,
+            ..base_sync_task_snapshot()
+        };
+
+        let fields = TodoistSyncProvider::task_due_payload_fields(&task);
+
+        assert_eq!(
+            fields.get("due_date").and_then(Value::as_str),
+            Some("2026-10-16")
+        );
+        assert!(!fields.contains_key("due_string"));
+    }
+
+    #[test]
+    fn task_due_payload_fields_includes_duration_when_present() {
+        let task = SyncTaskSnapshot {
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 10, 16).unwrap()),
+            due_string: Some("oct 16 at 07:00".to_string()),
+            due_duration_minutes: Some(30),
+            ..base_sync_task_snapshot()
+        };
+
+        let fields = TodoistSyncProvider::task_due_payload_fields(&task);
+
+        assert_eq!(fields.get("duration").and_then(Value::as_i64), Some(30));
+        assert_eq!(
+            fields.get("duration_unit").and_then(Value::as_str),
+            Some("minute")
+        );
+    }
+
+    #[test]
+    fn task_due_payload_fields_omits_duration_when_absent() {
+        let task = SyncTaskSnapshot {
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 10, 16).unwrap()),
+            due_string: Some("oct 16".to_string()),
+            due_duration_minutes: None,
+            ..base_sync_task_snapshot()
+        };
+
+        let fields = TodoistSyncProvider::task_due_payload_fields(&task);
+
+        assert!(!fields.contains_key("duration"));
+        assert!(!fields.contains_key("duration_unit"));
     }
 }

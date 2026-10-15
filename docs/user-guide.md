@@ -65,8 +65,9 @@ Task-list keys:
 - `/`: search the current task list
 
 The quick-create popup understands inline project, tag, due-date, recurrence,
-and priority hints. Use `Tab` to accept suggestions. Use `Ctrl+e` to open the
-full editor when the popup is not enough.
+duration, and priority hints (e.g. `every weekday at 7am for 30 minutes`).
+Use `Tab` to accept suggestions. Use `Ctrl+e` to open the full editor when
+the popup is not enough.
 
 ## Projects, Sections, Tags, And Filters
 

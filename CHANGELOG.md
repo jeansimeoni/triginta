@@ -7,8 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Todoist task duration now syncs both ways and is modeled end-to-end: it
+  is read from and written to Todoist's `duration`/`duration_unit` task
+  fields, persisted locally, and shown as a time range (e.g. `07:00-07:30`)
+  in the task list and editors.
+- Triginta's own due-date quick-add and editor can now parse a recurring
+  due phrase that also carries a duration, such as "every weekday at 07:00
+  for 30 minutes", "every wednesday from 8am to 8:30am", or
+  `07:00-07:30`-style compact ranges, in English, Portuguese, Spanish, and
+  phrases mixing those languages.
+
 ### Fixed
 
+- Recurring Todoist tasks no longer lose their recurrence when edited in
+  Triginta and synced back. The outbound sync previously re-derived
+  whether a task was recurring by re-parsing its due string locally;
+  a due string Triginta's parser didn't fully understand (for example one
+  carrying a duration suffix) was misclassified as non-recurring and sent
+  to Todoist as a one-off date, silently destroying the recurrence.
+  Triginta now trusts the already-known-correct recurring flag directly.
+- Portuguese "às" and Spanish "a las"/"a la" due-time markers (e.g. "toda
+  quarta-feira às 8h") were silently never recognized due to an overly
+  strict boundary check; due times in these phrasings now parse correctly.
 - The history panel ("Today" pomodoro list, weekly stats, and 30-day focus
   summaries) no longer goes stale in long-running sessions left open across
   a day boundary. The data now refreshes automatically when the local date

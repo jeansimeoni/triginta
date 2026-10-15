@@ -839,6 +839,7 @@ pub struct TaskDuePreviewView {
     pub datetime: Option<DateTime<Utc>>,
     pub string: String,
     pub is_recurring: bool,
+    pub duration_minutes: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3164,6 +3165,7 @@ impl App {
                 datetime: due.datetime,
                 string: due.string,
                 is_recurring: due.is_recurring,
+                duration_minutes: due.duration_minutes,
             });
             let project_name = self
                 .project_name(input.project_id)
@@ -3503,6 +3505,12 @@ impl App {
                     datetime.with_timezone(&Local).format("%H:%M").to_string(),
                 ));
             }
+            if let Some(duration_minutes) = due.duration_minutes {
+                preview_lines.push(PreviewLineView::key_value(
+                    "Duration",
+                    format_duration_minutes(duration_minutes),
+                ));
+            }
             preview_lines.push(PreviewLineView::key_value(
                 "Recurring",
                 if due.is_recurring { "yes" } else { "no" },
@@ -3563,6 +3571,12 @@ impl App {
                 .map(|datetime| datetime.with_timezone(&Local).format("%H:%M").to_string())
                 .unwrap_or_else(|| "-".to_string());
             preview_lines.push(PreviewLineView::key_value("Time", time_value));
+            if let Some(duration_minutes) = due.duration_minutes {
+                preview_lines.push(PreviewLineView::key_value(
+                    "Duration",
+                    format_duration_minutes(duration_minutes),
+                ));
+            }
             preview_lines.push(PreviewLineView::key_value(
                 "Recurring",
                 if due.is_recurring { "yes" } else { "no" },
@@ -4452,6 +4466,7 @@ impl App {
                 datetime: due.datetime,
                 string: due.string,
                 is_recurring: due.is_recurring,
+                duration_minutes: due.duration_minutes,
             })
     }
 
@@ -4564,6 +4579,7 @@ impl App {
             string,
             due_lang,
             is_recurring: !recurrence_text.is_empty() || recurring_due.is_some(),
+            duration_minutes: None,
         }))
     }
 
@@ -6772,6 +6788,7 @@ impl App {
                 string: due.string.clone(),
                 due_lang: due.due_lang.clone(),
                 is_recurring: true,
+                duration_minutes: None,
             }),
             Some(due) => Some(crate::domain::TaskDue {
                 date: target_date,
@@ -6780,6 +6797,7 @@ impl App {
                 string: due_string_for_datetime(target_date, datetime),
                 due_lang: due.due_lang.clone(),
                 is_recurring: false,
+                duration_minutes: None,
             }),
             None => Some(crate::domain::TaskDue {
                 date: target_date,
@@ -6788,6 +6806,7 @@ impl App {
                 string: due_string_for_datetime(target_date, None),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             }),
         }
     }
@@ -12288,6 +12307,16 @@ fn due_string_for_datetime(date: NaiveDate, datetime: Option<DateTime<Utc>>) -> 
     date.format("%Y-%m-%d").to_string()
 }
 
+fn format_duration_minutes(duration_minutes: i64) -> String {
+    let hours = duration_minutes / 60;
+    let minutes = duration_minutes % 60;
+    match (hours, minutes) {
+        (0, minutes) => format!("{minutes}m"),
+        (hours, 0) => format!("{hours}h"),
+        (hours, minutes) => format!("{hours}h{minutes}m"),
+    }
+}
+
 fn next_weekday(reference_date: NaiveDate, target_weekday: Weekday) -> NaiveDate {
     let current = reference_date.weekday().num_days_from_monday() as i64;
     let target = target_weekday.num_days_from_monday() as i64;
@@ -13075,6 +13104,7 @@ fn showcase_due(
         string: string.to_string(),
         due_lang: Some("en".to_string()),
         is_recurring,
+        duration_minutes: None,
     }
 }
 
@@ -14157,6 +14187,7 @@ mod tests {
                 string: "tomorrow at 3pm".to_string(),
                 due_lang: Some("en".to_string()),
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -14239,6 +14270,7 @@ mod tests {
                     .to_string(),
                 due_lang: Some("en".to_string()),
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -14372,6 +14404,7 @@ mod tests {
                 string: format!("{} at 15:00", expected_date.format("%Y-%m-%d")),
                 due_lang: Some("en".to_string()),
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -14530,6 +14563,7 @@ mod tests {
                 string: "tomorrow".to_string(),
                 due_lang: Some("en".to_string()),
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -14573,6 +14607,7 @@ mod tests {
                 string: "tomorrow at 3pm".to_string(),
                 due_lang: Some("en".to_string()),
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -14607,6 +14642,7 @@ mod tests {
                 string: "hoje".to_string(),
                 due_lang: Some("pt-BR".to_string()),
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -15649,6 +15685,7 @@ mod tests {
                     string: "today".to_string(),
                     due_lang: None,
                     is_recurring: false,
+                    duration_minutes: None,
                 }),
                 Local::now(),
             )
@@ -15664,6 +15701,7 @@ mod tests {
                     string: "next week".to_string(),
                     due_lang: None,
                     is_recurring: false,
+                    duration_minutes: None,
                 }),
                 Local::now(),
             )
@@ -15867,6 +15905,7 @@ mod tests {
                     string: "today".to_string(),
                     due_lang: None,
                     is_recurring: false,
+                    duration_minutes: None,
                 }),
                 now,
             )
@@ -15931,6 +15970,7 @@ mod tests {
                     string: "today".to_string(),
                     due_lang: None,
                     is_recurring: false,
+                    duration_minutes: None,
                 }),
                 now,
             )
@@ -17834,6 +17874,7 @@ mod tests {
                     string: "today".to_string(),
                     due_lang: None,
                     is_recurring: false,
+                    duration_minutes: None,
                 }),
                 now,
             )
@@ -17849,6 +17890,7 @@ mod tests {
                     string: "today".to_string(),
                     due_lang: None,
                     is_recurring: false,
+                    duration_minutes: None,
                 }),
                 now,
             )
@@ -18039,6 +18081,7 @@ mod tests {
                     string: "2026-04-10 at 15:00".to_string(),
                     due_lang: None,
                     is_recurring: false,
+                    duration_minutes: None,
                 }),
                 now,
             )
@@ -18095,6 +18138,7 @@ mod tests {
                     string: "every day".to_string(),
                     due_lang: Some("en".to_string()),
                     is_recurring: true,
+                    duration_minutes: None,
                 }),
                 now,
             )
@@ -18560,6 +18604,7 @@ mod tests {
             string: "cada quinzena".to_string(),
             due_lang: None,
             is_recurring: true,
+            duration_minutes: None,
         };
         let task = app
             .database

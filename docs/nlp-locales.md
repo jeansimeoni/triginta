@@ -17,6 +17,23 @@ Current built-in locales:
 - `pt-BR`
 - `es`
 
+## Duration and time ranges
+
+A due phrase with a time of day can also carry a duration, matching
+Todoist's own grammar:
+
+- explicit duration: `for 30 minutes`, `por 30m`, `durante 30 minutos`
+- time range: `from 8am to 8:30am`, `das 8h as 8h30`, `07:00-07:30`
+
+Duration/range marker words (`for`/`por`/`durante`, `to`/`as`/`a`/`-`, …)
+are recognized directly off whichever words are present in the text
+immediately following the parsed start time, rather than through the
+active locale's normalization table. This means a phrase mixing
+languages — such as a Todoist-produced due string combining an English
+recurrence with a Portuguese duration suffix — still parses correctly.
+See `parse_duration_or_range_suffix` and `parse_duration_quantity` in
+[`src/task_nlp/mod.rs`](../src/task_nlp/mod.rs).
+
 ## How to add a new locale
 
 1. Edit [`src/task_nlp/locales.rs`](../src/task_nlp/locales.rs).

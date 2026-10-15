@@ -256,8 +256,13 @@ fn normalize_es(input: &str) -> String {
 fn replace_time_markers(input: &str, markers: &[&str]) -> String {
     let mut text = input.to_string();
     for marker in markers {
-        let prefix = format!("{marker} ");
-        text = replace_word_bounded(text.as_str(), prefix.as_str(), "at ");
+        // The needle is the marker word alone, without a trailing space:
+        // `is_boundary` already treats the separating whitespace that
+        // follows it in the text as a valid right boundary, so appending
+        // one to the needle here would make the match require a second,
+        // redundant non-alphanumeric character after that whitespace -
+        // which a time token (always starting with a digit) never has.
+        text = replace_word_bounded(text.as_str(), marker, "at");
     }
     text
 }
