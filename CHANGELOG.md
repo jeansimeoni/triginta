@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The history panel ("Today" pomodoro list, weekly stats, and 30-day focus
+  summaries) no longer goes stale in long-running sessions left open across
+  a day boundary. The data now refreshes automatically when the local date
+  rolls over.
+
 ## [0.1.9] - 2026-05-20
 
 ### Added
