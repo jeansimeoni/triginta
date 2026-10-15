@@ -4603,8 +4603,8 @@ mod tests {
     use super::{
         Database, FilterRepository, PomodoroRepository, ProjectId, ProjectRepository,
         RemoteFilterRecord, RemoteProjectRecord, RemoteSectionRecord, RemoteTagRecord,
-        RemoteTaskRecord, SectionRepository, SyncApplyOutcome, SyncRepository, SyncStateRecord,
-        TagRepository, TaskRepository, local_changed_since_sync,
+        RemoteTaskRecord, SectionRepository, SyncApplyOutcome, SyncEntitySnapshot, SyncRepository,
+        SyncStateRecord, TagRepository, TaskRepository, local_changed_since_sync,
     };
 
     fn naive_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<Utc> {
@@ -5430,6 +5430,49 @@ mod tests {
     }
 
     #[test]
+    fn apply_remote_task_persists_recurring_due_and_duration() -> Result<()> {
+        let database = Database::open_in_memory()?;
+        let sync = database.sync_repository();
+        let tasks = database.task_repository();
+        let due_date = chrono::NaiveDate::from_ymd_opt(2026, 6, 15).expect("valid date");
+        let due_datetime = due_date.and_hms_opt(7, 0, 0).expect("valid time");
+        let due_datetime_utc = naive_to_utc(due_datetime);
+
+        let remote = RemoteTaskRecord {
+            todoist_id: "todoist-task-2".to_string(),
+            todoist_sync_id: None,
+            project_todoist_id: None,
+            section_todoist_id: None,
+            parent_todoist_id: None,
+            content: "Recurring timed remote task".to_string(),
+            description: String::new(),
+            priority: 4,
+            labels: Vec::new(),
+            due_date: Some(due_date),
+            due_datetime_utc: Some(due_datetime_utc.to_rfc3339()),
+            due_timezone: Some("America/Sao_Paulo".to_string()),
+            due_string: Some("every weekday at 07:00 por 30m".to_string()),
+            due_lang: Some("en".to_string()),
+            due_is_recurring: true,
+            due_duration_minutes: Some(30),
+            completed_at: None,
+        };
+
+        let outcome = sync.apply_remote_task(&remote, Utc::now().to_rfc3339().as_str(), false)?;
+        assert_eq!(outcome, SyncApplyOutcome::Created);
+
+        let refreshed = tasks
+            .list_all()?
+            .into_iter()
+            .find(|task| task.title == "Recurring timed remote task")
+            .expect("task should exist");
+        let due = refreshed.due.expect("task should have a due date");
+        assert!(due.is_recurring);
+        assert_eq!(due.duration_minutes, Some(30));
+        Ok(())
+    }
+
+    #[test]
     fn pomodoro_repository_summarizes_completed_focus_for_stats_panels() -> Result<()> {
         let database = Database::open_in_memory()?;
         let repository = database.pomodoro_repository();
@@ -5701,6 +5744,43 @@ mod tests {
         let tasks = repository.list_all()?;
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].due, created.due);
+
+        Ok(())
+    }
+
+    #[test]
+    fn outbound_sync_snapshot_carries_recurring_flag_and_duration() -> Result<()> {
+        // Regression test for GH-33: load_entity_snapshot's SyncTaskSnapshot
+        // must carry the already-known due_is_recurring/due_duration_minutes
+        // values, since the outbound Todoist sync trusts them directly
+        // rather than re-deriving recurrence by re-parsing due_string.
+        let database = Database::open_in_memory()?;
+        let repository = database.task_repository();
+        let inbox_project_id = database.project_repository().inbox_project_id()?;
+        let created = repository.create(
+            "Standup",
+            inbox_project_id,
+            Some(&TaskDue {
+                date: NaiveDate::from_ymd_opt(2026, 4, 20).expect("valid date"),
+                datetime: None,
+                timezone: None,
+                string: "every weekday at 07:00 por 30m".to_string(),
+                due_lang: Some("en".to_string()),
+                is_recurring: true,
+                duration_minutes: Some(30),
+            }),
+            Local::now(),
+        )?;
+
+        let snapshot = database
+            .sync_repository()
+            .load_entity_snapshot("task", created.id.0)?
+            .expect("snapshot should exist");
+        let SyncEntitySnapshot::Task(task) = snapshot else {
+            panic!("expected a task snapshot");
+        };
+        assert!(task.due_is_recurring);
+        assert_eq!(task.due_duration_minutes, Some(30));
 
         Ok(())
     }
