@@ -3181,6 +3181,7 @@ impl SqliteTaskRepository<'_> {
                     string,
                     due_lang,
                     is_recurring: is_recurring != 0,
+                    duration_minutes: None,
                 }))
             }
             _ => Ok(None),
@@ -5406,6 +5407,7 @@ mod tests {
                 string: "2026-06-12 12:00".to_string(),
                 due_lang: Some("en".to_string()),
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
         Ok(())
@@ -5662,6 +5664,7 @@ mod tests {
                 string: "tomorrow".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             }),
             Local::now(),
         )?;
@@ -5675,6 +5678,7 @@ mod tests {
                 string: "tomorrow".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
 
@@ -5702,6 +5706,7 @@ mod tests {
                 string: "tomorrow at 3pm".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             }),
             Local::now(),
         )?;
@@ -5715,6 +5720,7 @@ mod tests {
                 string: "tomorrow at 3pm".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
 
@@ -5781,6 +5787,7 @@ mod tests {
                     string: "every week at 9:30am".to_string(),
                     due_lang: None,
                     is_recurring: true,
+                    duration_minutes: None,
                 }),
             },
         )?;
@@ -5797,6 +5804,7 @@ mod tests {
                 string: "every week at 9:30am".to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             })
         );
 

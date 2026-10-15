@@ -245,6 +245,7 @@ fn update_best_match(
                 string: input[start..end].trim().to_string(),
                 due_lang: None,
                 is_recurring: candidate.1.is_recurring,
+                duration_minutes: None,
             },
         );
         if is_better_match(best.as_ref(), &matched) {
@@ -370,6 +371,7 @@ fn relative_candidates(
                     string: input[words[index].1..words[index + 2].2].trim().to_string(),
                     due_lang: None,
                     is_recurring: false,
+                    duration_minutes: None,
                 },
             ));
             index += 3;
@@ -393,6 +395,7 @@ fn relative_candidates(
                     string: input[words[index].1..words[index + 2].2].trim().to_string(),
                     due_lang: None,
                     is_recurring: true,
+                    duration_minutes: None,
                 },
             ));
             index += 3;
@@ -415,6 +418,7 @@ fn relative_candidates(
                     string: input[words[index].1..words[index + 2].2].trim().to_string(),
                     due_lang: None,
                     is_recurring: true,
+                    duration_minutes: None,
                 },
             ));
             index += 3;
@@ -448,6 +452,7 @@ fn iso_date_candidates(input: &str) -> Vec<((usize, usize), TaskDue)> {
                     string: candidate.to_string(),
                     due_lang: None,
                     is_recurring: false,
+                    duration_minutes: None,
                 },
             ));
         }
@@ -491,6 +496,7 @@ fn month_day_candidates(input: &str, reference_date: NaiveDate) -> Vec<((usize, 
                 string: input[start..end].trim().to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             },
         ));
     }
@@ -509,6 +515,7 @@ fn simple_due(phrase: impl Into<String>, date: NaiveDate, is_recurring: bool) ->
             string,
             due_lang: None,
             is_recurring,
+            duration_minutes: None,
         },
     )
 }
@@ -663,6 +670,7 @@ fn weekday_range_candidates(
                 string: input[start..end].trim().to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             },
         ));
     }
@@ -721,6 +729,7 @@ fn weekday_list_candidates(
                 string: input[words[index].1..end].trim().to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             },
         ));
     }
@@ -777,6 +786,7 @@ fn monthly_ordinal_weekday_candidates(
                     string: input[start..end].trim().to_string(),
                     due_lang: None,
                     is_recurring: true,
+                    duration_minutes: None,
                 },
             ));
             continue;
@@ -814,6 +824,7 @@ fn monthly_ordinal_weekday_candidates(
                     string: input[start..end].trim().to_string(),
                     due_lang: None,
                     is_recurring: true,
+                    duration_minutes: None,
                 },
             ));
         }
@@ -856,6 +867,7 @@ fn monthly_day_of_month_candidates(
                 string: input[start..end].trim().to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             },
         ));
     }
@@ -909,6 +921,7 @@ fn monthly_boundary_day_candidates(
                     string: input[start..end].trim().to_string(),
                     due_lang: None,
                     is_recurring: true,
+                    duration_minutes: None,
                 },
             ));
             continue;
@@ -946,6 +959,7 @@ fn monthly_boundary_day_candidates(
                     string: input[start..end].trim().to_string(),
                     due_lang: None,
                     is_recurring: true,
+                    duration_minutes: None,
                 },
             ));
         }
@@ -1453,6 +1467,7 @@ mod tests {
                 string: "in 3 days".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -1472,6 +1487,7 @@ mod tests {
                 string: "every monday".to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             })
         );
     }
@@ -1490,6 +1506,7 @@ mod tests {
                 string: "every monday".to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             })
         );
     }
@@ -1511,6 +1528,7 @@ mod tests {
                 string: "apr 10".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -1566,6 +1584,7 @@ mod tests {
                 string: "every day".to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             })
         );
     }
@@ -1585,6 +1604,7 @@ mod tests {
                 string: "every other day".to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             })
         );
     }
@@ -1604,6 +1624,7 @@ mod tests {
                 string: "monday through thursday".to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             })
         );
     }
@@ -1626,6 +1647,7 @@ mod tests {
                 string: "every monday, tuesday and friday".to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             })
         );
     }
@@ -1645,6 +1667,7 @@ mod tests {
                 string: "every week day".to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             })
         );
     }
@@ -1667,6 +1690,7 @@ mod tests {
                 string: "the third friday of the month".to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             })
         );
     }
@@ -1697,6 +1721,7 @@ mod tests {
                 string: "tomorrow".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -1728,6 +1753,7 @@ mod tests {
                 string: "next week".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -1752,6 +1778,7 @@ mod tests {
                 string: "tomorrow at 3pm".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -1776,6 +1803,7 @@ mod tests {
                 string: "fri 14:00".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -1797,6 +1825,7 @@ mod tests {
                 string: "every day at 9am".to_string(),
                 due_lang: None,
                 is_recurring: true,
+                duration_minutes: None,
             })
         );
     }
@@ -1821,6 +1850,7 @@ mod tests {
                 string: "tomorrow at noon".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -1845,6 +1875,7 @@ mod tests {
                 string: "tomorrow at midnight".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             })
         );
     }
@@ -1869,6 +1900,7 @@ mod tests {
             string: "every day".to_string(),
             due_lang: None,
             is_recurring: true,
+            duration_minutes: None,
         };
 
         let next_due = next_recurring_due(
@@ -1889,6 +1921,7 @@ mod tests {
                 string: "every day".to_string(),
                 due_lang: Some("en".to_string()),
                 is_recurring: true,
+                duration_minutes: None,
             }
         );
     }
@@ -1907,6 +1940,7 @@ mod tests {
             string: "every friday at 9am".to_string(),
             due_lang: None,
             is_recurring: true,
+            duration_minutes: None,
         };
 
         let next_due = next_recurring_due(
@@ -1932,6 +1966,7 @@ mod tests {
                 string: "every friday at 9am".to_string(),
                 due_lang: Some("en".to_string()),
                 is_recurring: true,
+                duration_minutes: None,
             }
         );
     }
@@ -2121,6 +2156,7 @@ mod tests {
             string: "todo dia".to_string(),
             due_lang: None,
             is_recurring: true,
+            duration_minutes: None,
         };
         let next_due = next_recurring_due_with_locales(
             &current_due,

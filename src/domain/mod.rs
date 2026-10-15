@@ -504,6 +504,7 @@ pub struct TaskDue {
     pub string: String,
     pub due_lang: Option<String>,
     pub is_recurring: bool,
+    pub duration_minutes: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -817,6 +817,7 @@ mod tests {
                 string: "today".to_string(),
                 due_lang: None,
                 is_recurring: false,
+                duration_minutes: None,
             }),
         );
         assert!(evaluate(
