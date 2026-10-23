@@ -671,53 +671,11 @@ impl TodoistSyncProvider {
             return Ok(None);
         }
 
-        let mut body = serde_json::Map::new();
-        body.insert("content".to_string(), Value::String(task.title.clone()));
-        body.insert(
-            "description".to_string(),
-            Value::String(task.description.clone()),
-        );
-        body.insert(
-            "priority".to_string(),
-            Value::Number(Self::local_priority_to_todoist(task.priority).into()),
-        );
-
         if Self::task_create_requires_project_mapping(task) {
             bail!("task project mapping is not synced yet; retrying after project sync");
         }
 
-        if task.todoist_id.is_none() {
-            if let Some(project_id) = task.project_todoist_id.as_deref() {
-                body.insert(
-                    "project_id".to_string(),
-                    Value::String(project_id.to_string()),
-                );
-            }
-            if let Some(section_id) = task.section_todoist_id.as_deref() {
-                body.insert(
-                    "section_id".to_string(),
-                    Value::String(section_id.to_string()),
-                );
-            }
-            if let Some(parent_id) = task.parent_todoist_id.as_deref() {
-                body.insert(
-                    "parent_id".to_string(),
-                    Value::String(parent_id.to_string()),
-                );
-            }
-        }
-        body.extend(Self::task_due_payload_fields(task));
-        if !task.labels.is_empty() {
-            body.insert(
-                "labels".to_string(),
-                Value::Array(
-                    task.labels
-                        .iter()
-                        .map(|label| Value::String(label.clone()))
-                        .collect(),
-                ),
-            );
-        }
+        let body = Self::task_request_body(task);
 
         let should_be_completed = task.completed_at.is_some();
         if let Some(remote_id) = task.todoist_id.as_deref() {
@@ -743,6 +701,64 @@ impl TodoistSyncProvider {
             }
             Ok(Some(created_id))
         }
+    }
+
+    /// Builds the create/update body for a Todoist task. Due fields are left
+    /// out when an already-synced recurring task is about to be closed:
+    /// re-sending a recurring `due_string` makes Todoist re-anchor the
+    /// recurrence on the current time (moving a past-due or overdue occurrence
+    /// to the next future one), and the following `/close` then advances it
+    /// again, skipping an occurrence. Closing alone lets Todoist advance the
+    /// recurrence exactly once.
+    fn task_request_body(task: &SyncTaskSnapshot) -> serde_json::Map<String, Value> {
+        let mut body = serde_json::Map::new();
+        body.insert("content".to_string(), Value::String(task.title.clone()));
+        body.insert(
+            "description".to_string(),
+            Value::String(task.description.clone()),
+        );
+        body.insert(
+            "priority".to_string(),
+            Value::Number(Self::local_priority_to_todoist(task.priority).into()),
+        );
+
+        if task.todoist_id.is_none() {
+            if let Some(project_id) = task.project_todoist_id.as_deref() {
+                body.insert(
+                    "project_id".to_string(),
+                    Value::String(project_id.to_string()),
+                );
+            }
+            if let Some(section_id) = task.section_todoist_id.as_deref() {
+                body.insert(
+                    "section_id".to_string(),
+                    Value::String(section_id.to_string()),
+                );
+            }
+            if let Some(parent_id) = task.parent_todoist_id.as_deref() {
+                body.insert(
+                    "parent_id".to_string(),
+                    Value::String(parent_id.to_string()),
+                );
+            }
+        }
+        let closing_synced_recurring_task =
+            task.todoist_id.is_some() && task.completed_at.is_some() && task.due_is_recurring;
+        if !closing_synced_recurring_task {
+            body.extend(Self::task_due_payload_fields(task));
+        }
+        if !task.labels.is_empty() {
+            body.insert(
+                "labels".to_string(),
+                Value::Array(
+                    task.labels
+                        .iter()
+                        .map(|label| Value::String(label.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        body
     }
 
     fn task_create_requires_project_mapping(task: &SyncTaskSnapshot) -> bool {
@@ -2132,6 +2148,86 @@ mod tests {
         );
         assert!(!fields.contains_key("due_date"));
         assert!(!fields.contains_key("due_datetime"));
+    }
+
+    #[test]
+    fn task_request_body_omits_due_when_closing_synced_recurring_task() {
+        // Re-sending the recurring due string before `/close` makes Todoist
+        // re-anchor a past-due occurrence on the next future one, and the
+        // close then advances it again, skipping an occurrence (GH-36).
+        let task = SyncTaskSnapshot {
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 10, 22).unwrap()),
+            due_datetime_utc: Some("2026-10-22T12:00:00+00:00".to_string()),
+            due_string: Some("every day at 9am".to_string()),
+            due_lang: Some("en".to_string()),
+            due_is_recurring: true,
+            completed_at: Some("2026-10-23T13:00:00+00:00".to_string()),
+            ..base_sync_task_snapshot()
+        };
+
+        let body = TodoistSyncProvider::task_request_body(&task);
+
+        assert!(!body.contains_key("due_string"));
+        assert!(!body.contains_key("due_lang"));
+        assert!(!body.contains_key("due_date"));
+        assert!(!body.contains_key("due_datetime"));
+        assert_eq!(body.get("content").and_then(Value::as_str), Some("Task"));
+    }
+
+    #[test]
+    fn task_request_body_keeps_due_for_open_recurring_task() {
+        let task = SyncTaskSnapshot {
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 10, 22).unwrap()),
+            due_string: Some("every day".to_string()),
+            due_lang: Some("en".to_string()),
+            due_is_recurring: true,
+            ..base_sync_task_snapshot()
+        };
+
+        let body = TodoistSyncProvider::task_request_body(&task);
+
+        assert_eq!(
+            body.get("due_string").and_then(Value::as_str),
+            Some("every day")
+        );
+    }
+
+    #[test]
+    fn task_request_body_keeps_due_when_creating_completed_recurring_task() {
+        let task = SyncTaskSnapshot {
+            todoist_id: None,
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 10, 22).unwrap()),
+            due_string: Some("every day".to_string()),
+            due_lang: Some("en".to_string()),
+            due_is_recurring: true,
+            completed_at: Some("2026-10-23T13:00:00+00:00".to_string()),
+            ..base_sync_task_snapshot()
+        };
+
+        let body = TodoistSyncProvider::task_request_body(&task);
+
+        assert_eq!(
+            body.get("due_string").and_then(Value::as_str),
+            Some("every day")
+        );
+    }
+
+    #[test]
+    fn task_request_body_keeps_due_when_closing_one_off_task() {
+        let task = SyncTaskSnapshot {
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 10, 22).unwrap()),
+            due_string: Some("oct 22".to_string()),
+            due_is_recurring: false,
+            completed_at: Some("2026-10-23T13:00:00+00:00".to_string()),
+            ..base_sync_task_snapshot()
+        };
+
+        let body = TodoistSyncProvider::task_request_body(&task);
+
+        assert_eq!(
+            body.get("due_date").and_then(Value::as_str),
+            Some("2026-10-22")
+        );
     }
 
     #[test]
