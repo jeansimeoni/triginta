@@ -7,12 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-10-26
+
 ### Fixed
 
 - Completing a Todoist-synced recurring task after its due time, or while
   overdue, no longer skips the next occurrence. Triginta no longer re-sends
   the recurring due string before closing the task, so Todoist advances the
   recurrence exactly once.
+
+### Security
+
+- Bumped `rustls-webpki` to `0.103.16` and `webpki-roots` to `1.0.11`
+  (pulled in transitively via `ureq`, Triginta's Todoist sync HTTP client),
+  resolving RUSTSEC-2026-0382 and RUSTSEC-2026-0381.
 
 ## [0.1.10] - 2026-10-15
 
