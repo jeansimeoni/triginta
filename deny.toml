@@ -40,7 +40,6 @@ exceptions = [
 ]
 
 [advisories]
-db-path = "target/cargo-deny-advisory-dbs"
 yanked = "deny"
 unmaintained = "workspace"
 
