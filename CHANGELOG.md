@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Completing a Todoist-synced recurring task after its due time, or while
+  overdue, no longer skips the next occurrence. Triginta no longer re-sends
+  the recurring due string before closing the task, so Todoist advances the
+  recurrence exactly once.
+
 ## [0.1.10] - 2026-10-15
 
 ### Added
