@@ -327,21 +327,21 @@ failing command does not stop the others.
 
 ### Events
 
-| Event                | When it fires                                                       |
-| -------------------- | ------------------------------------------------------------------- |
-| `pomodoro_started`   | A new pomodoro starts                                               |
-| `pomodoro_paused`    | A running pomodoro is paused                                        |
-| `pomodoro_resumed`   | A paused pomodoro is resumed                                        |
-| `pomodoro_completed` | A pomodoro runs to the end                                          |
-| `pomodoro_voided`    | A pomodoro is voided, either manually or by quitting while it runs  |
-| `break_started`      | A short or long break starts                                        |
-| `break_completed`    | A break runs to the end                                             |
-| `break_skipped`      | A break is ended early                                              |
-| `task_created`       | You create a task                                                   |
-| `task_updated`       | You edit or reschedule a task                                       |
-| `task_deleted`       | You delete a task                                                   |
-| `task_completed`     | You complete a task, or a completion arrives from Todoist sync      |
-| `sync_failed`        | A Todoist sync cycle fails or finishes with errors                  |
+| Event                | When it fires                                                      |
+| -------------------- | ------------------------------------------------------------------ |
+| `pomodoro_started`   | A new pomodoro starts                                              |
+| `pomodoro_paused`    | A running pomodoro is paused                                       |
+| `pomodoro_resumed`   | A paused pomodoro is resumed                                       |
+| `pomodoro_completed` | A pomodoro runs to the end                                         |
+| `pomodoro_voided`    | A pomodoro is voided, either manually or by quitting while it runs |
+| `break_started`      | A short or long break starts                                       |
+| `break_completed`    | A break runs to the end                                            |
+| `break_skipped`      | A break is ended early                                             |
+| `task_created`       | You create a task                                                  |
+| `task_updated`       | You edit or reschedule a task                                      |
+| `task_deleted`       | You delete a task                                                  |
+| `task_completed`     | You complete a task, or a completion arrives from Todoist sync     |
+| `sync_failed`        | A Todoist sync cycle fails or finishes with errors                 |
 
 Task events only fire for changes you make in Triginta. The exception is
 `task_completed`, which also fires when Todoist sync brings in a task that was
@@ -368,18 +368,18 @@ lasts. Triginta slows down retries in that case, up to
 
 ### Event values
 
-| Placeholder          | Environment variable        | Value                                               |
-| -------------------- | --------------------------- | --------------------------------------------------- |
-| `{event}`            | `TRIGINTA_EVENT`            | Event name, such as `pomodoro_completed`            |
-| `{source}`           | `TRIGINTA_EVENT_SOURCE`     | `local`, or `todoist` for sync events               |
-| `{timestamp}`        | `TRIGINTA_TIMESTAMP`        | When the event happened, in RFC 3339 format         |
-| `{task_id}`          | `TRIGINTA_TASK_ID`          | Local task id                                       |
-| `{task_title}`       | `TRIGINTA_TASK_TITLE`       | Task title                                          |
-| `{project}`          | `TRIGINTA_PROJECT`          | Task project name                                   |
-| `{phase}`            | `TRIGINTA_PHASE`            | `focus`, `short_break`, or `long_break`             |
-| `{duration_seconds}` | `TRIGINTA_DURATION_SECONDS` | Configured length of the current phase, in seconds  |
-| `{elapsed_seconds}`  | `TRIGINTA_ELAPSED_SECONDS`  | Time spent in the current phase, in seconds         |
-| `{error}`            | `TRIGINTA_SYNC_ERROR`       | Sync error message                                  |
+| Placeholder          | Environment variable        | Value                                              |
+| -------------------- | --------------------------- | -------------------------------------------------- |
+| `{event}`            | `TRIGINTA_EVENT`            | Event name, such as `pomodoro_completed`           |
+| `{source}`           | `TRIGINTA_EVENT_SOURCE`     | `local`, or `todoist` for sync events              |
+| `{timestamp}`        | `TRIGINTA_TIMESTAMP`        | When the event happened, in RFC 3339 format        |
+| `{task_id}`          | `TRIGINTA_TASK_ID`          | Local task id                                      |
+| `{task_title}`       | `TRIGINTA_TASK_TITLE`       | Task title                                         |
+| `{project}`          | `TRIGINTA_PROJECT`          | Task project name                                  |
+| `{phase}`            | `TRIGINTA_PHASE`            | `focus`, `short_break`, or `long_break`            |
+| `{duration_seconds}` | `TRIGINTA_DURATION_SECONDS` | Configured length of the current phase, in seconds |
+| `{elapsed_seconds}`  | `TRIGINTA_ELAPSED_SECONDS`  | Time spent in the current phase, in seconds        |
+| `{error}`            | `TRIGINTA_SYNC_ERROR`       | Sync error message                                 |
 
 Values only exist when they apply to the event:
 
