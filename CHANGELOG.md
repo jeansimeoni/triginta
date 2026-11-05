@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Hooks: run your own commands after pomodoro, break, task, and sync events.
+  For example, send a desktop notification when a pomodoro ends. Each event can
+  run several commands, configured under `hooks` in the config file. Commands
+  get event details through environment variables, `{placeholders}` in their
+  arguments, or JSON on standard input. See `docs/configuration.md`.
+
 ## [0.1.11] - 2026-10-26
 
 ### Fixed
