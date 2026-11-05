@@ -316,6 +316,159 @@ Security notes:
 - Your config file controls which local program runs. Keep config files
   trusted and permissioned.
 
+## Hooks
+
+Hooks run your own commands after app events. Use them to send a desktop
+notification when a pomodoro ends, or to tell another app that a task was
+completed.
+
+Each event takes a list of commands. Every command in the list runs, and a
+failing command does not stop the others.
+
+### Events
+
+| Event                | When it fires                                                      |
+| -------------------- | ------------------------------------------------------------------ |
+| `pomodoro_started`   | A new pomodoro starts                                              |
+| `pomodoro_paused`    | A running pomodoro is paused                                       |
+| `pomodoro_resumed`   | A paused pomodoro is resumed                                       |
+| `pomodoro_completed` | A pomodoro runs to the end                                         |
+| `pomodoro_voided`    | A pomodoro is voided, either manually or by quitting while it runs |
+| `break_started`      | A short or long break starts                                       |
+| `break_completed`    | A break runs to the end                                            |
+| `break_skipped`      | A break is ended early                                             |
+| `task_created`       | You create a task                                                  |
+| `task_updated`       | You edit or reschedule a task                                      |
+| `task_deleted`       | You delete a task                                                  |
+| `task_completed`     | You complete a task, or a completion arrives from Todoist sync     |
+| `sync_failed`        | A Todoist sync cycle fails or finishes with errors                 |
+
+Task events only fire for changes you make in Triginta. The exception is
+`task_completed`, which also fires when Todoist sync brings in a task that was
+completed elsewhere. Completing a recurring task in Todoist moves its due date
+instead of closing it, so those completions are not reported.
+
+`sync_failed` fires on every failed sync cycle, so it repeats while the problem
+lasts. Triginta slows down retries in that case, up to
+`sync_runtime.poll_max_interval_seconds`.
+
+### Command fields
+
+- `program` (required): the program to run, either a name looked up on `PATH`
+  or a full path
+- `args` (default: `[]`): arguments passed to the program
+- `env` (default: `true`): set the `TRIGINTA_*` environment variables listed
+  below
+- `expand_placeholders` (default: `true`): replace `{placeholder}` tokens in
+  `args` with event values
+- `event_data` (default: `none`): set to `json` to send the full event to the
+  program as JSON on its standard input
+- `timeout_ms` (default: `5000`): stop the program if it is still running after
+  this many milliseconds
+
+### Event values
+
+| Placeholder          | Environment variable        | Value                                              |
+| -------------------- | --------------------------- | -------------------------------------------------- |
+| `{event}`            | `TRIGINTA_EVENT`            | Event name, such as `pomodoro_completed`           |
+| `{source}`           | `TRIGINTA_EVENT_SOURCE`     | `local`, or `todoist` for sync events              |
+| `{timestamp}`        | `TRIGINTA_TIMESTAMP`        | When the event happened, in RFC 3339 format        |
+| `{task_id}`          | `TRIGINTA_TASK_ID`          | Local task id                                      |
+| `{task_title}`       | `TRIGINTA_TASK_TITLE`       | Task title                                         |
+| `{project}`          | `TRIGINTA_PROJECT`          | Task project name                                  |
+| `{phase}`            | `TRIGINTA_PHASE`            | `focus`, `short_break`, or `long_break`            |
+| `{duration_seconds}` | `TRIGINTA_DURATION_SECONDS` | Configured length of the current phase, in seconds |
+| `{elapsed_seconds}`  | `TRIGINTA_ELAPSED_SECONDS`  | Time spent in the current phase, in seconds        |
+| `{error}`            | `TRIGINTA_SYNC_ERROR`       | Sync error message                                 |
+
+Values only exist when they apply to the event:
+
+- Task values are set for task events, and for pomodoro events when a task is
+  assigned to the pomodoro.
+- Phase values are set for pomodoro and break events.
+- The error is set for `sync_failed`.
+
+A placeholder without a value becomes an empty string, and the matching
+environment variable is not set. Unknown placeholders are left as written.
+
+With `event_data = "json"`, the program receives a single JSON object with the
+same values, using `null` where a value does not apply:
+
+```json
+{
+  "event": "pomodoro_completed",
+  "source": "local",
+  "timestamp": "2026-11-05T10:25:00-03:00",
+  "task_id": 12,
+  "task_title": "Write report",
+  "project": "Work",
+  "phase": "focus",
+  "duration_seconds": 1500,
+  "elapsed_seconds": 1500,
+  "error": null
+}
+```
+
+### Example
+
+TOML:
+
+```toml
+[[hooks.pomodoro_completed]]
+program = "notify-send"
+args = ["Triginta", "Focus done: {task_title}"]
+
+[[hooks.pomodoro_completed]]
+program = "/home/me/bin/log-pomodoro"
+expand_placeholders = false
+event_data = "json"
+timeout_ms = 10000
+
+[[hooks.break_completed]]
+program = "notify-send"
+args = ["Triginta", "Break is over"]
+
+[[hooks.sync_failed]]
+program = "notify-send"
+args = ["-u", "critical", "Triginta sync failed", "{error}"]
+```
+
+YAML:
+
+```yaml
+hooks:
+  pomodoro_completed:
+    - program: notify-send
+      args: ["Triginta", "Focus done: {task_title}"]
+    - program: /home/me/bin/log-pomodoro
+      expand_placeholders: false
+      event_data: json
+      timeout_ms: 10000
+  sync_failed:
+    - program: notify-send
+      args: ["-u", "critical", "Triginta sync failed", "{error}"]
+```
+
+### Behavior
+
+- Hooks run in the background and never block the interface.
+- Hook output is discarded, so a hook cannot draw over the interface.
+- If a hook cannot start, exits with an error, or times out, Triginta logs it
+  and shows a short warning in the status bar. The action that fired the hook
+  is not affected.
+- Startup fails with an error for unknown event names, unknown fields, an empty
+  `program`, or a zero `timeout_ms`.
+
+Security notes:
+
+- Like `token_command`, hooks run without a shell (no `sh -c`). Pipes,
+  redirects, and variable expansion are not supported. To use them, point the
+  hook at a script.
+- Placeholder values such as task titles are passed as single arguments and are
+  never interpreted by a shell.
+- Your config file controls which programs run. Keep config files trusted and
+  permissioned.
+
 ## Theme Files
 
 Custom themes live in the app config `themes/` directory.

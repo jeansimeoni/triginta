@@ -29,6 +29,7 @@ use crate::{
         TagUpdate, Task, TaskDue, TaskId, TaskPriority, TaskStatus, TaskUpdate,
     },
     filters,
+    hooks::{HookDispatcher, HookEvent, HookEventData, HookEventSource, ProcessHookRunner},
     integrations::{SyncReport, SyncTrigger, TaskSyncProvider, TodoistSyncProvider},
     storage::{
         Database, FilterRepository, PomodoroRepository, ProjectRepository, SectionRepository,
@@ -226,6 +227,14 @@ pub enum TimerPhase {
 }
 
 impl TimerPhase {
+    fn hook_name(self) -> &'static str {
+        match self {
+            Self::Focus => "focus",
+            Self::ShortBreak => "short_break",
+            Self::LongBreak => "long_break",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Focus => "Pomodoro",
@@ -2212,6 +2221,8 @@ pub struct App {
     collapsed_task_ids: HashSet<TaskId>,
     todoist_sync: Option<TodoistSyncUiState>,
     todoist_sync_worker: Option<TodoistSyncWorker>,
+    hooks: HookDispatcher,
+    hook_warning: Option<(String, DateTime<Local>)>,
     needs_full_redraw: bool,
     should_quit: bool,
     screen_data: ScreenData,
@@ -2413,6 +2424,7 @@ impl App {
         } else {
             None
         };
+        let hooks = HookDispatcher::new(config.hooks.clone(), Box::new(ProcessHookRunner::new()));
         let mut app = Self {
             database,
             config,
@@ -2467,6 +2479,8 @@ impl App {
             collapsed_task_ids: HashSet::new(),
             todoist_sync,
             todoist_sync_worker,
+            hooks,
+            hook_warning: None,
             needs_full_redraw: false,
             should_quit: false,
             screen_data,
@@ -6841,6 +6855,7 @@ impl App {
 
         self.refresh_tasks()?;
         self.selected_task_id = Some(task.id);
+        self.emit_task_hook(HookEvent::TaskUpdated, HookEventSource::Local, task.id, now);
         Ok(())
     }
 
@@ -7940,6 +7955,12 @@ impl App {
             .replace_task_tags(task_id, tag_ids.as_slice())?;
         self.refresh_tasks()?;
         self.selected_task_id = Some(task_id);
+        let event = if editor.task_id.is_some() {
+            HookEvent::TaskUpdated
+        } else {
+            HookEvent::TaskCreated
+        };
+        self.emit_task_hook(event, HookEventSource::Local, task_id, now);
         Ok(true)
     }
 
@@ -9040,6 +9061,14 @@ impl App {
         };
 
         self.refresh_tasks()?;
+        if next_status == TaskStatus::Done {
+            self.emit_task_hook(
+                HookEvent::TaskCompleted,
+                HookEventSource::Local,
+                task.id,
+                now,
+            );
+        }
         if let Some(next_task) = next_recurring_task {
             if self.active_focus_task_id == Some(task.id) {
                 self.active_focus_task_id = Some(next_task.id);
@@ -9193,6 +9222,96 @@ impl App {
         if self.timer.phase == TimerPhase::Focus && self.timer.current_phase_started_at.is_none() {
             self.active_focus_task_id = self.assigned_task_id;
         }
+    }
+
+    fn with_task_hook_details(&self, data: HookEventData, task_id: TaskId) -> HookEventData {
+        match self
+            .screen_data
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+        {
+            Some(task) => data.with_task(
+                task_id.0,
+                task.title.as_str(),
+                self.project_name(task.project_id),
+            ),
+            None => data,
+        }
+    }
+
+    fn emit_task_hook(
+        &self,
+        event: HookEvent,
+        source: HookEventSource,
+        task_id: TaskId,
+        now: DateTime<Local>,
+    ) {
+        if !self.hooks.has_commands(event) {
+            return;
+        }
+        let data = HookEventData::new(event, now).with_source(source);
+        self.hooks.emit(&self.with_task_hook_details(data, task_id));
+    }
+
+    /// Emits a timer event describing the current phase. Call it while the
+    /// timer still reflects the phase the event is about.
+    fn emit_timer_hook(&self, event: HookEvent, now: DateTime<Local>) {
+        if !self.hooks.has_commands(event) {
+            return;
+        }
+        let phase = self.timer.phase;
+        let data = HookEventData::new(event, now).with_phase(
+            phase.hook_name(),
+            phase.duration(&self.timer_settings).num_seconds().max(0) as u64,
+            self.timer.elapsed_at(now).num_seconds().max(0) as u64,
+        );
+        let data = match (phase, self.active_focus_task_id) {
+            (TimerPhase::Focus, Some(task_id)) => self.with_task_hook_details(data, task_id),
+            _ => data,
+        };
+        self.hooks.emit(&data);
+    }
+
+    fn emit_timer_start_hook(&self, previous_run_state: TimerRunState, now: DateTime<Local>) {
+        let event = match (previous_run_state, self.timer.phase) {
+            (TimerRunState::Idle, TimerPhase::Focus) => HookEvent::PomodoroStarted,
+            (TimerRunState::Idle, _) => HookEvent::BreakStarted,
+            (TimerRunState::Paused, TimerPhase::Focus) => HookEvent::PomodoroResumed,
+            _ => return,
+        };
+        self.emit_timer_hook(event, now);
+    }
+
+    fn emit_sync_failed_hook(&self, error: &str, now: DateTime<Local>) {
+        self.hooks.emit(
+            &HookEventData::new(HookEvent::SyncFailed, now)
+                .with_source(HookEventSource::Todoist)
+                .with_error(error),
+        );
+    }
+
+    fn drain_hook_failures(&mut self, now: DateTime<Local>) {
+        for failure in self.hooks.drain_failures() {
+            warn!(
+                event = failure.event.as_str(),
+                program = failure.program.as_str(),
+                reason = failure.reason.as_str(),
+                "hook command failed"
+            );
+            self.hook_warning = Some((failure.to_string(), now + ChronoDuration::seconds(5)));
+        }
+    }
+
+    pub fn hook_warning_text(&self) -> Option<&str> {
+        self.hook_warning_text_at(Local::now())
+    }
+
+    fn hook_warning_text_at(&self, now: DateTime<Local>) -> Option<&str> {
+        self.hook_warning
+            .as_ref()
+            .filter(|(_, until)| now <= *until)
+            .map(|(text, _)| text.as_str())
     }
 
     fn handle_task_overlay_key(
@@ -9501,6 +9620,13 @@ impl App {
                 KeyCode::Enter | KeyCode::Char('y') => {
                     self.database.task_repository().delete(task_id)?;
                     self.delete_confirmation = None;
+                    // Emit before refreshing so the payload still has the task details.
+                    self.emit_task_hook(
+                        HookEvent::TaskDeleted,
+                        HookEventSource::Local,
+                        task_id,
+                        now,
+                    );
                     self.refresh_tasks()?;
                 }
                 KeyCode::Esc | KeyCode::Char('n') => {
@@ -10821,6 +10947,7 @@ impl App {
                     .replace_task_tags(task.id, tag_ids.as_slice())?;
                 self.refresh_tasks()?;
                 self.selected_task_id = Some(task.id);
+                self.emit_task_hook(HookEvent::TaskCreated, HookEventSource::Local, task.id, now);
             }
             KeyCode::Backspace => {
                 Self::delete_input_char_before_cursor(&mut input);
@@ -11682,10 +11809,17 @@ impl App {
                 if self.focused_panel == PanelFocus::Timer =>
             {
                 self.begin_focus_task_if_needed();
+                let previous_run_state = self.timer.run_state;
                 self.timer.start_or_resume(now);
+                self.emit_timer_start_hook(previous_run_state, now);
             }
             KeyCode::Char('p') if self.focused_panel == PanelFocus::Timer => {
+                let was_running_focus = self.timer.run_state == TimerRunState::Running
+                    && self.timer.phase == TimerPhase::Focus;
                 self.timer.pause(now);
+                if was_running_focus {
+                    self.emit_timer_hook(HookEvent::PomodoroPaused, now);
+                }
             }
             KeyCode::Char('x') | KeyCode::Esc if self.focused_panel == PanelFocus::Timer => {
                 let current_cycle_state = self
@@ -11720,6 +11854,7 @@ impl App {
     }
 
     fn on_tick_at(&mut self, now: DateTime<Local>) -> Result<()> {
+        self.drain_hook_failures(now);
         self.sync_task_details_anchor();
         self.handle_todoist_sync_tick(now)?;
         if now.date_naive() != self.history_data_date {
@@ -11756,9 +11891,11 @@ impl App {
                     duration_to_stored_minutes(self.timer_settings.pomodoro_length),
                 )?;
 
+                self.emit_timer_hook(HookEvent::PomodoroCompleted, now);
                 self.active_focus_task_id = None;
                 self.timer.move_to_phase(next_phase);
                 self.timer.start_or_resume(now);
+                self.emit_timer_hook(HookEvent::BreakStarted, now);
                 self.refresh_history()?;
             }
             TimerPhase::ShortBreak | TimerPhase::LongBreak => {
@@ -11777,6 +11914,7 @@ impl App {
                     now,
                     self.timer.elapsed_at(now).num_seconds().max(0) as u32,
                 )?;
+                self.emit_timer_hook(HookEvent::BreakCompleted, now);
 
                 let completed_long_break = self.timer.phase == TimerPhase::LongBreak;
                 self.timer.complete_break();
@@ -11980,12 +12118,17 @@ impl App {
 
         match sync_result {
             Ok(report) => {
+                if let Some(error) = report.last_error.as_deref() {
+                    self.emit_sync_failed_hook(error, now);
+                }
+                let open_task_ids = self.open_task_ids_if_hooked(HookEvent::TaskCompleted);
                 self.apply_todoist_sync_report(report, now);
                 self.refresh_tasks()
                     .inspect_err(|error| {
                         warn!(error = %error, "failed to refresh UI data after todoist sync");
                     })
                     .ok();
+                self.emit_remote_task_completions(&open_task_ids, now);
             }
             Err(error) => self.apply_todoist_sync_error(trigger, now, error.as_str()),
         }
@@ -12009,12 +12152,46 @@ impl App {
         Ok(())
     }
 
+    /// Open task ids, captured only when `event` has hooks to avoid the work otherwise.
+    fn open_task_ids_if_hooked(&self, event: HookEvent) -> HashSet<TaskId> {
+        if !self.hooks.has_commands(event) {
+            return HashSet::new();
+        }
+        self.screen_data
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Todo && task.deleted_at.is_none())
+            .map(|task| task.id)
+            .collect()
+    }
+
+    /// Local completions refresh the task list right away, so any task that was
+    /// open before a sync refresh and is done after it was completed remotely.
+    fn emit_remote_task_completions(&self, open_task_ids: &HashSet<TaskId>, now: DateTime<Local>) {
+        if open_task_ids.is_empty() {
+            return;
+        }
+        for task in &self.screen_data.tasks {
+            if task.status == TaskStatus::Done && open_task_ids.contains(&task.id) {
+                self.emit_task_hook(
+                    HookEvent::TaskCompleted,
+                    HookEventSource::Todoist,
+                    task.id,
+                    now,
+                );
+            }
+        }
+    }
+
     fn apply_todoist_sync_error(
         &mut self,
         trigger: SyncTrigger,
         now: DateTime<Local>,
         error: &str,
     ) {
+        if self.todoist_sync.is_some() {
+            self.emit_sync_failed_hook(error, now);
+        }
         let Some(sync) = self.todoist_sync.as_mut() else {
             return;
         };
@@ -12224,6 +12401,7 @@ impl App {
     }
 
     fn finish_break_early(&mut self, now: DateTime<Local>) -> Result<()> {
+        self.emit_timer_hook(HookEvent::BreakSkipped, now);
         let break_phase = self.timer.phase;
         let started_at = self.timer.current_phase_started_at.unwrap_or(now);
         self.database.pomodoro_repository().record_session_entry(
@@ -12251,6 +12429,9 @@ impl App {
     }
 
     fn record_voided_entry(&mut self, now: DateTime<Local>) -> Result<()> {
+        if self.timer.phase == TimerPhase::Focus {
+            self.emit_timer_hook(HookEvent::PomodoroVoided, now);
+        }
         let duration_seconds = self.timer.elapsed_at(now).num_seconds().max(0) as u32;
         let started_at = self.timer.current_phase_started_at.unwrap_or(now);
         self.database.pomodoro_repository().record_session_entry(
@@ -13232,11 +13413,18 @@ fn fuzzy_matches(query: &str, candidate: &str) -> bool {
 mod tests {
     use chrono::{Duration as ChronoDuration, Local, NaiveDate, TimeZone, Utc};
 
-    use crate::config::{AppConfig, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings};
+    use crate::config::{
+        AppConfig, GlyphMode, HookCommandConfig, HooksConfig, ProjectSortOrder, TaskSortOrder,
+        TimerSettings,
+    };
     use crate::domain::{
         FilterColor, ProjectColor, ProjectId, TagColor, TaskDue, TaskId, TaskPriority, TaskStatus,
         TaskUpdate,
     };
+    use crate::hooks::{
+        HookDispatcher, HookEvent, HookFailure, HookInvocation, testing::RecordingHookRunner,
+    };
+    use crate::integrations::{SyncReport, SyncTrigger};
     use crate::storage::{
         Database, FilterRepository, PomodoroRepository, ProjectRepository, SectionRepository,
         SyncRepository, SyncStateRecord, TagRepository, TaskRepository,
@@ -19458,5 +19646,431 @@ mod tests {
             .expect("network guard should apply");
         assert!(!config.integrations.todoist.enabled);
         assert!(!config.integrations.todoist.sync_on_startup);
+    }
+
+    fn install_recording_hooks(app: &mut App) -> RecordingHookRunner {
+        let runner = RecordingHookRunner::default();
+        let command = HookCommandConfig {
+            program: "hook".to_string(),
+            ..HookCommandConfig::default()
+        };
+        let config = HooksConfig {
+            pomodoro_started: vec![command.clone()],
+            pomodoro_paused: vec![command.clone()],
+            pomodoro_resumed: vec![command.clone()],
+            pomodoro_completed: vec![command.clone()],
+            pomodoro_voided: vec![command.clone()],
+            break_started: vec![command.clone()],
+            break_completed: vec![command.clone()],
+            break_skipped: vec![command.clone()],
+            task_created: vec![command.clone()],
+            task_updated: vec![command.clone()],
+            task_deleted: vec![command.clone()],
+            task_completed: vec![command.clone()],
+            sync_failed: vec![command],
+        };
+        app.hooks = HookDispatcher::new(config, Box::new(runner.clone()));
+        runner
+    }
+
+    fn hook_env<'a>(invocation: &'a HookInvocation, name: &str) -> Option<&'a str> {
+        invocation
+            .env
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn create_task_via_popup(app: &mut App, title: &str) -> TaskId {
+        app.handle_key(crossterm::event::KeyCode::Char('8'))
+            .expect("focus should switch");
+        app.handle_key(crossterm::event::KeyCode::Char('c'))
+            .expect("popup should open");
+        for character in title.chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be created");
+        app.selected_task().expect("task should be selected").id
+    }
+
+    #[test]
+    fn hooks_follow_pomodoro_and_break_lifecycle() {
+        let mut app = test_app();
+        let runner = install_recording_hooks(&mut app);
+        let now = Local::now();
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('p'),
+            now + ChronoDuration::minutes(3),
+        )
+        .expect("timer should pause");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('s'),
+            now + ChronoDuration::minutes(4),
+        )
+        .expect("timer should resume");
+        // Starting an already running timer is a no-op and must not emit.
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('s'),
+            now + ChronoDuration::minutes(5),
+        )
+        .expect("start should be ignored");
+        let focus_done = now + ChronoDuration::minutes(4 + 25);
+        app.on_tick_at(focus_done).expect("focus should complete");
+        app.on_tick_at(focus_done + ChronoDuration::minutes(5))
+            .expect("break should complete");
+
+        assert_eq!(
+            runner.events(),
+            vec![
+                "pomodoro_started",
+                "pomodoro_paused",
+                "pomodoro_resumed",
+                "pomodoro_completed",
+                "break_started",
+                "break_completed",
+            ]
+        );
+        let invocations = runner.invocations();
+        assert_eq!(hook_env(&invocations[0], "TRIGINTA_PHASE"), Some("focus"));
+        assert_eq!(
+            hook_env(&invocations[1], "TRIGINTA_ELAPSED_SECONDS"),
+            Some("180")
+        );
+        assert_eq!(
+            hook_env(&invocations[3], "TRIGINTA_DURATION_SECONDS"),
+            Some("1500")
+        );
+        assert_eq!(
+            hook_env(&invocations[4], "TRIGINTA_PHASE"),
+            Some("short_break")
+        );
+        assert_eq!(
+            hook_env(&invocations[5], "TRIGINTA_PHASE"),
+            Some("short_break")
+        );
+    }
+
+    #[test]
+    fn hooks_report_voided_pomodoros_and_skipped_breaks() {
+        let mut app = test_app();
+        let runner = install_recording_hooks(&mut app);
+        let now = Local::now();
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('x'),
+            now + ChronoDuration::minutes(2),
+        )
+        .expect("focus should void");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('s'),
+            now + ChronoDuration::minutes(3),
+        )
+        .expect("timer should start");
+        let focus_done = now + ChronoDuration::minutes(28);
+        app.on_tick_at(focus_done).expect("focus should complete");
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('x'),
+            focus_done + ChronoDuration::minutes(1),
+        )
+        .expect("break should be skipped");
+
+        assert_eq!(
+            runner.events(),
+            vec![
+                "pomodoro_started",
+                "pomodoro_voided",
+                "pomodoro_started",
+                "pomodoro_completed",
+                "break_started",
+                "break_skipped",
+            ]
+        );
+        assert_eq!(
+            hook_env(&runner.invocations()[1], "TRIGINTA_ELAPSED_SECONDS"),
+            Some("120")
+        );
+    }
+
+    #[test]
+    fn quitting_with_running_pomodoro_emits_voided_hook() {
+        let mut app = test_app();
+        let runner = install_recording_hooks(&mut app);
+        let now = Local::now();
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        runner.clear();
+        app.handle_key_at(
+            crossterm::event::KeyCode::Char('q'),
+            now + ChronoDuration::seconds(12),
+        )
+        .expect("quit should succeed");
+
+        assert!(app.should_quit());
+        assert_eq!(runner.events(), vec!["pomodoro_voided"]);
+    }
+
+    #[test]
+    fn pomodoro_hooks_include_the_assigned_task() {
+        let mut app = test_app();
+        let task_id = create_task_via_popup(&mut app, "Write report");
+        app.handle_key(crossterm::event::KeyCode::Char('a'))
+            .expect("assignment should toggle on");
+        app.handle_key(crossterm::event::KeyCode::Char('1'))
+            .expect("focus should switch");
+        let runner = install_recording_hooks(&mut app);
+        let now = Local::now();
+
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        app.on_tick_at(now + ChronoDuration::minutes(25))
+            .expect("focus should complete");
+
+        let invocations = runner.invocations();
+        let completed = &invocations[1];
+        assert_eq!(completed.event.as_str(), "pomodoro_completed");
+        let expected_task_id = task_id.0.to_string();
+        assert_eq!(
+            hook_env(completed, "TRIGINTA_TASK_ID"),
+            Some(expected_task_id.as_str())
+        );
+        assert_eq!(
+            hook_env(completed, "TRIGINTA_TASK_TITLE"),
+            Some("Write report")
+        );
+        assert_eq!(hook_env(completed, "TRIGINTA_PROJECT"), Some("Inbox"));
+        // Breaks are not tied to a task.
+        assert_eq!(hook_env(&invocations[2], "TRIGINTA_TASK_ID"), None);
+    }
+
+    #[test]
+    fn hooks_follow_local_task_changes() {
+        let mut app = test_app();
+        let runner = install_recording_hooks(&mut app);
+        let now = Local::now();
+
+        let task_id = create_task_via_popup(&mut app, "Plan sprint");
+        app.handle_key(crossterm::event::KeyCode::Char('e'))
+            .expect("editor should open");
+        for character in " notes".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character))
+                .expect("typing should succeed");
+        }
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("task should be updated");
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
+            .expect("status should toggle");
+        app.handle_key(crossterm::event::KeyCode::Char('f'))
+            .expect("filter should toggle");
+        // Reopening a task is not a hook event.
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), now)
+            .expect("status should toggle back");
+        app.handle_key(crossterm::event::KeyCode::Char('d'))
+            .expect("delete dialog should open");
+        app.handle_key(crossterm::event::KeyCode::Enter)
+            .expect("delete should confirm");
+
+        assert_eq!(
+            runner.events(),
+            vec![
+                "task_created",
+                "task_updated",
+                "task_completed",
+                "task_deleted"
+            ]
+        );
+        let invocations = runner.invocations();
+        let expected_task_id = task_id.0.to_string();
+        for invocation in &invocations {
+            assert_eq!(
+                hook_env(invocation, "TRIGINTA_TASK_ID"),
+                Some(expected_task_id.as_str())
+            );
+            assert_eq!(hook_env(invocation, "TRIGINTA_EVENT_SOURCE"), Some("local"));
+        }
+        assert_eq!(
+            hook_env(&invocations[1], "TRIGINTA_TASK_TITLE"),
+            Some("Plan sprint notes")
+        );
+        assert_eq!(
+            hook_env(&invocations[3], "TRIGINTA_TASK_TITLE"),
+            Some("Plan sprint notes")
+        );
+    }
+
+    #[test]
+    fn completing_recurring_task_does_not_report_next_occurrence_as_created() {
+        let mut app = test_app();
+        create_task_via_popup(&mut app, "Water plants every day");
+        let runner = install_recording_hooks(&mut app);
+
+        app.handle_key_at(crossterm::event::KeyCode::Char(' '), Local::now())
+            .expect("status should toggle");
+
+        assert_eq!(
+            app.screen_data.tasks.len(),
+            2,
+            "a next occurrence should have been created"
+        );
+        assert_eq!(runner.events(), vec!["task_completed"]);
+    }
+
+    #[test]
+    fn sync_errors_emit_sync_failed_hook() {
+        let mut app = test_app_with_todoist_enabled();
+        let runner = install_recording_hooks(&mut app);
+        let now = Local::now();
+
+        app.finish_todoist_sync_cycle(SyncTrigger::Poll, Err("network down".to_string()), now)
+            .expect("sync cycle should finish");
+        app.finish_todoist_sync_cycle(
+            SyncTrigger::Poll,
+            Ok(sync_report(Some("outbox delivery failed"))),
+            now,
+        )
+        .expect("sync cycle should finish");
+        app.finish_todoist_sync_cycle(SyncTrigger::Poll, Ok(sync_report(None)), now)
+            .expect("sync cycle should finish");
+
+        let invocations = runner.invocations();
+        assert_eq!(runner.events(), vec!["sync_failed", "sync_failed"]);
+        assert_eq!(
+            hook_env(&invocations[0], "TRIGINTA_SYNC_ERROR"),
+            Some("network down")
+        );
+        assert_eq!(
+            hook_env(&invocations[0], "TRIGINTA_EVENT_SOURCE"),
+            Some("todoist")
+        );
+        assert_eq!(
+            hook_env(&invocations[1], "TRIGINTA_SYNC_ERROR"),
+            Some("outbox delivery failed")
+        );
+    }
+
+    fn sync_report(last_error: Option<&str>) -> SyncReport {
+        SyncReport {
+            provider: "todoist",
+            configured: true,
+            trigger: SyncTrigger::Poll,
+            status: if last_error.is_some() {
+                "degraded"
+            } else {
+                "ok"
+            }
+            .to_string(),
+            pending_outbox: 0,
+            delivered_outbox: 0,
+            failed_outbox: 0,
+            last_error: last_error.map(str::to_string),
+            preferred_language: None,
+        }
+    }
+
+    #[test]
+    fn tasks_completed_by_incoming_sync_emit_only_task_completed() {
+        let mut app = test_app_with_todoist_enabled();
+        let now = Local::now();
+        let inbox_id = app.inbox_project_id();
+        let remote_done = app
+            .database
+            .task_repository()
+            .create("Done in Todoist", inbox_id, None, now)
+            .expect("task should create");
+        let still_open = app
+            .database
+            .task_repository()
+            .create("Still open", inbox_id, None, now)
+            .expect("task should create");
+        app.refresh_tasks().expect("tasks should refresh");
+        let runner = install_recording_hooks(&mut app);
+
+        // Simulate the sync worker applying remote changes on its own connection.
+        app.database
+            .task_repository()
+            .update_status(remote_done.id, TaskStatus::Done, Some(now))
+            .expect("status should update");
+        app.database
+            .task_repository()
+            .create("Created in Todoist", inbox_id, None, now)
+            .expect("task should create");
+        app.database
+            .task_repository()
+            .update(
+                still_open.id,
+                &TaskUpdate {
+                    title: "Renamed in Todoist".to_string(),
+                    description: still_open.description.clone(),
+                    project_id: still_open.project_id,
+                    section_id: still_open.section_id,
+                    parent_task_id: still_open.parent_task_id,
+                    priority: still_open.priority,
+                    due: still_open.due.clone(),
+                },
+            )
+            .expect("task should update");
+        app.finish_todoist_sync_cycle(SyncTrigger::Poll, Ok(sync_report(None)), now)
+            .expect("sync cycle should finish");
+
+        let invocations = runner.invocations();
+        assert_eq!(runner.events(), vec!["task_completed"]);
+        let expected_task_id = remote_done.id.0.to_string();
+        assert_eq!(
+            hook_env(&invocations[0], "TRIGINTA_TASK_ID"),
+            Some(expected_task_id.as_str())
+        );
+        assert_eq!(
+            hook_env(&invocations[0], "TRIGINTA_EVENT_SOURCE"),
+            Some("todoist")
+        );
+    }
+
+    #[test]
+    fn no_configured_hooks_means_nothing_runs() {
+        let mut app = test_app();
+        let runner = RecordingHookRunner::default();
+        app.hooks = HookDispatcher::new(HooksConfig::default(), Box::new(runner.clone()));
+        let now = Local::now();
+
+        create_task_via_popup(&mut app, "Quiet task");
+        app.handle_key(crossterm::event::KeyCode::Char('1'))
+            .expect("focus should switch");
+        app.handle_key_at(crossterm::event::KeyCode::Char('s'), now)
+            .expect("timer should start");
+        app.on_tick_at(now + ChronoDuration::minutes(25))
+            .expect("focus should complete");
+
+        assert!(runner.invocations().is_empty());
+    }
+
+    #[test]
+    fn hook_failures_show_a_temporary_status_warning() {
+        let mut app = test_app();
+        let runner = install_recording_hooks(&mut app);
+        let now = Local::now();
+        runner.push_failure(HookFailure {
+            event: HookEvent::PomodoroCompleted,
+            program: "notify-send".to_string(),
+            reason: "exited with exit status: 1".to_string(),
+        });
+
+        assert_eq!(app.hook_warning_text_at(now), None);
+        app.on_tick_at(now).expect("tick should succeed");
+
+        assert_eq!(
+            app.hook_warning_text_at(now),
+            Some("pomodoro_completed hook 'notify-send' exited with exit status: 1")
+        );
+        assert_eq!(
+            app.hook_warning_text_at(now + ChronoDuration::seconds(6)),
+            None
+        );
     }
 }

@@ -2137,6 +2137,15 @@ fn render_status_bar(
         return;
     }
 
+    if let Some(warning) = app.hook_warning_text() {
+        frame.render_widget(
+            Paragraph::new(Line::from(ellipsize_end(warning, center_width as usize)).centered())
+                .style(Style::default().fg(palette.error)),
+            center_area,
+        );
+        return;
+    }
+
     let center_text = footer_shortcuts_line(app, symbols, center_width as usize);
     if !center_text.is_empty() {
         frame.render_widget(
