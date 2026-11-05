@@ -77,6 +77,9 @@ but some quirks and edge cases may still be present.
 - Keyboard-first interface
 - Configurable timer lengths, themes, glyph/ascii mode, sorting, among other
   things
+- Hooks that run your own commands on pomodoro, break, task, and sync events,
+  for example to send a desktop notification when a pomodoro ends (see
+  [Configuration](docs/configuration.md#hooks))
 - Local persistence with no external/online dependencies
 
 ## Platform Support
@@ -181,8 +184,6 @@ project evolves.
 
 - Notifications
 - Mouse support where it makes sense
-- Execute external commands upon app events (pomodoro
-  started/cancelled/finished, task created/completed, etc)
 
 ### Backlog
 
