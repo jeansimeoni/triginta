@@ -465,6 +465,7 @@ pub struct AppConfig {
     pub timer: TimerSettings,
     pub stats: StatsSettings,
     pub integrations: IntegrationConfig,
+    pub hooks: HooksConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -541,6 +542,118 @@ impl Default for TokenCommandConfig {
     }
 }
 
+/// Commands to run after app events, keyed by event name.
+///
+/// Each event accepts any number of commands. Unknown event names are
+/// rejected so a typo does not silently disable a hook.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HooksConfig {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pomodoro_started: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pomodoro_paused: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pomodoro_resumed: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pomodoro_completed: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pomodoro_voided: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub break_started: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub break_completed: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub break_skipped: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub task_created: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub task_updated: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub task_deleted: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub task_completed: Vec<HookCommandConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sync_failed: Vec<HookCommandConfig>,
+}
+
+impl HooksConfig {
+    pub fn is_empty(&self) -> bool {
+        self.entries()
+            .iter()
+            .all(|(_, commands)| commands.is_empty())
+    }
+
+    /// Every configurable event name paired with its commands.
+    pub fn entries(&self) -> [(&'static str, &[HookCommandConfig]); 13] {
+        [
+            ("pomodoro_started", &self.pomodoro_started),
+            ("pomodoro_paused", &self.pomodoro_paused),
+            ("pomodoro_resumed", &self.pomodoro_resumed),
+            ("pomodoro_completed", &self.pomodoro_completed),
+            ("pomodoro_voided", &self.pomodoro_voided),
+            ("break_started", &self.break_started),
+            ("break_completed", &self.break_completed),
+            ("break_skipped", &self.break_skipped),
+            ("task_created", &self.task_created),
+            ("task_updated", &self.task_updated),
+            ("task_deleted", &self.task_deleted),
+            ("task_completed", &self.task_completed),
+            ("sync_failed", &self.sync_failed),
+        ]
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (event, commands) in self.entries() {
+            for (index, command) in commands.iter().enumerate() {
+                if command.program.trim().is_empty() {
+                    bail!("hooks.{event}[{index}].program cannot be empty");
+                }
+                if command.timeout_ms == 0 {
+                    bail!("hooks.{event}[{index}].timeout_ms must be greater than zero");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One external command run by a hook. Commands run without a shell.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HookCommandConfig {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Export `TRIGINTA_*` environment variables describing the event.
+    pub env: bool,
+    /// Replace `{placeholder}` tokens in `args` with event values.
+    pub expand_placeholders: bool,
+    /// Send the full event to the command as JSON.
+    pub event_data: HookEventDataFormat,
+    pub timeout_ms: u64,
+}
+
+impl Default for HookCommandConfig {
+    fn default() -> Self {
+        Self {
+            program: String::new(),
+            args: Vec::new(),
+            env: true,
+            expand_placeholders: true,
+            event_data: HookEventDataFormat::None,
+            timeout_ms: 5_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum HookEventDataFormat {
+    #[default]
+    None,
+    Json,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -580,6 +693,8 @@ struct AppConfigFile {
     timer: TimerConfigFile,
     stats: StatsConfigFile,
     integrations: IntegrationConfigFile,
+    #[serde(skip_serializing_if = "HooksConfig::is_empty")]
+    hooks: HooksConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -754,6 +869,7 @@ impl From<AppConfigFile> for AppConfig {
                     },
                 },
             },
+            hooks: value.hooks,
         }
     }
 }
@@ -805,6 +921,7 @@ impl From<&AppConfig> for AppConfigFile {
                     },
                 },
             },
+            hooks: value.hooks.clone(),
         }
     }
 }
@@ -864,6 +981,7 @@ pub fn load_app_config(paths: &AppPaths) -> Result<AppConfig> {
     config.timer.validate()?;
     config.stats.validate()?;
     config.integrations.validate()?;
+    config.hooks.validate()?;
     Ok(config)
 }
 
@@ -871,6 +989,7 @@ pub fn save_app_config(paths: &AppPaths, config: &AppConfig) -> Result<()> {
     config.timer.validate()?;
     config.stats.validate()?;
     config.integrations.validate()?;
+    config.hooks.validate()?;
     paths.ensure_dirs()?;
 
     let (path, format) = active_config_path(paths)?
@@ -1018,8 +1137,9 @@ mod tests {
     use std::{fs, path::PathBuf, time::Duration};
 
     use super::{
-        AppConfig, AppPaths, GlyphMode, ProjectSortOrder, TaskSortOrder, TimerSettings,
-        TodoistTokenSource, db_filename, load_app_config, parse_duration_string, save_app_config,
+        AppConfig, AppPaths, GlyphMode, HookCommandConfig, HookEventDataFormat, ProjectSortOrder,
+        TaskSortOrder, TimerSettings, TodoistTokenSource, db_filename, load_app_config,
+        parse_duration_string, save_app_config,
     };
 
     #[test]
@@ -1399,5 +1519,173 @@ token_source = "command"
             parse_duration_string("25m").expect("minutes should parse"),
             Duration::from_secs(25 * 60)
         );
+    }
+
+    #[test]
+    fn load_app_config_parses_multiple_hooks_per_event_from_toml() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+        paths.ensure_dirs().expect("dirs should exist");
+        fs::write(
+            &paths.config_toml_path,
+            r#"[[hooks.pomodoro_completed]]
+program = "notify-send"
+args = ["Triginta", "Focus done: {task_title}"]
+
+[[hooks.pomodoro_completed]]
+program = "/usr/local/bin/log-pomodoro"
+env = false
+expand_placeholders = false
+event_data = "json"
+timeout_ms = 10000
+
+[[hooks.sync_failed]]
+program = "notify-send"
+args = ["{error}"]
+"#,
+        )
+        .expect("config should be written");
+
+        let config = load_app_config(&paths).expect("config should load");
+        assert_eq!(
+            config.hooks.pomodoro_completed,
+            vec![
+                HookCommandConfig {
+                    program: "notify-send".to_string(),
+                    args: vec![
+                        "Triginta".to_string(),
+                        "Focus done: {task_title}".to_string()
+                    ],
+                    ..HookCommandConfig::default()
+                },
+                HookCommandConfig {
+                    program: "/usr/local/bin/log-pomodoro".to_string(),
+                    args: Vec::new(),
+                    env: false,
+                    expand_placeholders: false,
+                    event_data: HookEventDataFormat::Json,
+                    timeout_ms: 10_000,
+                },
+            ]
+        );
+        assert_eq!(config.hooks.sync_failed.len(), 1);
+        assert!(config.hooks.task_created.is_empty());
+    }
+
+    #[test]
+    fn hook_command_defaults_enable_env_and_placeholders_without_event_data() {
+        let command = HookCommandConfig::default();
+        assert!(command.env);
+        assert!(command.expand_placeholders);
+        assert_eq!(command.event_data, HookEventDataFormat::None);
+        assert_eq!(command.timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn load_app_config_parses_hooks_from_yaml() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+        paths.ensure_dirs().expect("dirs should exist");
+        fs::write(
+            &paths.config_yaml_path,
+            r#"hooks:
+  task_completed:
+    - program: notify-send
+      args: ["Done", "{task_title}"]
+    - program: /usr/local/bin/sync-tracker
+      event_data: json
+"#,
+        )
+        .expect("config should be written");
+
+        let config = load_app_config(&paths).expect("config should load");
+        assert_eq!(config.hooks.task_completed.len(), 2);
+        assert_eq!(
+            config.hooks.task_completed[1].event_data,
+            HookEventDataFormat::Json
+        );
+    }
+
+    #[test]
+    fn load_app_config_rejects_unknown_hook_event() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+        paths.ensure_dirs().expect("dirs should exist");
+        fs::write(
+            &paths.config_toml_path,
+            r#"[[hooks.pomodoro_finished]]
+program = "notify-send"
+"#,
+        )
+        .expect("config should be written");
+
+        let error = load_app_config(&paths).expect_err("unknown hook event should fail");
+        assert!(format!("{error:#}").contains("pomodoro_finished"));
+    }
+
+    #[test]
+    fn load_app_config_rejects_unknown_hook_field() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+        paths.ensure_dirs().expect("dirs should exist");
+        fs::write(
+            &paths.config_toml_path,
+            r#"[[hooks.pomodoro_completed]]
+program = "notify-send"
+stdin = "json"
+"#,
+        )
+        .expect("config should be written");
+
+        let error = load_app_config(&paths).expect_err("unknown hook field should fail");
+        assert!(format!("{error:#}").contains("stdin"));
+    }
+
+    #[test]
+    fn load_app_config_rejects_hook_without_program() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+        paths.ensure_dirs().expect("dirs should exist");
+        fs::write(
+            &paths.config_toml_path,
+            r#"[[hooks.task_deleted]]
+args = ["deleted"]
+"#,
+        )
+        .expect("config should be written");
+
+        let error = load_app_config(&paths).expect_err("hook without program should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("hooks.task_deleted[0].program cannot be empty")
+        );
+    }
+
+    #[test]
+    fn save_app_config_preserves_hooks_and_omits_empty_section() {
+        let base = tempfile::tempdir().expect("tempdir should be created");
+        let paths =
+            AppPaths::from_data_dir(base.path().to_path_buf()).expect("paths should resolve");
+
+        save_app_config(&paths, &AppConfig::default()).expect("default config should save");
+        let saved = fs::read_to_string(&paths.config_toml_path).expect("config should exist");
+        assert!(!saved.contains("hooks"));
+
+        let mut config = AppConfig::default();
+        config.hooks.break_completed.push(HookCommandConfig {
+            program: "notify-send".to_string(),
+            args: vec!["Break over".to_string()],
+            ..HookCommandConfig::default()
+        });
+        save_app_config(&paths, &config).expect("config with hooks should save");
+
+        let reloaded = load_app_config(&paths).expect("saved config should load");
+        assert_eq!(reloaded.hooks, config.hooks);
     }
 }
